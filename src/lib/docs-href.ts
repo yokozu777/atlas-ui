@@ -63,7 +63,7 @@ export function isAllowedDocRel(rel: string): boolean {
   if (!n.includes("/")) {
     return true;
   }
-  return n.startsWith("docs/");
+  return n.startsWith("docs/") || n.startsWith("documentation/");
 }
 
 export function menuDocId(currentId: string): string {

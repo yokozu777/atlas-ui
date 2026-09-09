@@ -1,106 +1,226 @@
 # atlas-ui
 
-Alpha/lab console for **projects**. Each project has an immutable **kind**: `atlas` (clusterctl) or `ansible` (playbooks). Home is `/projects`. Linux controller host, bind-mounts for Atlas trees.
+**A self-hosted Infrastructure as Code console for Ansible and Atlas clusterctl.**
+Design, manage, and execute infrastructure as code — with Git integration, distributed workers, and a built-in scheduler.
 
-The control plane lives in this repo under **`hub/`** (FastAPI + worker). A separate StarGate checkout is not required.
+---
 
-**Local clusterctl** (`pnpm dev` without hub): binds **127.0.0.1**. Local `/api/jobs` spawn is never mixed with worker executions.
+## Documentation
 
-**Hub mode:** `./scripts/hub-up.sh`, then `./scripts/dev-hub.sh` (login cookie, BFF `/api/hub/*`). Hub API listens on **:8000** (port 6000 is blocked as a “bad port” in browsers).
+**[→ Full documentation](documentation/README.md)** — Docker setup, first login, project quick start, Git sync.
 
-## Requirements
+---
 
-- Node.js 22+ (pnpm)
-- Python 3.11+ (hub API/worker)
-- A local atlas-clusterctl clone (`../atlas-clusterctl`) for `kind=atlas` inspect/run
-- Linux controller host
-
-## Run (hub + console)
+## Quick Start
 
 ```bash
+git clone git@github.com:yokozu777/atlas-ui.git
 cd atlas-ui
-./scripts/hub-up.sh          # FastAPI :8000 + worker
-./scripts/dev-hub.sh         # http://127.0.0.1:3000
+cp .env.example .env   # absolute ATLAS_* paths and SSH_KEY
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
 ```
 
-First login: username `admin`. If `ATLAS_ADMIN_PASSWORD` is unset, the one-time password is in `data/auth/admin-initial.txt` (mode 0600) and must be changed after sign-in. JWT and encryption keys are written once under `data/auth/` when `JWT_SECRET_KEY` / `GLOBAL_SECRETS_ENCRYPTION_KEY` are empty.
+Open http://localhost:3000 — username `admin`, password from `data/auth/admin-initial.txt` (change it after first login).
 
-Node is picked up from `~/.local/node/bin` if `pnpm` is not on PATH. Stop hub: `./scripts/hub-down.sh`.
+Hub API: http://localhost:8000. Bind-mounts and `.env` are required for atlas/clusterctl runs; details in [Docker quick start](documentation/01-docker-quickstart.md).
 
-Docker (API + worker + UI):
+---
 
-```bash
-cp .env.example .env   # set absolute ATLAS_* and SSH_KEY
-docker compose up -d --build
-```
+## What It Is
 
-Open **http://localhost:3000**. Hub API: http://localhost:8000.
+A **self-hosted Infrastructure as Code management platform** for teams that already live in Ansible and clusterctl.
 
-Atlas trees are bind-mounted at the **same host path** inside hub and worker (not remapped to `/opt/…`). That is required for `execution.mode: docker`: clusterctl bind-mounts those paths into the executor image via the host Docker daemon (`/var/run/docker.sock` on the worker). Do **not** set `CLUSTER_EXECUTOR_FORCE_LOCAL` on the worker — clusterctl sets that only inside the executor container.
+It turns playbooks, inventory YAML, and Atlas cluster definitions
+into a **managed engineering system** with transparent changes, repeatable executions, and controlled access.
 
-| Worker | clusterctl `local` | clusterctl `docker` |
-|--------|--------------------|---------------------|
-| Host `./scripts/hub-worker.sh` | ansible on the host | `docker run` on the host |
-| Compose `worker` | ansible in the worker image | docker CLI + sock; host paths must match |
+Two immutable project kinds:
 
-`ATLAS_CLUSTER_ROOT` (clusterctl checkout with `./cluster`), `ATLAS_CLUSTERS_ROOT`, `ATLAS_WORKSPACE_ROOT`, and `SSH_KEY` must be readable at those paths on the worker. Host worker: if `ATLAS_CLUSTER_ROOT` is unset, `hub-worker.sh` uses `../atlas-clusterctl` when `./cluster` exists. Paths also come from `{ATLAS_CLUSTER_ROOT}/.config/config.yaml` when env/project fields are empty.
+- **ansible** — playbooks, inventory, Git sources, vaults, cron scheduler
+- **atlas** — clusterctl clusters (`cluster.yaml`, repos, lock SHA, docker or local executor)
 
-Run **Advanced → Executor**: cluster default (`cluster.yaml`), or override `--executor local|docker`.
+The platform helps teams to:
 
-Without hub (clusterctl-only, no login):
+- bring order to complex infrastructure
+- accelerate change delivery
+- reduce human errors
+- scale IaC across dozens or hundreds of servers
 
-```bash
-./scripts/dev.sh          # http://127.0.0.1:3000
-```
+**This is not just Ansible.**
+**It is a control plane for Infrastructure as Code and platform engineers.**
 
-First screen without hub: path to the clusterctl checkout (`./cluster --version`). Saved in `~/.config/atlas-ui/config.json`. Default: env `ATLAS_CLUSTER_ROOT`.
+## User Interface Overview
 
-```bash
-pnpm build
-pnpm start
-```
+### Dashboard
+<p align="center">
+ <img src="documentation/images/dashboard.png" width="900">
+</p>
+Cluster overview: status, host count, pipeline phases, and shortcuts to plan, validate, smoke, and run.
 
-Hub tests:
+---
 
-```bash
-cd hub
-python3 -m venv venv && ./venv/bin/pip install -r requirements.txt -r worker/requirements.txt
-./venv/bin/python -m unittest discover -s tests -v
-```
+### Hosts & Inventory
+<p align="center">
+ <img src="documentation/images/hosts.png" width="900">
+</p>
+Manage hosts, groups, and inventory files with visibility into variables and SSH connections.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
+---
 
-## Smoke
+### Playbook Editor
+<p align="center">
+ <img src="documentation/images/playbook_editor.png" width="900">
+</p>
+Open playbooks from Git or clusterctl clones, edit YAML in the browser, preview, and execute with forks, timeout, verbosity, and dry-run.
 
-1. Open `/` — it redirects to **Projects**. Log in if hub is running (`admin` + password from `data/auth/admin-initial.txt` or `ATLAS_ADMIN_PASSWORD`).
-2. **New project** → `ansible`: Open → **Secrets** → **Hosts** (inventory, add host, bind SSH, Import/Export ZIP) → **Git** (Test, Sync, autosync) → **Playbooks** (Run, SSE). Optional: **Schedule**, **Vaults** (keys, snippet encrypt, vault files), **Users** / permissions.
-3. **New project** → `atlas` with cluster id (e.g. `dev/k8s`): Open → **Overview** → **Hosts / Vars / Logs**. **Run** queues on the worker when hub is up (Advanced: executor local/docker, dry-run, root-ssh).
-   - Hub: Overview/Vars/Hosts/Logs use `POST /atlas/inspect` on the API host (`ATLAS_CLUSTER_ROOT` + inventory leaf). Vars save is **read-only on hub**. Init / repos sync / workspace reset stay local-only.
-   - Without hub: local `/api/jobs` spawn only.
-4. Ansible **Hosts → Check** queues `POST /check_host` and streams the worker log. Playbook **Run**, atlas **Queue on worker**, secrets, vault, git, roles YAML, users, permissions, and workers (create/rotate token) go through the hub API. Visual Role Configurator is not in the product. **Settings**: Archive / Restore / Delete.
-5. Init is under the atlas project (**More → Init**), not next to Projects.
+---
 
-Hub Run and local jobs stay separate lists.
+### Cluster definition (Git-native)
+<p align="center">
+ <img src="documentation/images/cluster_definition.png" width="900">
+</p>
+For atlas projects: `cluster.yaml`, playbook repos, HEAD and lock SHA, per-repo Git pull keys, and Sync / Sync all.
 
-## CLI mapping
+---
 
-| UI | `./cluster` |
-|----|-------------|
-| Clusters | `list --json`, `use` |
-| Init | `init --template` / `--from` / `--dns-suffix` / `--force` |
-| Overview | `plan --json`, `stages --json`, `validate --json`, `smoke --json` |
-| Run | `run --phases` `--tags` `--limit` `-e` `--root-ssh` `--git-ssh` `--dry-run` `--executor` |
-| Repos | `repos status --json`, `repos sync`, `repos show` |
-| Logs | `workspace/…/logs/<stamp>/run.log` |
-| Config | `config show --json`, `config effective --json` |
-| Workspace | `workspace show --json`, `workspace id`, `workspace reset --yes` |
+### Roles
+<p align="center">
+ <img src="documentation/images/roles.png" width="900">
+</p>
+Browse roles from synced repositories, edit `defaults` and `tasks`, and save back to the clone. Role Settings in the sidebar follows the same Git trees.
 
-Mutating jobs (`run`, `init`, `repos sync`, `workspace reset`) are **single-flight**. Cancel sends SIGTERM to the process group; Ansible children may outlive the wrapper.
+---
 
-Secrets files (`atlas-*.secrets.yml`) are not opened in the UI.
+### Runs & Executions
+<p align="center">
+ <img src="documentation/images/runs.png" width="900">
+</p>
+Track execution history, inspect logs, and monitor playbook or clusterctl runs in real time.
 
-`--root-ssh` requires `atlas.execute_root_ssh` (not granted by `atlas.execute` alone).
+---
+
+### Workers
+<p align="center">
+ <img src="documentation/images/workers.png" width="900">
+</p>
+Manage execution workers, scale horizontally, and control parallel infrastructure operations.
+
+---
+
+## What It Brings Together
+
+- Ansible inventory
+- roles and playbooks
+- host and group variables
+- Atlas `cluster.yaml` and playbook repos
+- Git-based workflows and lock SHA
+- task execution and scheduling
+- parallel workers and execution queues
+
+All combined into a **single visual, manageable, and reproducible interface**,
+built for production environments and collaborative teams.
+
+---
+
+## Why Teams Need It
+
+As infrastructure grows:
+
+- manual runs become risky
+- YAML stops being “self-explanatory”
+- changes lose auditability
+- different engineers solve the same problems differently
+
+The platform addresses this by:
+
+- standardizing infrastructure workflows
+- making changes observable and auditable
+- reducing the *bus factor*
+- accelerating *day-2 operations*
+- turning infrastructure into a **predictable product**, not a set of scripts
+
+---
+
+## Key Features
+
+### Inventory & Variables
+
+- Host and group management
+- Host vars and group vars
+- Visual control of variable scope and inventory files
+- Atlas inspect of the live clusterctl inventory leaf
+
+### Playbook Editor
+
+- UI-based YAML editor
+- Target selection by groups or individual hosts
+- Execution parameter control:
+  - forks
+  - timeout
+  - verbosity
+  - dry-run
+- Preview the final rendered YAML before execution
+
+### Clusterctl (atlas projects)
+
+- Cluster overview from `plan` / `stages` / `validate`
+- Repos sync with lock SHA
+- Run with phases, tags, `--limit`, extra vars, `--root-ssh`, executor local or docker
+- Workspace and run logs on disk under `ATLAS_WORKSPACE_ROOT`
+
+### Execution Engine & Workers
+
+- Multiple workers for parallel execution
+- Horizontal scalability under load
+- Project-level task isolation
+- Real-time execution monitoring
+
+### Scheduler
+
+- Cron-like task scheduler on ansible playbooks
+- Recurring executions
+- Automated day-2 operations
+
+### Security & Access
+
+- Centralized users and permissions
+- Controlled `become` / `--root-ssh`
+- SSH keys and Git pull keys stored in the hub, not in Git
+- Project and environment isolation
+
+---
+
+## Typical Use Cases
+
+- Cluster management (Kubernetes, Redis, PostgreSQL, service nodes)
+- Server configuration and hardening
+- Backup, restore, and compliance automation
+- Scheduled maintenance
+- CI/CD for infrastructure
+- Day-2 operations
+
+---
+
+## Product Philosophy
+
+> **Infrastructure should be reproducible, auditable, and boring.**
+> This platform makes it visible, manageable, and safe.
+
+---
+
+## How It Stands Out
+
+- UI **on top of IaC**, not instead of it
+- Git as the source of truth for playbooks and cluster definitions
+- Ansible projects and atlas-clusterctl in one console
+- No vendor lock-in
+- Full transparency for every change
+- Suitable for both small teams and large production clusters
+
+---
 
 ## License
 
-Apache-2.0 — [`LICENSE`](LICENSE)
+Apache-2.0 — see [LICENSE](LICENSE).
+
+Local development, tests, and clusterctl CLI mapping: [CONTRIBUTING.md](CONTRIBUTING.md).

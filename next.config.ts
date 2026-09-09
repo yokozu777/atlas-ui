@@ -4,7 +4,7 @@ const nextConfig: NextConfig = {
   output: "standalone",
   productionBrowserSourceMaps: false,
   outputFileTracingIncludes: {
-    "/*": ["./docs/**/*.md"],
+    "/*": ["./docs/**/*.md", "./documentation/**/*.md", "./README.md", "./CONTRIBUTING.md"],
   },
   outputFileTracingExcludes: {
     "/*": [".env", ".env.*", "data/**"],

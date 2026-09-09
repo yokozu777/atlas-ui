@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Snapshot the current committed tree as one release commit and push to GitHub.
-# Lab history on Gitea is left untouched. First run creates an orphan release
-# commit; later runs parent onto the previous GitHub tip (fast-forward).
+# Stages files (gitignore still applies) and commits on the current branch if
+# needed, then snapshots that tree as a GitHub release commit + tag.
+# Lab Gitea history is not rewritten. First GitHub run is an orphan commit;
+# later runs parent onto the previous GitHub tip (fast-forward).
+# Adds/updates remote `github` to yokozu777/atlas-ui if needed.
 #
 # Usage:
-#   git remote add github git@github.com:ORG/atlas-ui.git   # once
 #   ./push-github.sh
 #   ./push-github.sh "Release 0.2.0"
 set -euo pipefail
@@ -14,19 +15,18 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 source "$ROOT/git-publish-lib.sh"
 cd "$ROOT"
 
-atlas_publish_check_tracked
-atlas_publish_warn_dirty
-
 REMOTE="${GITHUB_REMOTE:-github}"
 RELEASE_REF="${GITHUB_RELEASE_BRANCH:-release}"
 GITHUB_BRANCH="${GITHUB_HEAD_BRANCH:-main}"
-MSG="${1:-Release $(date +%Y-%m-%d)}"
+GITHUB_URL="${GITHUB_URL:-git@github.com:yokozu777/atlas-ui.git}"
+MSG="$(atlas_publish_release_message "${1:-}")"
+TAG="$(atlas_publish_release_tag "${1:-}")"
 
-if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
-  echo "Remote '$REMOTE' is missing. Add it once, then retry:" >&2
-  echo "  git remote add github git@github.com:ORG/atlas-ui.git" >&2
-  exit 1
-fi
+atlas_publish_require_branch >/dev/null
+atlas_publish_stage_and_commit "$MSG"
+atlas_publish_warn_dirty
+
+atlas_publish_ensure_remote "$REMOTE" "$GITHUB_URL"
 
 url="$(git remote get-url "$REMOTE")"
 case "$url" in
@@ -39,6 +39,7 @@ esac
 
 tree="$(git rev-parse 'HEAD^{tree}')"
 git fetch "$REMOTE" "$GITHUB_BRANCH" >/dev/null 2>&1 || true
+git fetch "$REMOTE" "refs/tags/${TAG}:refs/tags/${TAG}" >/dev/null 2>&1 || true
 
 if git show-ref --verify --quiet "refs/heads/$RELEASE_REF"; then
   parent="$(git rev-parse "$RELEASE_REF")"
@@ -62,6 +63,19 @@ else
   echo "$MSG"
 fi
 
-git push "$REMOTE" "$RELEASE_REF:refs/heads/$GITHUB_BRANCH"
+release_commit="$(git rev-parse "$RELEASE_REF")"
+if git show-ref --verify --quiet "refs/tags/$TAG"; then
+  existing="$(git rev-parse "$TAG^{commit}")"
+  if [ "$existing" != "$release_commit" ]; then
+    echo "Tag $TAG already points at $existing, not $release_commit" >&2
+    exit 1
+  fi
+  echo "Tag $TAG already on the release commit"
+else
+  git tag -a "$TAG" "$release_commit" -m "$MSG"
+  echo "Tagged $TAG"
+fi
+
+git push "$REMOTE" "$RELEASE_REF:refs/heads/$GITHUB_BRANCH" "refs/tags/$TAG"
 git branch -u "$REMOTE/$GITHUB_BRANCH" "$RELEASE_REF" >/dev/null 2>&1 || true
-echo "GitHub: $url  $RELEASE_REF -> $GITHUB_BRANCH"
+echo "GitHub: $url  $RELEASE_REF -> $GITHUB_BRANCH  tag $TAG"

@@ -1,18 +1,17 @@
-# Console (this repo) + hub API + worker. Builds images from this checkout.
-# Published Hub images (no build): docker compose -f docker-compose.hub.yml up -d
+# Run atlas-ui from Docker Hub images (no local build).
 #
-# Atlas paths must be bind-mounted at the SAME host absolute path (not /opt/…).
-# clusterctl docker executor does `-v hostPath:hostPath`; the daemon behind
-# /var/run/docker.sock only sees host paths. Copy .env.example → .env first.
+#   cp .env.example .env   # absolute ATLAS_* paths and SSH_KEY
+#   docker compose -f docker-compose.hub.yml pull
+#   docker compose -f docker-compose.hub.yml up -d
 #
-# Do not set CLUSTER_EXECUTOR_FORCE_LOCAL on hub or worker — that flag is only
-# for the krang/executor container clusterctl starts.
+# Pin a release: ATLAS_UI_IMAGE_TAG=2026-09-09 docker compose -f docker-compose.hub.yml up -d
+#
+# Atlas trees must be bind-mounted at the SAME host absolute path (not /opt/…).
+# Do not set CLUSTER_EXECUTOR_FORCE_LOCAL on hub or worker.
+
 services:
   hub:
-    build:
-      context: .
-      dockerfile: hub/Dockerfile
-    image: atlas-ui-hub
+    image: yokozu/atlas-ui-hub:${ATLAS_UI_IMAGE_TAG:-latest}
     container_name: atlas-ui-hub
     ports:
       - "8000:8000"
@@ -31,10 +30,7 @@ services:
     restart: unless-stopped
 
   ui:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: atlas-ui
+    image: yokozu/atlas-ui:${ATLAS_UI_IMAGE_TAG:-latest}
     container_name: atlas-ui
     ports:
       - "3000:3000"
@@ -46,10 +42,7 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: .
-      dockerfile: hub/Dockerfile.worker
-    image: atlas-ui-worker
+    image: yokozu/atlas-ui-worker:${ATLAS_UI_IMAGE_TAG:-latest}
     container_name: atlas-ui-worker
     network_mode: host
     volumes:

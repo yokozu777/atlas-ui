@@ -274,16 +274,23 @@ export function ClusterYamlReposTab({
                   {row.state}
                 </Badge>
               </TableCell>
-              <TableCell className="font-mono text-xs">
+              <TableCell className="font-mono text-xs whitespace-nowrap">
                 {shortSha(row.head)}
               </TableCell>
-              <TableCell className="font-mono text-xs">
-                {shortSha(row.lockSha)}
-                {row.syncAction ? (
-                  <span className="ml-1 text-muted-foreground">
-                    {row.syncAction}
+              <TableCell>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className="font-mono text-xs whitespace-nowrap"
+                    title={row.lockSha || undefined}
+                  >
+                    {shortSha(row.lockSha)}
                   </span>
-                ) : null}
+                  {row.lockSha && row.syncAction ? (
+                    <Badge variant="outline" className="font-sans font-normal">
+                      {row.syncAction}
+                    </Badge>
+                  ) : null}
+                </div>
               </TableCell>
               <TableCell className="max-w-[10rem] truncate text-xs text-muted-foreground">
                 {entriesLabel(row.entries)}

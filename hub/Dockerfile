@@ -14,6 +14,9 @@ COPY hub/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY hub /app
+RUN rm -rf /app/tests \
+  && rm -f /app/update_admin_password.py /app/Dockerfile /app/Dockerfile.worker \
+    /app/.dockerignore
 
 RUN mkdir -p /app/data
 

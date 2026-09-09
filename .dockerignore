@@ -1,8 +1,43 @@
+# Build context is the repo root (compose + ./push-dockerhub.sh).
+# UI `COPY . .` / hub `COPY hub` must not see lab secrets.
+
+# Env (keep the example for docs inside the image)
+.env
+.env.*
+!.env.example
+
+# Lab data and secrets
+data
+**/.token
+**/worker.token
+**/jwt_secret
+**/encryption_key
+**/admin-initial.txt
+**/*id_rsa
+**/*.pem
+
+# Dependencies and build output
 node_modules
 .next
+out
+build
+coverage
 hub/venv
-hub/**/__pycache__
-data
+hub/tests
+hub/update_admin_password.py
+**/.venv
+**/__pycache__
+**/*.py[cod]
+
+# VCS / local runtime
 .git
 *.log
 .pids
+.cursor
+.DS_Store
+
+# Publish helpers are not runtime image contents
+/push-gitea.sh
+/push-github.sh
+/push-dockerhub.sh
+/git-publish-lib.sh

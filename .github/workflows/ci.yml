@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hub:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hub
+    env:
+      JWT_SECRET_KEY: test-jwt-secret-ci
+      ATLAS_ADMIN_PASSWORD: admin123
+      GLOBAL_SECRETS_ENCRYPTION_KEY: test-encryption-key-ci-not-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install hub dependencies
+        run: pip install -r requirements.txt -r worker/requirements.txt
+      - name: Hub unit tests
+        run: python -m unittest discover -s tests -v
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Install UI dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Build
+        run: pnpm build

@@ -1,0 +1,73 @@
+# Console (this repo) + hub API + worker. No sibling StarGate checkout required.
+#
+# Atlas paths must be bind-mounted at the SAME host absolute path (not /opt/…).
+# clusterctl docker executor does `-v hostPath:hostPath`; the daemon behind
+# /var/run/docker.sock only sees host paths. Copy .env.example → .env first.
+#
+# Do not set CLUSTER_EXECUTOR_FORCE_LOCAL on hub or worker — that flag is only
+# for the krang/executor container clusterctl starts.
+services:
+  hub:
+    build:
+      context: .
+      dockerfile: hub/Dockerfile
+    image: atlas-ui-hub
+    container_name: atlas-ui-hub
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ${ATLAS_CLUSTER_ROOT}:${ATLAS_CLUSTER_ROOT}
+      - ${ATLAS_CLUSTERS_ROOT}:${ATLAS_CLUSTERS_ROOT}
+      - ${ATLAS_WORKSPACE_ROOT}:${ATLAS_WORKSPACE_ROOT}
+    environment:
+      - TZ=Europe/Berlin
+      - DATA_DIR=/app/data
+      - PORT=8000
+      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT}
+      - ATLAS_CLUSTERS_ROOT=${ATLAS_CLUSTERS_ROOT}
+      - ATLAS_WORKSPACE_ROOT=${ATLAS_WORKSPACE_ROOT}
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: atlas-ui
+    container_name: atlas-ui
+    ports:
+      - "3000:3000"
+    environment:
+      - TZ=Europe/Berlin
+      - HUB_API_URL=http://hub:8000
+    depends_on:
+      - hub
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: hub/Dockerfile.worker
+    image: atlas-ui-worker
+    container_name: atlas-ui-worker
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+      - ${ATLAS_CLUSTER_ROOT}:${ATLAS_CLUSTER_ROOT}
+      - ${ATLAS_CLUSTERS_ROOT}:${ATLAS_CLUSTERS_ROOT}
+      - ${ATLAS_WORKSPACE_ROOT}:${ATLAS_WORKSPACE_ROOT}
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SSH_KEY}:${SSH_KEY}:ro
+    environment:
+      - TZ=Europe/Berlin
+      - WORKER_SERVER_URL=${WORKER_SERVER_URL:-http://127.0.0.1:8000}
+      - DATA_DIR=/app/data
+      - WORKER_TOKEN_FILE=/app/data/worker.token
+      - ATLAS_WORKER_RUNTIME=docker
+      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT}
+      - ATLAS_CLUSTERS_ROOT=${ATLAS_CLUSTERS_ROOT}
+      - ATLAS_WORKSPACE_ROOT=${ATLAS_WORKSPACE_ROOT}
+      - SSH_KEY=${SSH_KEY}
+    depends_on:
+      - hub
+    restart: unless-stopped

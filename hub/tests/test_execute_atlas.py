@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 from worker.execute_atlas import (
     ENV_FORCE_LOCAL,
     argv_executor,
+    atlas_subcommand,
     build_atlas_argv,
     clusterctl_root_from_params,
     docker_executor_container_name,
@@ -54,6 +55,27 @@ class ExecuteAtlasArgvTests(unittest.TestCase):
             {"cluster_id": "dev/k8s", "argv": ["--cluster", "dev/k8s", "run"]}
         )
         self.assertEqual(argv.count("--cluster"), 1)
+
+    def test_init_does_not_inject_cluster(self):
+        argv = build_atlas_argv(
+            {
+                "cluster_id": "123/etet-template",
+                "argv": ["init", "123/etet-template", "--template", "pve_templates"],
+            }
+        )
+        self.assertEqual(
+            argv,
+            ["init", "123/etet-template", "--template", "pve_templates"],
+        )
+        self.assertNotIn("--cluster", argv)
+
+    def test_atlas_subcommand_skips_global_flags(self):
+        self.assertEqual(atlas_subcommand(["init", "dev/k8s"]), "init")
+        self.assertEqual(
+            atlas_subcommand(["--cluster", "dev/k8s", "run", "--dry-run"]),
+            "run",
+        )
+        self.assertEqual(atlas_subcommand(["--executor=local", "init", "x/y"]), "init")
 
     def test_argv_executor(self):
         self.assertEqual(argv_executor(["run", "--executor", "docker"]), "docker")
@@ -324,6 +346,42 @@ class ExecuteAtlasInventoryTests(unittest.TestCase):
                     }
                 )
             self.assertEqual(spec["executor_mode"], "local")
+
+    def test_init_without_existing_leaf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctl = Path(tmp) / "ctl"
+            ctl.mkdir()
+            (ctl / "cluster").write_text("#!/bin/sh\n", encoding="utf-8")
+            (ctl / "cluster").chmod(0o755)
+            clusters = Path(tmp) / "clusters"
+            clusters.mkdir()
+            with patch("worker.execute_atlas.shutil.which", return_value=None):
+                spec = prepare_atlas_run(
+                    {
+                        "clusterctl_root": str(ctl),
+                        "cluster_id": "123/etet-template",
+                        "clusters_root": str(clusters),
+                        "argv": [
+                            "init",
+                            "123/etet-template",
+                            "--template",
+                            "pve_templates",
+                        ],
+                    }
+                )
+            self.assertEqual(spec["executor_mode"], "local")
+            self.assertEqual(
+                spec["argv"],
+                ["init", "123/etet-template", "--template", "pve_templates"],
+            )
+            self.assertNotIn("--cluster", spec["argv"])
+            self.assertEqual(
+                spec["leaf"],
+                clusters.resolve() / "123" / "etet-template",
+            )
+            self.assertFalse((spec["leaf"] / "cluster.yaml").is_file())
+            self.assertEqual(spec["env"]["ATLAS_CLUSTERS_ROOT"], str(clusters.resolve()))
+            self.assertEqual(spec["env"]["CLUSTER_ID"], "123/etet-template")
 
 
 class DockerExecutorNameTests(unittest.TestCase):

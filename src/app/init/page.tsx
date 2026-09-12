@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ComponentType } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   Database,
@@ -26,6 +27,8 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { isHubRemote, queueAtlasInit } from "@/lib/api";
+import { projectHref, projectIdFromPath } from "@/lib/project-href";
 import { INIT_TEMPLATES } from "@/lib/templates";
 import { cn } from "@/lib/utils";
 
@@ -94,6 +97,8 @@ const TEMPLATE_BLURBS: Record<(typeof INIT_TEMPLATES)[number], string> = {
 
 export default function InitPage() {
   const { startJob } = useJobSession();
+  const router = useRouter();
+  const pathname = usePathname();
   const [clusterId, setClusterId] = useState("");
   const [template, setTemplate] = useState<string>("k8s_full");
   const [fromCluster, setFromCluster] = useState("");
@@ -102,6 +107,7 @@ export default function InitPage() {
   const [force, setForce] = useState(false);
   const [noValidate, setNoValidate] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const fromOverride = fromCluster.trim().length > 0;
 
   function buildArgv() {
@@ -119,10 +125,23 @@ export default function InitPage() {
   }
 
   async function runInit() {
+    setBusy(true);
     try {
-      await startJob({ argv: buildArgv(), wait: false });
+      const argv = buildArgv();
+      if (await isHubRemote()) {
+        const result = await queueAtlasInit({ argv });
+        toast.success("Init queued on worker");
+        const pid = projectIdFromPath(pathname);
+        if (pid && result.executionId) {
+          router.push(projectHref(pid, `/executions/${result.executionId}`));
+        }
+        return;
+      }
+      await startJob({ argv, wait: false });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -237,7 +256,9 @@ export default function InitPage() {
             />
             --no-validate
           </Label>
-          <Button type="submit">Init</Button>
+          <Button type="submit" disabled={busy}>
+            Init
+          </Button>
         </Panel>
       </form>
       <ConfirmAction

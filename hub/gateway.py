@@ -138,6 +138,7 @@ from playbooks_http import (  # noqa: E402
     list_playbooks as list_playbook_records,
     next_run_time,
     preview_playbook,
+    queue_atlas_init,
     queue_atlas_repos_sync,
     queue_atlas_run,
     queue_atlas_workspace_reset,
@@ -2035,6 +2036,25 @@ def atlas_workspace_reset_route(
         raise HTTPException(status_code=404, detail="Project not found")
     try:
         return queue_atlas_workspace_reset(
+            with_kind(project),
+            project_id,
+            body or {},
+            can_execute=_user_can(payload, ["atlas.execute"]),
+        )
+    except PlaybookHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.post("/api/projects/{project_id}/atlas/init")
+def atlas_init_route(
+    project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
+):
+    payload = _require_user(authorization)
+    project = get_project(PROJECTS_CONFIG_FILE, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return queue_atlas_init(
             with_kind(project),
             project_id,
             body or {},

@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import yaml
 
-from atlas_inspect import InspectError, resolve_inspect_cluster_id
+from atlas_inspect import InspectError, normalize_inventory_cluster_id, resolve_inspect_cluster_id
 from atlas_rbac import atlas_run_error
 from clusterctl_config import inspect_run_params_from_project
 from executions_create import create_execution_record
@@ -678,4 +678,118 @@ def queue_atlas_repos_sync(
         "status": "queued",
         "executionId": execution_id,
         "kind": "atlas",
+    }
+
+
+INIT_TEMPLATES = frozenset(
+    {
+        "k8s_full",
+        "infra_edge",
+        "pve_templates",
+        "redis",
+        "postgresql",
+        "kafka",
+        "jenkins_agent",
+        "gitlab_runner",
+    }
+)
+_INIT_FLAGS_VALUE = frozenset(
+    {"--template", "--from", "--dns-suffix", "--display-name"}
+)
+_INIT_FLAGS_BOOL = frozenset({"--force", "--no-validate"})
+
+
+def _init_scalar(value: str, field: str) -> str:
+    text = str(value or "").strip()
+    if not text or "\n" in text or "\r" in text or "\0" in text or len(text) > 253:
+        raise PlaybookHttpError(400, f"invalid {field}")
+    return text
+
+
+def sanitize_init_argv(raw: Any) -> tuple[str, list[str]]:
+    if not isinstance(raw, list) or len(raw) < 2:
+        raise PlaybookHttpError(400, "init requires a cluster id")
+    argv = [str(item) for item in raw]
+    if argv[0] != "init":
+        raise PlaybookHttpError(400, "argv must start with init")
+    try:
+        cluster_id = normalize_inventory_cluster_id(argv[1])
+    except InspectError as exc:
+        raise PlaybookHttpError(400, str(exc)) from exc
+    out = ["init", cluster_id]
+    index = 2
+    while index < len(argv):
+        token = argv[index]
+        if token in _INIT_FLAGS_BOOL:
+            out.append(token)
+            index += 1
+            continue
+        if token in _INIT_FLAGS_VALUE:
+            if index + 1 >= len(argv):
+                raise PlaybookHttpError(400, f"{token} requires a value")
+            value = str(argv[index + 1]).strip()
+            if token == "--template":
+                if value not in INIT_TEMPLATES:
+                    raise PlaybookHttpError(400, f"unknown template {value}")
+            elif token == "--from":
+                try:
+                    value = normalize_inventory_cluster_id(value)
+                except InspectError as exc:
+                    raise PlaybookHttpError(400, str(exc)) from exc
+            else:
+                value = _init_scalar(value, token)
+            out.extend([token, value])
+            index += 2
+            continue
+        raise PlaybookHttpError(400, f"unsupported init argument: {token}")
+    return cluster_id, out
+
+
+def queue_atlas_init(
+    project: dict[str, Any],
+    project_id: str,
+    body: dict[str, Any],
+    *,
+    can_execute: bool,
+) -> dict[str, Any]:
+    if project.get("kind") != "atlas":
+        raise PlaybookHttpError(400, "Not an atlas project")
+    rbac_err = atlas_run_error(
+        can_execute=can_execute, can_root_ssh=True, root_ssh=False
+    )
+    if rbac_err:
+        raise PlaybookHttpError(403, rbac_err)
+    payload = body or {}
+    cluster_id, argv = sanitize_init_argv(payload.get("argv"))
+    execution_id = str(uuid.uuid4())
+    created = create_execution_record(
+        {
+            "kind": "atlas",
+            "playbookName": "clusterctl init",
+            "mode": "ATLAS",
+            "status": "QUEUED",
+            "runParams": {
+                "executor": "clusterctl",
+                "cluster_id": cluster_id,
+                "clusterctl_root": payload.get("clusterctl_root")
+                or project.get("clusterctlRoot"),
+                "clusters_root": payload.get("clusters_root")
+                or project.get("clustersRoot"),
+                "workspace_root": payload.get("workspace_root")
+                or project.get("workspaceRoot"),
+                "argv": argv,
+                "project_dir": str(get_project_dir(project_id)),
+            },
+        },
+        project_id=project_id,
+        execution_id=execution_id,
+    )
+    if not created:
+        raise PlaybookHttpError(500, "Failed to queue atlas init")
+    return {
+        "success": True,
+        "status": "queued",
+        "executionId": execution_id,
+        "kind": "atlas",
+        "cluster_id": cluster_id,
     }

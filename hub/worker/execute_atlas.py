@@ -35,10 +35,28 @@ def _log():
     return logger
 
 
+def atlas_subcommand(argv: list[str]) -> str:
+    """First clusterctl subcommand, skipping global --cluster / --executor flags."""
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in {"--cluster", "--executor"}:
+            index += 2
+            continue
+        if token.startswith("--cluster=") or token.startswith("--executor="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return ""
+
+
 def build_atlas_argv(run_params: dict[str, Any]) -> list[str]:
     argv = list(run_params.get("argv") or ["run"])
     cluster_id = run_params.get("cluster_id")
-    if cluster_id and "--cluster" not in argv:
+    if cluster_id and "--cluster" not in argv and atlas_subcommand(argv) != "init":
         argv = ["--cluster", str(cluster_id), *argv]
     return argv
 
@@ -230,10 +248,22 @@ def prepare_atlas_run(run_params: Mapping[str, Any] | None = None) -> dict[str, 
     root = clusterctl_root_from_params(params)
     cluster_id = params.get("cluster_id")
     clusters_root = resolve_clusters_root(root, params)
-    leaf = require_inventory_leaf(clusters_root, cluster_id)
-    workspace_root = resolve_workspace_root(root, params)
-    argv = build_atlas_argv(params)
-    executor_mode = require_docker_cli_if_needed(argv, leaf)
+    raw_argv = list(params.get("argv") or ["run"])
+    creating = atlas_subcommand(raw_argv) == "init"
+    if creating:
+        if not cluster_id or not str(cluster_id).strip():
+            raise ValueError(
+                "cluster_id is required for atlas init (inventory leaf, e.g. dev/k8s)"
+            )
+        leaf = inventory_leaf_path(clusters_root, str(cluster_id).strip())
+        workspace_root = resolve_workspace_root(root, params)
+        argv = build_atlas_argv(params)
+        executor_mode = "local"
+    else:
+        leaf = require_inventory_leaf(clusters_root, cluster_id)
+        workspace_root = resolve_workspace_root(root, params)
+        argv = build_atlas_argv(params)
+        executor_mode = require_docker_cli_if_needed(argv, leaf)
     env = os.environ.copy()
     env.pop(ENV_FORCE_LOCAL, None)
     env["ATLAS_CLUSTER_ROOT"] = str(root)

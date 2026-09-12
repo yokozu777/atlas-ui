@@ -70,10 +70,27 @@ function inspectToSnapshot(
   };
 }
 
+function shouldHubInspect(argv: string[]): boolean {
+  const command = argv[0];
+  if (command === "run" || command === "init" || command === "use") {
+    return false;
+  }
+  if (command === "workspace" && argv[1] === "reset") {
+    return false;
+  }
+  if ((command === "repos" || command === "playbooks") && argv[1] === "sync") {
+    return false;
+  }
+  return true;
+}
+
 async function hubInspect(
   argv: string[],
   clusterId?: string,
 ): Promise<InspectResult | null> {
+  if (!shouldHubInspect(argv)) {
+    return null;
+  }
   const projectId = await hubProjectId();
   if (!projectId) {
     return null;
@@ -278,6 +295,22 @@ export async function runClusterctl(input: {
   clusterId?: string;
   wait?: boolean;
 }): Promise<JobSnapshot & { log?: string }> {
+  if (input.argv[0] === "init" && (await isHubRemote())) {
+    const queued = await queueAtlasInit({ argv: input.argv });
+    return {
+      id: queued.executionId ?? "init",
+      argv: input.argv,
+      clusterId: queued.clusterId ?? input.clusterId ?? null,
+      mutating: true,
+      status: "exited",
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+      logPath: "",
+      error: null,
+      log: "Init queued on worker",
+    };
+  }
   const inspect = await hubInspect(input.argv, input.clusterId);
   if (inspect) {
     return inspectToSnapshot(input.argv, inspect, input.clusterId);
@@ -409,6 +442,34 @@ export async function fetchWorkspaceShow(
     );
   }
   return parseJobJson<WorkspaceShowPayload>(result.log ?? "");
+}
+
+export async function queueAtlasInit(input: {
+  argv: string[];
+  projectId?: string;
+}): Promise<{
+  executionId?: string;
+  clusterId?: string;
+}> {
+  const remote = await isHubRemote();
+  if (!remote) {
+    throw new Error("atlas init on hub requires a remote project");
+  }
+  const pid = input.projectId || (await hubProjectId());
+  if (!pid) {
+    throw new Error("init requires a project on hub");
+  }
+  const data = await stargateJson<{
+    executionId?: string;
+    cluster_id?: string;
+  }>(`/projects/${encodeURIComponent(pid)}/atlas/init`, {
+    method: "POST",
+    body: JSON.stringify({ argv: input.argv }),
+  });
+  if (!data.executionId) {
+    throw new Error("No execution id");
+  }
+  return { executionId: data.executionId, clusterId: data.cluster_id };
 }
 
 export async function queueWorkspaceReset(

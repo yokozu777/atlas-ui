@@ -568,6 +568,138 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertIn("atlas.execute", denied.json().get("error", ""))
 
+    def test_atlas_init_queues(self):
+        headers = self._headers()
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-init",
+                "kind": "atlas",
+                "cluster_id": "dev/k8s",
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project"]["id"]
+        queued = self.client.post(
+            f"/api/projects/{project_id}/atlas/init",
+            json={
+                "argv": [
+                    "init",
+                    "123/etet-template",
+                    "--template",
+                    "pve_templates",
+                    "--dns-suffix",
+                    "lab.example.com",
+                ]
+            },
+            headers=headers,
+        )
+        self.assertEqual(queued.status_code, 200, queued.text)
+        body = queued.json()
+        self.assertTrue(body.get("success"))
+        execution_id = body.get("executionId")
+        self.assertTrue(execution_id)
+        self.assertEqual(body.get("cluster_id"), "123/etet-template")
+        fetched = self.client.get(
+            f"/api/executions/{execution_id}?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        execution = fetched.json().get("execution") or {}
+        self.assertEqual(execution.get("playbookName"), "clusterctl init")
+        self.assertEqual(execution.get("kind"), "atlas")
+        self.assertEqual(execution.get("status"), "QUEUED")
+        params = execution.get("runParams") or {}
+        self.assertEqual(
+            params.get("argv"),
+            [
+                "init",
+                "123/etet-template",
+                "--template",
+                "pve_templates",
+                "--dns-suffix",
+                "lab.example.com",
+            ],
+        )
+        self.assertEqual(params.get("cluster_id"), "123/etet-template")
+
+    def test_atlas_init_from_default(self):
+        headers = self._headers()
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-init-from",
+                "kind": "atlas",
+                "cluster_id": "dev/k8s",
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project"]["id"]
+        queued = self.client.post(
+            f"/api/projects/{project_id}/atlas/init",
+            json={"argv": ["init", "lab/copy", "--from", "default"]},
+            headers=headers,
+        )
+        self.assertEqual(queued.status_code, 200, queued.text)
+        fetched = self.client.get(
+            f"/api/executions/{queued.json()['executionId']}"
+            f"?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        params = (fetched.json().get("execution") or {}).get("runParams") or {}
+        self.assertEqual(params.get("argv"), ["init", "lab/copy", "--from", "default"])
+
+    def test_atlas_init_rejects_unknown_template(self):
+        headers = self._headers()
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-init-bad-template",
+                "kind": "atlas",
+                "cluster_id": "dev/k8s",
+            },
+            headers=headers,
+        )
+        project_id = created.json()["project"]["id"]
+        denied = self.client.post(
+            f"/api/projects/{project_id}/atlas/init",
+            json={"argv": ["init", "lab/x", "--template", "not-a-template"]},
+            headers=headers,
+        )
+        self.assertEqual(denied.status_code, 400, denied.text)
+        self.assertIn("template", (denied.json().get("error") or "").lower())
+
+    def test_atlas_init_forbidden_without_execute(self):
+        gateway.user_service.create_user(
+            username="limited-init",
+            password="limited1",
+            email=None,
+            roles=[],
+        )
+        token = self._login("limited-init", "limited1")
+        headers = self._headers(token)
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-init-denied",
+                "kind": "atlas",
+                "cluster_id": "dev/k8s",
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project"]["id"]
+        denied = self.client.post(
+            f"/api/projects/{project_id}/atlas/init",
+            json={"argv": ["init", "lab/x", "--template", "redis"]},
+            headers=headers,
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertIn("atlas.execute", denied.json().get("error", ""))
+
 
 class GatewayVaultSecretsTests(unittest.TestCase):
     @classmethod

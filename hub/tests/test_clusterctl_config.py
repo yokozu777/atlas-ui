@@ -37,7 +37,7 @@ class ClusterctlConfigTests(unittest.TestCase):
         os.environ.pop("ATLAS_CLUSTERCTL_CONFIG", None)
         os.environ.pop("ATLAS_CLUSTERS_ROOT", None)
         os.environ.pop("ATLAS_WORKSPACE_ROOT", None)
-        os.environ.pop("ATLAS_UI_CONFIG", None)
+        os.environ["ATLAS_UI_CONFIG"] = str(self.root / "missing-ui-config.json")
 
     def tearDown(self):
         for key, value in self._saved.items():
@@ -197,6 +197,37 @@ class ClusterctlConfigTests(unittest.TestCase):
         self.assertEqual(
             resolve_workspace_root(ctl, {"workspaceRoot": str(other_w)}),
             other_w.resolve(),
+        )
+
+    def test_missing_project_clusterctl_root_falls_back_to_env_checkout(self):
+        env_dir = self.root / "from-env"
+        env_dir.mkdir()
+        (env_dir / "cluster").write_text("", encoding="utf-8")
+        os.environ["ATLAS_CLUSTER_ROOT"] = str(env_dir)
+        stale = self.root / "stale-host-path"
+        self.assertEqual(
+            clusterctl_root_from_project({"clusterctlRoot": str(stale)}),
+            env_dir,
+        )
+
+    def test_missing_explicit_clusters_falls_back_to_env_dir(self):
+        ctl = self.root / "atlas-clusterctl"
+        ctl.mkdir()
+        env_c = self.root / "atlas-clusters"
+        env_w = self.root / "atlas-workspace"
+        env_c.mkdir()
+        env_w.mkdir()
+        os.environ["ATLAS_CLUSTERS_ROOT"] = str(env_c)
+        os.environ["ATLAS_WORKSPACE_ROOT"] = str(env_w)
+        missing_c = self.root / "missing-clusters"
+        missing_w = self.root / "missing-workspace"
+        self.assertEqual(
+            resolve_clusters_root(ctl, {"clusters_root": str(missing_c)}),
+            env_c.resolve(),
+        )
+        self.assertEqual(
+            resolve_workspace_root(ctl, {"workspace_root": str(missing_w)}),
+            env_w.resolve(),
         )
 
 

@@ -2,7 +2,7 @@
 
 Quick guide to creating a project and running work. Kind is **immutable** after create: `ansible` (playbooks) or `atlas` (clusterctl).
 
-**Prerequisites:** atlas-ui is running and you are signed in. For `atlas` projects, `ATLAS_CLUSTER_ROOT`, `ATLAS_CLUSTERS_ROOT`, and `ATLAS_WORKSPACE_ROOT` must point at real trees on the controller (see [01-docker-quickstart.md](01-docker-quickstart.md)).
+**Prerequisites:** atlas-ui is running and you are signed in. For `atlas` projects, inventory must be reachable: Compose uses `/atlas/clusterctl`, `/atlas/clusters`, and `/atlas/workspace` (host paths belong in `.env` only). See [01-docker-quickstart.md](01-docker-quickstart.md).
 
 ---
 
@@ -43,7 +43,7 @@ Visual playbook builder and a separate “visual role configurator” are not re
 5. **Run** — phases, tags, limit, extra vars, dry-run, executor `local` or `docker`. **Advanced → Executor** overrides `cluster.yaml`. `--root-ssh` needs permission `atlas.execute_root_ssh` (not granted by `atlas.execute` alone).
 6. **Init** lives under the atlas project, not next to Projects.
 
-Hub inspect uses `ATLAS_CLUSTER_ROOT` plus the inventory leaf. Vars save is read-only on hub. Mutating jobs (`run`, `init`, `repos sync`, `workspace reset`) are single-flight.
+Hub inspect uses the clusterctl checkout plus the inventory leaf (`/atlas/…` in Docker). Vars save is read-only on hub. Mutating jobs (`run`, `init`, `repos sync`, `workspace reset`) are single-flight.
 
 ---
 

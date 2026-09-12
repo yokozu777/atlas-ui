@@ -17,6 +17,55 @@ ENV_WORKSPACE_ROOT = "ATLAS_WORKSPACE_ROOT"
 ENV_UI_CONFIG_PATH = "ATLAS_UI_CONFIG"
 
 
+def _optional_path(raw: object) -> Optional[Path]:
+    if raw is None or not str(raw).strip():
+        return None
+    return Path(str(raw).strip()).expanduser()
+
+
+def _is_existing_dir(path: Optional[Path]) -> bool:
+    if path is None:
+        return False
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def prefer_existing_dir(*candidates: Optional[Path]) -> Optional[Path]:
+    """First existing directory, otherwise the first non-None candidate."""
+    first: Optional[Path] = None
+    for path in candidates:
+        if path is None:
+            continue
+        if first is None:
+            first = path
+        if _is_existing_dir(path):
+            return path
+    return first
+
+
+def prefer_clusterctl_checkout(*candidates: Optional[Path]) -> Optional[Path]:
+    """Prefer a tree that contains ``./cluster``, else an existing dir, else first."""
+    first: Optional[Path] = None
+    dirs: list[Path] = []
+    for path in candidates:
+        if path is None:
+            continue
+        if first is None:
+            first = path
+        try:
+            if (path / "cluster").is_file():
+                return path
+        except OSError:
+            continue
+        if _is_existing_dir(path):
+            dirs.append(path)
+    if dirs:
+        return dirs[0]
+    return first
+
+
 def ui_config_path() -> Path:
     override = os.environ.get(ENV_UI_CONFIG_PATH, "").strip()
     if override:
@@ -55,18 +104,18 @@ def save_clusterctl_root_to_ui_config(root: Path) -> None:
 
 
 def default_clusterctl_root() -> Optional[Path]:
-    env = os.environ.get(ENV_CLUSTER_ROOT, "").strip()
-    if env:
-        return Path(env).expanduser()
-    return clusterctl_root_from_ui_config()
+    env_path = _optional_path(os.environ.get(ENV_CLUSTER_ROOT, ""))
+    return prefer_clusterctl_checkout(env_path, clusterctl_root_from_ui_config())
 
 
 def clusterctl_root_from_project(project: Mapping[str, Any] | None = None) -> Optional[Path]:
     payload = project or {}
     raw = payload.get("clusterctlRoot") or payload.get("clusterctl_root")
-    if raw and str(raw).strip():
-        return Path(str(raw).strip()).expanduser()
-    return default_clusterctl_root()
+    return prefer_clusterctl_checkout(
+        _optional_path(raw),
+        _optional_path(os.environ.get(ENV_CLUSTER_ROOT, "")),
+        clusterctl_root_from_ui_config(),
+    )
 
 
 def local_config_path(repo_root: Path) -> Path:
@@ -132,14 +181,18 @@ def load_path_defaults(repo_root: Path | None) -> dict[str, Any]:
 def _explicit_path(
     params: Mapping[str, Any], keys: tuple[str, ...], env_key: str
 ) -> Optional[Path]:
+    candidates: list[Path] = []
     for key in keys:
-        raw = params.get(key)
-        if raw and str(raw).strip():
-            return Path(str(raw).strip()).expanduser().resolve()
-    raw = os.environ.get(env_key)
-    if raw and str(raw).strip():
-        return Path(str(raw).strip()).expanduser().resolve()
-    return None
+        path = _optional_path(params.get(key))
+        if path is not None:
+            candidates.append(path)
+    env_path = _optional_path(os.environ.get(env_key, ""))
+    if env_path is not None:
+        candidates.append(env_path)
+    chosen = prefer_existing_dir(*candidates)
+    if chosen is None:
+        return None
+    return chosen.expanduser().resolve()
 
 
 def sibling_inventory_clusters(clusterctl_root: Path) -> Optional[Path]:
@@ -161,7 +214,11 @@ def resolve_clusters_root(
         return explicit
     configured = load_path_defaults(clusterctl_root).get("clustersRoot")
     if configured and str(configured).strip():
-        return Path(str(configured).strip()).expanduser().resolve()
+        cfg_path = Path(str(configured).strip()).expanduser()
+        env_path = _optional_path(os.environ.get(ENV_CLUSTERS_ROOT, ""))
+        chosen = prefer_existing_dir(cfg_path, env_path)
+        if chosen is not None:
+            return chosen.expanduser().resolve()
     sibling = sibling_inventory_clusters(clusterctl_root)
     if sibling is not None:
         return sibling
@@ -180,7 +237,11 @@ def resolve_workspace_root(
         return explicit
     configured = load_path_defaults(clusterctl_root).get("workspaceRoot")
     if configured and str(configured).strip():
-        return Path(str(configured).strip()).expanduser().resolve()
+        cfg_path = Path(str(configured).strip()).expanduser()
+        env_path = _optional_path(os.environ.get(ENV_WORKSPACE_ROOT, ""))
+        chosen = prefer_existing_dir(cfg_path, env_path)
+        if chosen is not None:
+            return chosen.expanduser().resolve()
     return (clusterctl_root / "workspace").resolve()
 
 

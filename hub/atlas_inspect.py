@@ -45,16 +45,18 @@ class InspectError(ValueError):
 def clusterctl_root_from_params(run_params: Mapping[str, Any] | None = None) -> Path:
     params = run_params or {}
     raw = params.get("clusterctl_root")
-    if not raw or not str(raw).strip():
-        found = clusterctl_root_from_project({})
-        raw = str(found) if found else None
-    if not raw or not str(raw).strip():
+    payload: dict[str, Any] = {}
+    if raw and str(raw).strip():
+        payload["clusterctlRoot"] = str(raw).strip()
+    found = clusterctl_root_from_project(payload)
+    raw_found = str(found) if found else None
+    if not raw_found or not str(raw_found).strip():
         raise InspectError(
             "ATLAS_CLUSTER_ROOT is empty: set atlas-clusterctl checkout in Settings "
             "(or project clusterctlRoot / hub env ATLAS_CLUSTER_ROOT) to the directory "
             "that contains the ./cluster binary."
         )
-    root = Path(str(raw).strip()).expanduser().resolve()
+    root = Path(str(raw_found).strip()).expanduser().resolve()
     binary = root / "cluster"
     if not binary.is_file():
         raise InspectError(

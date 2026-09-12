@@ -13,7 +13,11 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from clusterctl_config import resolve_clusters_root, resolve_workspace_root
+from clusterctl_config import (
+    clusterctl_root_from_project,
+    resolve_clusters_root,
+    resolve_workspace_root,
+)
 
 CLUSTER_CONFIG_NAME = "cluster.yaml"
 _PLAYBOOKS_SSH_KEY_RE = re.compile(r"^PLAYBOOKS_[A-Z0-9_]+_SSH_KEY$")
@@ -41,13 +45,17 @@ def build_atlas_argv(run_params: dict[str, Any]) -> list[str]:
 
 def clusterctl_root_from_params(run_params: Mapping[str, Any] | None = None) -> Path:
     params = run_params or {}
-    raw = params.get("clusterctl_root") or os.environ.get("ATLAS_CLUSTER_ROOT")
-    if not raw or not str(raw).strip():
+    payload: dict[str, Any] = {}
+    raw = params.get("clusterctl_root")
+    if raw and str(raw).strip():
+        payload["clusterctlRoot"] = str(raw).strip()
+    found = clusterctl_root_from_project(payload)
+    if found is None:
         raise ValueError(
             "ATLAS_CLUSTER_ROOT is empty: set it on the worker to the atlas-clusterctl "
             "checkout (the directory that contains the ./cluster binary)."
         )
-    root = Path(str(raw).strip()).expanduser().resolve()
+    root = Path(found).expanduser().resolve()
     binary = root / "cluster"
     if not binary.is_file():
         raise ValueError(

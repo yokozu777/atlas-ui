@@ -9,7 +9,7 @@ Public operator docs (Docker Hub compose, first login, projects, Git): [document
 - Node.js 22+ (pnpm)
 - Python 3.11+ (hub API/worker)
 - A local atlas-clusterctl clone (`./atlas-clusterctl` next to atlas-ui, or **Settings → Clone**) for `kind=atlas` inspect/run
-- Linux controller host
+- Linux for `pnpm` + `./scripts/hub-up.sh`; Docker Compose also supports macOS/Windows Desktop
 
 ## Run locally (hub + console)
 

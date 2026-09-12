@@ -30,6 +30,6 @@ RUN mkdir -p /app/data
 
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/app/data
-ENV WORKER_SERVER_URL=http://127.0.0.1:8000
+ENV WORKER_SERVER_URL=http://hub:8000
 
 CMD ["python", "-m", "worker.main", "--poll-interval", "5", "--max-concurrency", "1"]

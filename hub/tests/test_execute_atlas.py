@@ -69,12 +69,14 @@ class ExecuteAtlasInventoryTests(unittest.TestCase):
                 "ATLAS_CLUSTER_ROOT",
                 "ATLAS_CLUSTERS_ROOT",
                 "ATLAS_WORKSPACE_ROOT",
+                "ATLAS_UI_CONFIG",
                 ENV_FORCE_LOCAL,
             )
         }
         os.environ.pop("ATLAS_CLUSTER_ROOT", None)
         os.environ.pop("ATLAS_CLUSTERS_ROOT", None)
         os.environ.pop("ATLAS_WORKSPACE_ROOT", None)
+        os.environ["ATLAS_UI_CONFIG"] = str(Path(tempfile.gettempdir()) / "atlas-ui-missing-config.json")
         os.environ.pop(ENV_FORCE_LOCAL, None)
 
     def tearDown(self):
@@ -88,6 +90,18 @@ class ExecuteAtlasInventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             clusterctl_root_from_params({})
         self.assertIn("ATLAS_CLUSTER_ROOT", str(ctx.exception))
+
+    def test_stale_clusterctl_root_falls_back_to_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_ctl = Path(tmp) / "env-ctl"
+            env_ctl.mkdir()
+            (env_ctl / "cluster").write_text("#!/bin/sh\n", encoding="utf-8")
+            (env_ctl / "cluster").chmod(0o755)
+            os.environ["ATLAS_CLUSTER_ROOT"] = str(env_ctl)
+            found = clusterctl_root_from_params(
+                {"clusterctl_root": str(Path(tmp) / "missing-host")}
+            )
+            self.assertEqual(found, env_ctl.resolve())
 
     def test_empty_root_is_logged_on_execution(self):
         http = _FakeHttp()

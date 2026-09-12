@@ -16,7 +16,7 @@ Design, manage, and execute infrastructure as code — with Git integration, dis
 ```bash
 git clone git@github.com:yokozu777/atlas-ui.git
 cd atlas-ui
-cp .env.example .env   # absolute ATLAS_* paths and SSH_KEY
+cp .env.example .env   # host ATLAS_* paths and SSH_KEY
 docker compose -f docker-compose.hub.yml pull
 docker compose -f docker-compose.hub.yml up -d
 ```

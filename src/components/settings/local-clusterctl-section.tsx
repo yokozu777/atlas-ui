@@ -21,8 +21,11 @@ export function LocalClusterctlSection({
         redirectTo="/settings"
       />
       <p className="text-xs text-muted-foreground">
-        Clone public atlas-clusterctl from GitHub into the checkout path (default:{" "}
-        <code className="font-mono">atlas-clusterctl</code> next to atlas-ui).
+        Clone public atlas-clusterctl from GitHub into the checkout path. In
+        Docker the dest is <code className="font-mono">/atlas/clusterctl</code>{" "}
+        (host folder from <code className="font-mono">ATLAS_CLUSTER_ROOT</code>{" "}
+        / compose project dir). Without Docker, default is{" "}
+        <code className="font-mono">atlas-clusterctl</code> next to atlas-ui.
         Saved in ~/.config/atlas-ui/config.json (or ATLAS_UI_CONFIG). The hub
         uses this path for Logs and Workspace when the project has no
         clusterctlRoot and ATLAS_CLUSTER_ROOT is unset.

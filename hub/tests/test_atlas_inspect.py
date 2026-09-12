@@ -64,11 +64,17 @@ class InspectRuntimeTests(unittest.TestCase):
     def setUp(self):
         self._saved = {
             key: os.environ.get(key)
-            for key in ("ATLAS_CLUSTER_ROOT", "ATLAS_CLUSTERS_ROOT", "ATLAS_WORKSPACE_ROOT")
+            for key in (
+                "ATLAS_CLUSTER_ROOT",
+                "ATLAS_CLUSTERS_ROOT",
+                "ATLAS_WORKSPACE_ROOT",
+                "ATLAS_UI_CONFIG",
+            )
         }
         os.environ.pop("ATLAS_CLUSTER_ROOT", None)
         os.environ.pop("ATLAS_CLUSTERS_ROOT", None)
         os.environ.pop("ATLAS_WORKSPACE_ROOT", None)
+        os.environ["ATLAS_UI_CONFIG"] = str(Path(tempfile.gettempdir()) / "atlas-ui-missing-config.json")
 
     def tearDown(self):
         for key, value in self._saved.items():
@@ -81,6 +87,18 @@ class InspectRuntimeTests(unittest.TestCase):
         with self.assertRaises(InspectError) as ctx:
             clusterctl_root_from_params({})
         self.assertIn("ATLAS_CLUSTER_ROOT", str(ctx.exception))
+
+    def test_stale_clusterctl_root_falls_back_to_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_ctl = Path(tmp) / "env-ctl"
+            env_ctl.mkdir()
+            (env_ctl / "cluster").write_text("#!/bin/sh\n", encoding="utf-8")
+            (env_ctl / "cluster").chmod(0o755)
+            os.environ["ATLAS_CLUSTER_ROOT"] = str(env_ctl)
+            found = clusterctl_root_from_params(
+                {"clusterctl_root": str(Path(tmp) / "missing-host")}
+            )
+            self.assertEqual(found, env_ctl.resolve())
 
     def test_inspect_empty_root(self):
         with self.assertRaises(InspectError) as ctx:

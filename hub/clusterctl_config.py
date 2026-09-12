@@ -39,6 +39,21 @@ def clusterctl_root_from_ui_config() -> Optional[Path]:
     return Path(str(value).strip()).expanduser()
 
 
+def save_clusterctl_root_to_ui_config(root: Path) -> None:
+    """Persist ``clusterctlRoot`` for Settings / inspect fallback."""
+    path = ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            payload = raw
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    payload["clusterctlRoot"] = str(Path(root).expanduser().resolve())
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def default_clusterctl_root() -> Optional[Path]:
     env = os.environ.get(ENV_CLUSTER_ROOT, "").strip()
     if env:

@@ -8,7 +8,7 @@ Public operator docs (Docker Hub compose, first login, projects, Git): [document
 
 - Node.js 22+ (pnpm)
 - Python 3.11+ (hub API/worker)
-- A local atlas-clusterctl clone (`../atlas-clusterctl`) for `kind=atlas` inspect/run
+- A local atlas-clusterctl clone (`./atlas-clusterctl` next to atlas-ui, or **Settings → Clone**) for `kind=atlas` inspect/run
 - Linux controller host
 
 ## Run locally (hub + console)
@@ -29,7 +29,7 @@ Node is picked up from `~/.local/node/bin` if `pnpm` is not on PATH. Stop hub: `
 ./scripts/dev.sh          # http://127.0.0.1:3000
 ```
 
-First screen without hub: path to the clusterctl checkout (`./cluster --version`). Saved in `~/.config/atlas-ui/config.json`. Default: env `ATLAS_CLUSTER_ROOT`.
+First screen without hub: Git URL + checkout path (`./cluster --version`). **Clone** / **Pull** call local `git`; **Update path** probes an existing tree. Saved in `~/.config/atlas-ui/config.json`. Default dest: `./atlas-clusterctl` (or env `ATLAS_CLUSTER_ROOT`). Default URL: `https://github.com/yokozu777/atlas-clusterctl.git`.
 
 ```bash
 pnpm build
@@ -62,7 +62,7 @@ pnpm build
 1. Open `/` — it redirects to **Projects**. Log in if hub is running (`admin` + password from `data/auth/admin-initial.txt` or `ATLAS_ADMIN_PASSWORD`).
 2. **New project** → `ansible`: Open → **Secrets** → **Hosts** (inventory, add host, bind SSH, Import/Export ZIP) → **Settings → Sources** (Test, Sync, autosync) → **Playbooks** (Run, SSE). Optional: **Schedule**, **Vaults**, **Users**.
 3. **New project** → `atlas` with cluster id (e.g. `dev/k8s`): Open → **Overview** → **Hosts / Vars / Logs**. **Run** queues on the worker when hub is up (Advanced: executor local/docker, dry-run, root-ssh).
-   - Hub: Overview/Vars/Hosts/Logs use `POST /atlas/inspect` on the API host (`ATLAS_CLUSTER_ROOT` + inventory leaf). Vars save is **read-only on hub**.
+   - Hub: Overview/Vars/Hosts/Logs use `POST /atlas/inspect` on the API host (`ATLAS_CLUSTER_ROOT` or Settings Clone dest + inventory leaf). Vars save is **read-only on hub**.
    - Without hub: local `/api/jobs` spawn only.
 4. Ansible **Hosts → Check** queues `POST /check_host` and streams the worker log. Playbook **Run**, atlas **Queue on worker**, secrets, vault, git, roles YAML, users, permissions, and workers (create/rotate token) go through the hub API. **Settings**: Archive / Restore / Delete.
 5. Init is under the atlas project, not next to Projects.

@@ -1,5 +1,9 @@
 import { SetupForm } from "@/components/setup-form";
 import { PageHeader } from "@/components/page-header";
+import { Panel } from "@/components/panel";
+import { defaultDest, defaultGitUrl } from "@/server/clusterctl-defaults";
+
+export const dynamic = "force-dynamic";
 
 export default function SetupPage() {
   return (
@@ -9,13 +13,16 @@ export default function SetupPage() {
         title="Clusterctl path"
         description={
           <>
+            Clone atlas-clusterctl from GitHub or point at an existing checkout.
             atlas-ui only spawns <code className="font-mono">./cluster</code>{" "}
-            inside the checkout you name. Bind is loopback — same trust as a
-            shell on this host.
+            inside that directory. Bind is loopback — same trust as a shell on
+            this host.
           </>
         }
       />
-      <SetupForm defaultPath="../atlas-clusterctl" />
+      <Panel className="p-6">
+        <SetupForm defaultPath={defaultDest()} defaultGitUrl={defaultGitUrl()} />
+      </Panel>
     </div>
   );
 }

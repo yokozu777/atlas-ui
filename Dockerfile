@@ -16,8 +16,11 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
-# Traced server only — not the full node_modules / .next tree.
+# Traced server only — then overlay a complete Next runtime.
+# Turbopack file tracing can omit next/package.json and leave src/ behind.
 COPY --from=build /app/.next/standalone ./
+RUN rm -rf ./node_modules
+COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
 COPY --from=build /app/docs ./docs

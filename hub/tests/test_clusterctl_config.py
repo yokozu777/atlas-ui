@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -9,11 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clusterctl_config import (  # noqa: E402
     apply_project_path_fields,
     clusterctl_root_from_project,
+    clusterctl_root_from_ui_config,
     inspect_run_params_from_project,
     load_path_defaults,
     resolve_clusters_root,
     resolve_configured_path,
     resolve_workspace_root,
+    save_clusterctl_root_to_ui_config,
 )
 
 
@@ -133,6 +136,19 @@ class ClusterctlConfigTests(unittest.TestCase):
         self.assertEqual(
             clusterctl_root_from_project({"clusterctlRoot": "/from-project"}),
             Path("/from-project"),
+        )
+
+    def test_save_clusterctl_root_merges_ui_config(self):
+        cfg = self.root / "ui-config.json"
+        cfg.write_text('{"other": 1, "clusterctlRoot": "/old"}\n', encoding="utf-8")
+        os.environ["ATLAS_UI_CONFIG"] = str(cfg)
+        dest = self.root / "atlas-clusterctl"
+        dest.mkdir()
+        save_clusterctl_root_to_ui_config(dest)
+        self.assertEqual(clusterctl_root_from_ui_config(), dest.resolve())
+        self.assertEqual(
+            json.loads(cfg.read_text(encoding="utf-8"))["other"],
+            1,
         )
 
     def test_env_beats_ui_config(self):

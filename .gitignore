@@ -50,4 +50,5 @@ next-env.d.ts
 *.py[cod]
 /data/
 /.pids/
+/atlas-clusterctl/
 **/.token

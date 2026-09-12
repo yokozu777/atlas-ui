@@ -51,6 +51,12 @@ from clusterctl_config import (  # noqa: E402
     inspect_run_params_from_project,
     load_path_defaults,
 )
+from clusterctl_git import (  # noqa: E402
+    ClusterctlGitError,
+    clone_clusterctl,
+    inspect_checkout,
+    pull_clusterctl,
+)
 from git_pull import (  # noqa: E402
     GitPullError,
     apply_git_pull_fields,
@@ -2737,6 +2743,46 @@ def server_logs_get(
         date_from=date_from,
         date_to=date_to,
     )
+
+
+@app.get("/api/atlas/clusterctl")
+def atlas_clusterctl_get(
+    authorization: Optional[str] = Header(None),
+    url: Optional[str] = Query(None),
+    dest: Optional[str] = Query(None),
+):
+    _require_user(authorization)
+    return inspect_checkout(url=url, dest=dest)
+
+
+@app.post("/api/atlas/clusterctl/clone")
+def atlas_clusterctl_clone(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_user(authorization)
+    try:
+        return clone_clusterctl(url=body.get("url"), dest=body.get("dest"))
+    except ClusterctlGitError as exc:
+        return JSONResponse(
+            {"success": False, "error": exc.message},
+            status_code=exc.status_code,
+        )
+
+
+@app.post("/api/atlas/clusterctl/pull")
+def atlas_clusterctl_pull(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_user(authorization)
+    try:
+        return pull_clusterctl(url=body.get("url"), dest=body.get("dest"))
+    except ClusterctlGitError as exc:
+        return JSONResponse(
+            {"success": False, "error": exc.message},
+            status_code=exc.status_code,
+        )
 
 
 @app.get("/api/execution_settings")

@@ -14,11 +14,17 @@ _local_no_proxy="127.0.0.1,localhost,::1"
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${_local_no_proxy}"
 export no_proxy="${no_proxy:+$no_proxy,}${_local_no_proxy}"
 if [ -z "${ATLAS_CLUSTER_ROOT:-}" ]; then
+    nested="$ROOT/atlas-clusterctl"
     sibling="$(cd "$ROOT/.." && pwd)/atlas-clusterctl"
-    if [ -x "$sibling/cluster" ]; then
+    if [ -x "$nested/cluster" ]; then
+        export ATLAS_CLUSTER_ROOT="$nested"
+    elif [ -x "$sibling/cluster" ]; then
         export ATLAS_CLUSTER_ROOT="$sibling"
+    else
+        export ATLAS_CLUSTER_ROOT="$nested"
     fi
 fi
+export ATLAS_UI_ROOT="${ATLAS_UI_ROOT:-$ROOT}"
 mkdir -p "$DATA_DIR"
 
 if [ ! -d "$HUB/venv" ]; then

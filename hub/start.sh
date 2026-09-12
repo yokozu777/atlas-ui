@@ -14,6 +14,18 @@ if [ -f "$ROOT/.env" ]; then
   set +a
 fi
 export DATA_DIR="${DATA_DIR:-$ROOT/data}"
+export ATLAS_UI_ROOT="${ATLAS_UI_ROOT:-$ROOT}"
+if [ -z "${ATLAS_CLUSTER_ROOT:-}" ]; then
+  nested="$ROOT/atlas-clusterctl"
+  sibling="$(cd "$ROOT/.." && pwd)/atlas-clusterctl"
+  if [ -x "$nested/cluster" ]; then
+    export ATLAS_CLUSTER_ROOT="$nested"
+  elif [ -x "$sibling/cluster" ]; then
+    export ATLAS_CLUSTER_ROOT="$sibling"
+  else
+    export ATLAS_CLUSTER_ROOT="$nested"
+  fi
+fi
 # Not 6000: browsers and Node fetch() treat it as a blocked X11 port ("bad port").
 export PORT="${PORT:-8000}"
 mkdir -p "$DATA_DIR"

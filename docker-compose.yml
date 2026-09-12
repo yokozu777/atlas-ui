@@ -4,6 +4,7 @@
 # Atlas paths must be bind-mounted at the SAME host absolute path (not /opt/…).
 # clusterctl docker executor does `-v hostPath:hostPath`; the daemon behind
 # /var/run/docker.sock only sees host paths. Copy .env.example → .env first.
+# Unset ATLAS_CLUSTER_ROOT → ${PWD}/atlas-clusterctl (compose project dir).
 #
 # Do not set CLUSTER_EXECUTOR_FORCE_LOCAL on hub or worker — that flag is only
 # for the krang/executor container clusterctl starts.
@@ -18,16 +19,18 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ${ATLAS_CLUSTER_ROOT}:${ATLAS_CLUSTER_ROOT}
+      - ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}:${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
       - ${ATLAS_CLUSTERS_ROOT}:${ATLAS_CLUSTERS_ROOT}
       - ${ATLAS_WORKSPACE_ROOT}:${ATLAS_WORKSPACE_ROOT}
     environment:
       - TZ=Europe/Berlin
       - DATA_DIR=/app/data
       - PORT=8000
-      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT}
+      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
       - ATLAS_CLUSTERS_ROOT=${ATLAS_CLUSTERS_ROOT}
       - ATLAS_WORKSPACE_ROOT=${ATLAS_WORKSPACE_ROOT}
+      - ATLAS_CLUSTERCTL_GIT_URL=${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
+      - ATLAS_UI_ROOT=${PWD}
     restart: unless-stopped
 
   ui:
@@ -41,6 +44,9 @@ services:
     environment:
       - TZ=Europe/Berlin
       - HUB_API_URL=http://hub:8000
+      - ATLAS_CLUSTERCTL_GIT_URL=${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
+      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
+      - ATLAS_UI_ROOT=${PWD}
     depends_on:
       - hub
     restart: unless-stopped
@@ -54,7 +60,7 @@ services:
     network_mode: host
     volumes:
       - ./data:/app/data
-      - ${ATLAS_CLUSTER_ROOT}:${ATLAS_CLUSTER_ROOT}
+      - ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}:${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
       - ${ATLAS_CLUSTERS_ROOT}:${ATLAS_CLUSTERS_ROOT}
       - ${ATLAS_WORKSPACE_ROOT}:${ATLAS_WORKSPACE_ROOT}
       - /var/run/docker.sock:/var/run/docker.sock
@@ -65,9 +71,11 @@ services:
       - DATA_DIR=/app/data
       - WORKER_TOKEN_FILE=/app/data/worker.token
       - ATLAS_WORKER_RUNTIME=docker
-      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT}
+      - ATLAS_CLUSTER_ROOT=${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
       - ATLAS_CLUSTERS_ROOT=${ATLAS_CLUSTERS_ROOT}
       - ATLAS_WORKSPACE_ROOT=${ATLAS_WORKSPACE_ROOT}
+      - ATLAS_CLUSTERCTL_GIT_URL=${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
+      - ATLAS_UI_ROOT=${PWD}
       - SSH_KEY=${SSH_KEY}
     depends_on:
       - hub

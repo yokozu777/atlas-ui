@@ -91,29 +91,148 @@ async function hubInspect(
   );
 }
 
+export type ClusterctlGitStatus = {
+  success?: boolean;
+  gitUrl?: string;
+  dest?: string;
+  clusterctlRoot?: string;
+  exists?: boolean;
+  isRepo?: boolean;
+  configured?: boolean;
+  version?: string;
+  ok?: boolean;
+  error?: string | null;
+};
+
+export const DEFAULT_CLUSTERCTL_GIT_URL =
+  "https://github.com/yokozu777/atlas-clusterctl.git";
+
+function hubUnavailable(message: string): boolean {
+  return (
+    message.includes("HUB_API_URL is not set") ||
+    message.includes("Hub API is not configured")
+  );
+}
+
+async function setupJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, { cache: "no-store", ...init });
+  const data = (await res.json()) as T & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || "setup failed");
+  }
+  return data;
+}
+
 export async function fetchSetup() {
   const res = await fetch("/api/setup", { cache: "no-store" });
-  return res.json() as Promise<{
-    configured: boolean;
-    clusterctlRoot?: string;
-    version?: string;
-    ok?: boolean;
-    error?: string | null;
-  }>;
+  return res.json() as Promise<ClusterctlGitStatus>;
+}
+
+export async function fetchClusterctlGit(input?: {
+  url?: string;
+  dest?: string;
+}): Promise<ClusterctlGitStatus> {
+  const params = new URLSearchParams();
+  if (input?.url) {
+    params.set("url", input.url);
+  }
+  if (input?.dest) {
+    params.set("dest", input.dest);
+  }
+  const q = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await stargateJson<ClusterctlGitStatus>(`/atlas/clusterctl${q}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson<ClusterctlGitStatus>("/api/setup");
+  }
+}
+
+export async function cloneClusterctlGit(input: {
+  url?: string;
+  dest?: string;
+}): Promise<ClusterctlGitStatus> {
+  try {
+    return await stargateJson<ClusterctlGitStatus>("/atlas/clusterctl/clone", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson<ClusterctlGitStatus>("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "clone",
+        url: input.url,
+        dest: input.dest,
+      }),
+    });
+  }
+}
+
+export async function pullClusterctlGit(input: {
+  url?: string;
+  dest?: string;
+}): Promise<ClusterctlGitStatus> {
+  try {
+    return await stargateJson<ClusterctlGitStatus>("/atlas/clusterctl/pull", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson<ClusterctlGitStatus>("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "pull",
+        url: input.url,
+        dest: input.dest,
+      }),
+    });
+  }
 }
 
 export async function saveSetup(path: string) {
+  try {
+    const params = new URLSearchParams();
+    if (path.trim()) {
+      params.set("dest", path.trim());
+    }
+    const q = params.toString() ? `?${params.toString()}` : "";
+    const data = await stargateJson<ClusterctlGitStatus>(`/atlas/clusterctl${q}`);
+    if (!data.ok) {
+      throw new Error(data.error || "clusterctl probe failed");
+    }
+    const dest = data.dest || path;
+    await fetch("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: dest }),
+    }).catch(() => undefined);
+    return data;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+  }
   const res = await fetch("/api/setup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
   });
-  const data = (await res.json()) as {
-    ok?: boolean;
-    error?: string;
-    version?: string;
-    clusterctlRoot?: string;
-  };
+  const data = (await res.json()) as ClusterctlGitStatus;
   if (!res.ok) {
     throw new Error(data.error || "setup failed");
   }

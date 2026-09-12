@@ -27,19 +27,16 @@ function parseTab(value: string | null): SettingsTab {
 
 export function SettingsScreen({
   defaultPath,
-  version,
-  error,
+  defaultGitUrl,
 }: {
   defaultPath: string;
-  version: string;
-  error: string;
+  defaultGitUrl?: string;
 }) {
   return (
     <Suspense fallback={<EmptyState title="Loading settings" />}>
       <SettingsScreenInner
         defaultPath={defaultPath}
-        version={version}
-        error={error}
+        defaultGitUrl={defaultGitUrl}
       />
     </Suspense>
   );
@@ -47,12 +44,10 @@ export function SettingsScreen({
 
 function SettingsScreenInner({
   defaultPath,
-  version,
-  error,
+  defaultGitUrl,
 }: {
   defaultPath: string;
-  version: string;
-  error: string;
+  defaultGitUrl?: string;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -146,8 +141,7 @@ function SettingsScreenInner({
           )}
           <LocalClusterctlSection
             defaultPath={defaultPath}
-            version={version}
-            error={error}
+            defaultGitUrl={defaultGitUrl}
           />
         </TabsContent>
         <TabsContent value="workers" className="mt-6">

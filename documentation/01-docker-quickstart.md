@@ -110,6 +110,8 @@ docker compose up -d --build
 
 Access is the same: UI on **:3000**, API on **:8000**.
 
+If the UI container exits with `Cannot find module 'next'` (`/app/server.js`), the image is a stale Hub `standalone` build. Use **Option 2** (`docker compose up -d --build`) so the runner image contains a hoisted `node_modules/next`. Do not use `docker compose -f docker-compose.hub.yml` until that tag is republished.
+
 ---
 
 ## Common commands

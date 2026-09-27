@@ -58,6 +58,7 @@ from atlas_operator_ssh import (  # noqa: E402
 from atlas_vars_setup import (  # noqa: E402
     get_vars_setup,
     get_vars_setup_file,
+    list_reused_secrets,
     move_vars_setup_key,
     put_vars_setup_file,
 )
@@ -276,6 +277,7 @@ from execution_settings_http import (  # noqa: E402
     ExecutionSettingsHttpError,
     clear_all_executions,
     configure_hub_file_logging,
+    effective_log_level_name,
     get_execution_stats,
     load_execution_settings,
     update_execution_settings,
@@ -2094,6 +2096,22 @@ def atlas_vars_setup_list(
         return _domain_error(exc)
 
 
+@app.get("/api/atlas/vars-setup/reuse")
+def atlas_vars_setup_reuse(
+    project_id: Optional[str] = Query(None),
+    cluster_id: Optional[str] = Query(None),
+    keys: str = Query(""),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.read")
+    try:
+        pid = _query_project_id(project_id)
+        parsed = [part.strip() for part in keys.split(",") if part.strip()]
+        return list_reused_secrets(pid, cluster_id, parsed)
+    except InventoryHttpError as exc:
+        return _domain_error(exc)
+
+
 @app.get("/api/atlas/vars-setup/file")
 def atlas_vars_setup_get(
     project_id: Optional[str] = Query(None),
@@ -3856,7 +3874,8 @@ def main() -> None:
     import uvicorn
 
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    hub_log_level = effective_log_level_name(load_execution_settings(DATA_DIR))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level=hub_log_level.lower())
 
 
 if __name__ == "__main__":

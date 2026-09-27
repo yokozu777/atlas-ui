@@ -122,7 +122,7 @@ def worker_loop(server_url: str, poll_interval: int = 3, project_id: str = None,
     
     # Периодическая перезагрузка уровня логирования из настроек
     last_log_level_reload = 0
-    log_level_reload_interval = 60  # Перезагружаем уровень логирования каждые 60 секунд
+    log_level_reload_interval = 5  # Подхватываем уровень из настроек без рестарта
     
     # Счетчик последовательных 429 ошибок для exponential backoff
     rate_limit_retries = 0

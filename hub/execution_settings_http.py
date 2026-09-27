@@ -31,7 +31,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "retention_count": 200,
     "retention_size_mb": 200,
     "debug_mode": False,
-    "log_level": "INFO",
+    "log_level": "WARNING",
     "max_upload_size_mb": 10,
     "max_log_size_mb": 10,
     "host_status_ttl_seconds": HOST_STATUS_TTL_DEFAULT,
@@ -68,16 +68,28 @@ def save_execution_settings(data_dir: Path, settings: dict[str, Any]) -> None:
     path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def apply_hub_log_level(level_name: str) -> None:
-    name = (level_name or "INFO").upper()
+def effective_log_level_name(settings: dict[str, Any]) -> str:
+    if settings.get("debug_mode"):
+        return "DEBUG"
+    name = str(settings.get("log_level") or "WARNING").upper()
     if name not in VALID_LOG_LEVELS:
-        name = "INFO"
+        return "WARNING"
+    return name
+
+
+def apply_hub_log_level(level_name: str) -> None:
+    name = (level_name or "WARNING").upper()
+    if name not in VALID_LOG_LEVELS:
+        name = "WARNING"
     level = LOG_LEVEL_MAP[name]
     root = logging.getLogger()
     root.setLevel(level)
     for handler in root.handlers:
         handler.setLevel(level)
-    logger.info("Log level changed to: %s", name)
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(logger_name).setLevel(level)
+    emit = level if level >= logging.WARNING else logging.INFO
+    logger.log(emit, "Log level changed to: %s", name)
 
 
 def configure_hub_file_logging(data_dir: Path) -> None:
@@ -87,11 +99,7 @@ def configure_hub_file_logging(data_dir: Path) -> None:
     log_file = log_dir / "hub.log"
     max_mb = int(settings.get("max_log_size_mb") or 10)
     max_mb = max(1, min(max_mb, 1024))
-    level_name = str(settings.get("log_level") or "INFO").upper()
-    if settings.get("debug_mode"):
-        level_name = "DEBUG"
-    if level_name not in VALID_LOG_LEVELS:
-        level_name = "INFO"
+    level_name = effective_log_level_name(settings)
     level = LOG_LEVEL_MAP[level_name]
     formatter = logging.Formatter(UNIFIED_LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
@@ -262,10 +270,10 @@ def update_execution_settings(data_dir: Path, body: dict[str, Any]) -> dict[str,
     if "debug_mode" in incoming:
         settings["debug_mode"] = bool(incoming["debug_mode"])
     if "log_level" in incoming:
-        level = str(incoming["log_level"] or "INFO").upper()
-        settings["log_level"] = level if level in VALID_LOG_LEVELS else "INFO"
+        level = str(incoming["log_level"] or "WARNING").upper()
+        settings["log_level"] = level if level in VALID_LOG_LEVELS else "WARNING"
     if "log_level" in incoming or "debug_mode" in incoming:
-        apply_hub_log_level("DEBUG" if settings["debug_mode"] else settings["log_level"])
+        apply_hub_log_level(effective_log_level_name(settings))
     if "max_upload_size_mb" in incoming:
         settings["max_upload_size_mb"] = _clamp_int(incoming["max_upload_size_mb"], 10, 1, 1024)
     if "max_log_size_mb" in incoming:

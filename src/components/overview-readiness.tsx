@@ -30,13 +30,11 @@ type ActionError = {
   href: string | null;
 };
 
-export function OverviewReadiness({
-  clusterId,
-  projectId,
-}: {
-  clusterId: string;
-  projectId: string | null;
-}) {
+function useRuntimePieces(
+  clusterId: string,
+  projectId: string | null,
+  enabled: boolean,
+) {
   const [model, setModel] = useState<ReadinessModel | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -58,8 +56,9 @@ export function OverviewReadiness({
   }, [clusterId, projectId]);
 
   useEffect(() => {
+    if (!enabled) return;
     void load();
-  }, [load]);
+  }, [enabled, load]);
 
   async function runAction(kind: ActionKind) {
     if (!projectId || busy) return;
@@ -129,6 +128,126 @@ export function OverviewReadiness({
     }
   }
 
+  return { model, loading, loadError, busy, actionError, load, runAction };
+}
+
+function MissingRuntimeBox({
+  model,
+  busy,
+  actionError,
+  onAction,
+}: {
+  model: ReadinessModel;
+  busy: ActionKind | null;
+  actionError: ActionError | null;
+  onAction: (kind: ActionKind) => void;
+}) {
+  return (
+    <div
+      className="space-y-3 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3"
+      role="alert"
+    >
+      <p className="text-sm font-medium text-destructive">
+        Missing runtime pieces
+      </p>
+      {model.repos.length > 0 ? (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <ul className="min-w-0 space-y-2">
+            {model.repos.map((row) => (
+              <li key={row.id}>
+                <p className="text-sm">{row.label}</p>
+                {row.detail ? (
+                  <p className="break-all font-mono text-xs text-muted-foreground">
+                    {row.detail}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {model.sync ? (
+            <Button
+              type="button"
+              size="sm"
+              disabled={busy !== null}
+              onClick={() => onAction("sync")}
+            >
+              {busy === "sync" ? "Syncing…" : "Sync"}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {model.image ? (
+        <div className="flex flex-col gap-3 border-t border-destructive/20 pt-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm">{model.image.label}</p>
+            {model.image.detail ? (
+              <p className="break-all font-mono text-xs text-muted-foreground">
+                {model.image.detail}
+              </p>
+            ) : null}
+          </div>
+          {model.pull ? (
+            <Button
+              type="button"
+              size="sm"
+              disabled={busy !== null}
+              onClick={() => onAction("pull")}
+            >
+              {busy === "pull" ? "Pulling…" : "Pull"}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {actionError ? (
+        <div className="space-y-2 border-t border-destructive/20 pt-3 text-sm text-destructive">
+          <p className="font-medium">{actionError.title}</p>
+          {actionError.excerpt ? (
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-destructive/90">
+              {actionError.excerpt}
+            </pre>
+          ) : null}
+          {actionError.href ? (
+            <Link className="underline underline-offset-2" href={actionError.href}>
+              Open execution
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function RuntimePiecesAlert({
+  clusterId,
+  projectId,
+  enabled = true,
+}: {
+  clusterId: string;
+  projectId: string | null;
+  enabled?: boolean;
+}) {
+  const pieces = useRuntimePieces(clusterId, projectId, enabled && Boolean(projectId));
+  if (!pieces.model || pieces.model.ready) return null;
+  return (
+    <MissingRuntimeBox
+      model={pieces.model}
+      busy={pieces.busy}
+      actionError={pieces.actionError}
+      onAction={(kind) => void pieces.runAction(kind)}
+    />
+  );
+}
+
+export function OverviewReadiness({
+  clusterId,
+  projectId,
+}: {
+  clusterId: string;
+  projectId: string | null;
+}) {
+  const { model, loading, loadError, busy, actionError, load, runAction } =
+    useRuntimePieces(clusterId, projectId, Boolean(projectId));
+
   if (!projectId) return null;
 
   return (
@@ -162,77 +281,12 @@ export function OverviewReadiness({
       ) : null}
 
       {model && !model.ready ? (
-        <div
-          className="space-y-3 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3"
-          role="alert"
-        >
-          <p className="text-sm font-medium text-destructive">
-            Missing runtime pieces
-          </p>
-          {model.repos.length > 0 ? (
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <ul className="min-w-0 space-y-2">
-                {model.repos.map((row) => (
-                  <li key={row.id}>
-                    <p className="text-sm">{row.label}</p>
-                    {row.detail ? (
-                      <p className="break-all font-mono text-xs text-muted-foreground">
-                        {row.detail}
-                      </p>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-              {model.sync ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy !== null}
-                  onClick={() => void runAction("sync")}
-                >
-                  {busy === "sync" ? "Syncing…" : "Sync"}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {model.image ? (
-            <div className="flex flex-col gap-3 border-t border-destructive/20 pt-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="text-sm">{model.image.label}</p>
-                {model.image.detail ? (
-                  <p className="break-all font-mono text-xs text-muted-foreground">
-                    {model.image.detail}
-                  </p>
-                ) : null}
-              </div>
-              {model.pull ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy !== null}
-                  onClick={() => void runAction("pull")}
-                >
-                  {busy === "pull" ? "Pulling…" : "Pull"}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {actionError ? (
-            <div className="space-y-2 border-t border-destructive/20 pt-3 text-sm text-destructive">
-              <p className="font-medium">{actionError.title}</p>
-              {actionError.excerpt ? (
-                <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-destructive/90">
-                  {actionError.excerpt}
-                </pre>
-              ) : null}
-              {actionError.href ? (
-                <Link className="underline underline-offset-2" href={actionError.href}>
-                  Open execution
-                </Link>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+        <MissingRuntimeBox
+          model={model}
+          busy={busy}
+          actionError={actionError}
+          onAction={(kind) => void runAction(kind)}
+        />
       ) : null}
     </section>
   );

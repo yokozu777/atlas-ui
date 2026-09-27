@@ -316,6 +316,13 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
         hint: "Tag of the cache seed image. Must not be latest.",
       },
       {
+        key: "helm_repo_nginx_cache_warm_enabled",
+        label: "Warm Helm cache",
+        group: "Cache",
+        valueType: "boolean",
+        hint: "Download chart indexes and packages through the Helm mirror. Leave off when the cache seed already filled the disk.",
+      },
+      {
         key: "bind_forwarders",
         label: "BIND forwarders",
         group: "BIND",
@@ -645,6 +652,86 @@ export function originFromVarsSetupFile(
     return origin;
   }
   return "missing";
+}
+
+/** Same secret stored under different keys. A field search includes the whole group. */
+export const SECRET_REUSE_GROUPS: readonly (readonly string[])[] = [
+  [
+    "provision_dns_key_secret",
+    "external_dns_apex_tsig_secret",
+    "k8s_lb_dns_key_secret",
+  ],
+  ["external_dns_tsig_secret"],
+  ["external_dns_istio_tsig_secret"],
+];
+
+export type SecretReuseHit = {
+  key: string;
+  clusterId: string;
+  file: string;
+  origin: string;
+  value: string;
+};
+
+export type SecretReuseChoice = {
+  id: string;
+  label: string;
+  value: string;
+};
+
+export function reuseKeysFor(fieldKey: string): string[] {
+  const group = SECRET_REUSE_GROUPS.find((keys) => keys.includes(fieldKey));
+  return group ? [...group] : [fieldKey];
+}
+
+export function setupFieldLabel(key: string, file = ""): string {
+  const name = file.split("/").pop() ?? "";
+  const fromFile = name ? FILE_SETUP_SCHEMAS[name] : undefined;
+  const direct = fromFile?.fields.find((field) => field.key === key);
+  if (direct?.label) return direct.label;
+  for (const schema of Object.values(FILE_SETUP_SCHEMAS)) {
+    const field = schema.fields.find((item) => item.key === key);
+    if (field?.label) return field.label;
+  }
+  return key;
+}
+
+export function secretReuseChoices(
+  fieldKey: string,
+  clusterId: string,
+  hits: SecretReuseHit[],
+): SecretReuseChoice[] {
+  const keys = new Set(reuseKeysFor(fieldKey));
+  const relevant = hits.filter(
+    (hit) =>
+      keys.has(hit.key) &&
+      hit.value.trim() !== "" &&
+      !(hit.clusterId === clusterId && hit.key === fieldKey),
+  );
+  const byValue = new Map<string, SecretReuseHit[]>();
+  for (const hit of relevant) {
+    const list = byValue.get(hit.value) ?? [];
+    list.push(hit);
+    byValue.set(hit.value, list);
+  }
+  return [...byValue.entries()].map(([value, sources]) => {
+    const clusters = [
+      ...new Set(sources.map((source) => source.clusterId)),
+    ].sort();
+    const labels = [
+      ...new Set(
+        sources.map((source) => setupFieldLabel(source.key, source.file)),
+      ),
+    ];
+    return {
+      id: sources
+        .map((source) => `${source.clusterId}|${source.file}|${source.key}`)
+        .sort()
+        .join(","),
+      label: `${clusters.join(", ")} · ${labels.join(" / ")}`,
+      value,
+    };
+  });
 }
 
 export function parseStringList(value: unknown): string[] {

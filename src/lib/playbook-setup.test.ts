@@ -6,6 +6,8 @@ import {
   generateSetupSecret,
   ianaTimeZones,
   isMissingSetupValue,
+  reuseKeysFor,
+  secretReuseChoices,
   setupFieldCopyText,
   setupProgressFromValues,
   setupSchemaForVarsFile,
@@ -47,15 +49,80 @@ describe("atlas-infra-edge.secrets.yml setup schema", () => {
   });
 });
 
+describe("saved secret reuse", () => {
+  it("treats apex TSIG keys from compute-provision, infra-edge, and addons as one group", () => {
+    const keys = reuseKeysFor("external_dns_apex_tsig_secret");
+    assert.deepEqual(keys, [
+      "provision_dns_key_secret",
+      "external_dns_apex_tsig_secret",
+      "k8s_lb_dns_key_secret",
+    ]);
+    assert.deepEqual(reuseKeysFor("provision_dns_key_secret"), keys);
+    assert.deepEqual(reuseKeysFor("k8s_lb_dns_key_secret"), keys);
+    const compute = setupSchemaForVarsFile(
+      "atlas-compute-provision.secrets.yml",
+      "",
+    );
+    const addons = setupSchemaForVarsFile("atlas-k8s-addons.secrets.yml", "");
+    assert.equal(
+      compute.fields.some((field) => field.key === "provision_dns_key_secret"),
+      true,
+    );
+    assert.equal(
+      addons.fields.some(
+        (field) => field.key === "external_dns_apex_tsig_secret",
+      ),
+      true,
+    );
+    const choices = secretReuseChoices(
+      "external_dns_apex_tsig_secret",
+      "build32/k8s",
+      [
+        {
+          key: "provision_dns_key_secret",
+          clusterId: "build32/infra",
+          file: "group_vars/all/atlas-infra-edge.secrets.yml",
+          origin: "leaf",
+          value: "same-bytes",
+        },
+        {
+          key: "external_dns_apex_tsig_secret",
+          clusterId: "build31/k8s",
+          file: "group_vars/all/atlas-k8s-addons.secrets.yml",
+          origin: "leaf",
+          value: "same-bytes",
+        },
+        {
+          key: "external_dns_apex_tsig_secret",
+          clusterId: "build32/k8s",
+          file: "group_vars/all/atlas-k8s-addons.secrets.yml",
+          origin: "leaf",
+          value: "same-bytes",
+        },
+      ],
+    );
+    assert.equal(choices.length, 1);
+    assert.equal(
+      choices[0].label,
+      "build31/k8s, build32/infra · Apex zone TSIG / ExternalDNS apex TSIG",
+    );
+    assert.equal(choices[0].value, "same-bytes");
+    assert.equal(choices[0].label.includes("build32/k8s"), false);
+  });
+});
+
 describe("atlas-infra-edge.yml setup schema", () => {
   it("exposes the cache seed load switch, image, and tag", () => {
     const fields = setupSchemaForVarsFile("atlas-infra-edge.yml", "").fields;
     const load = fields.find((field) => field.key === "infra_cache_seed_load_enabled");
     const image = fields.find((field) => field.key === "infra_cache_seed_load_image");
     const tag = fields.find((field) => field.key === "infra_cache_seed_load_tag");
+    const warm = fields.find((field) => field.key === "helm_repo_nginx_cache_warm_enabled");
     assert.equal(load?.valueType, "boolean");
     assert.equal(image?.group, "Cache");
     assert.equal(tag?.group, "Cache");
+    assert.equal(warm?.valueType, "boolean");
+    assert.equal(warm?.group, "Cache");
     const keys = fields.map((field) => field.key);
     for (const key of [
       "infra_cache_seed_registry_tls_ca_enabled",

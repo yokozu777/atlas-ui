@@ -30,7 +30,7 @@ const chartConfig = {
   },
   running: {
     label: "Running",
-    color: "var(--warning)",
+    color: "var(--chart-1)",
   },
 } satisfies ChartConfig;
 
@@ -117,7 +117,7 @@ function Legend() {
     <div className="hidden items-center gap-3 text-[12px] text-muted-foreground sm:flex">
       <LegendSwatch className="bg-success" label="Success" />
       <LegendSwatch className="bg-destructive" label="Failed" />
-      <LegendSwatch className="bg-warning" label="Running" />
+      <LegendSwatch className="bg-chart-1" label="Running" />
     </div>
   );
 }

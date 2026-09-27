@@ -5,6 +5,7 @@ import { ChevronDown, Play } from "lucide-react";
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
+import { RuntimePiecesAlert } from "@/components/overview-readiness";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -462,6 +463,14 @@ export function AtlasRunDialog({
                 ) : null}
               </div>
             )}
+          </div>
+
+          <div className="shrink-0 px-5 pt-4 pb-4 empty:hidden">
+            <RuntimePiecesAlert
+              clusterId={clusterId}
+              projectId={projectId}
+              enabled={open}
+            />
           </div>
 
           <DialogFooter className="mx-0 mb-0 shrink-0 flex-row items-center justify-between gap-3 rounded-none border-t border-border bg-transparent px-5 py-3 sm:justify-between">

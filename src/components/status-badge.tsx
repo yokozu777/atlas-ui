@@ -46,13 +46,17 @@ export function StatusBadge({
       ? "success"
       : status === "fail"
         ? "destructive"
-        : status === "running" || status === "canceling"
-          ? "warning"
-          : status === "canceled"
-            ? "muted"
-          : status === "unknown"
-            ? "info"
-            : "outline";
+        : status === "running"
+          ? "live"
+          : status === "canceling"
+            ? "warning"
+            : status === "pending"
+              ? "queued"
+              : status === "canceled"
+                ? "muted"
+                : status === "unknown"
+                  ? "info"
+                  : "outline";
   return (
     <Badge variant={variant} className={className}>
       {children ?? status}

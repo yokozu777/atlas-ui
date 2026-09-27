@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { INIT_TEMPLATES } from "./templates.ts";
-import { templateProfile } from "./template-profiles.ts";
+import {
+  templateOpensHostsAfterInit,
+  templateProfile,
+} from "./template-profiles.ts";
 
 describe("template profiles", () => {
   it("covers every init template and matches role counts to guest VMs", () => {
@@ -29,6 +32,9 @@ describe("template profiles", () => {
     assert.equal(templateProfile("k8s_full")?.servers, 8);
     assert.equal(templateProfile("infra_edge")?.servers, 1);
     assert.equal(templateProfile("pve_templates")?.servers, 0);
+    assert.equal(templateOpensHostsAfterInit("pve_templates"), false);
+    assert.equal(templateOpensHostsAfterInit("k8s_full"), true);
+    assert.equal(templateOpensHostsAfterInit("infra_edge"), true);
     assert.equal(templateProfile("redis")?.servers, 10);
     assert.equal(templateProfile("postgresql")?.servers, 9);
     assert.equal(templateProfile("kafka")?.servers, 6);

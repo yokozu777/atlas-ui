@@ -56,7 +56,7 @@ function LaneStatus({
             "size-2.5 shrink-0 rounded-full",
             kind === "ok" && "bg-success",
             kind === "failed" && "bg-destructive",
-            kind === "running" && "bg-warning",
+            kind === "running" && "bg-chart-1",
             kind === "idle" && "bg-muted-foreground/50",
           )}
           title={error || kind}

@@ -122,12 +122,13 @@ export function PlaybookSetupCard({
 
   useEffect(() => {
     if (searchParams.get("hosts") !== "1") return;
-    setHostsOpen(true);
+    if (loading) return;
+    if (!pveFactory) setHostsOpen(true);
     const next = new URLSearchParams(searchParams.toString());
     next.delete("hosts");
     const query = next.toString();
     router.replace(query ? `${pathname}?${query}` : pathname);
-  }, [searchParams, router, pathname]);
+  }, [searchParams, router, pathname, loading, pveFactory]);
 
   const title = variant === "summary" ? "Configuration" : "Vars setup";
   const hostsDialog = (

@@ -18,6 +18,9 @@ const badgeVariants = cva(
           "bg-success/30 text-success ring-1 ring-success/40 focus-visible:ring-success/30 dark:bg-success/30 [a]:hover:bg-success/40",
         warning:
           "bg-warning/30 text-warning ring-1 ring-warning/40 focus-visible:ring-warning/30 dark:bg-warning/30 [a]:hover:bg-warning/40",
+        live: "bg-chart-1/30 text-chart-1 ring-1 ring-chart-1/40 focus-visible:ring-chart-1/30 [a]:hover:bg-chart-1/40",
+        queued:
+          "bg-queued/30 text-queued ring-1 ring-queued/40 focus-visible:ring-queued/30 [a]:hover:bg-queued/40",
         info: "bg-info/30 text-info ring-1 ring-info/40 focus-visible:ring-info/30 dark:bg-info/30 [a]:hover:bg-info/40",
         muted:
           "bg-muted text-muted-foreground ring-1 ring-border focus-visible:ring-border [a]:hover:bg-muted/80",

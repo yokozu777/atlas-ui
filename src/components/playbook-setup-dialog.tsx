@@ -22,7 +22,13 @@ import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -50,6 +56,8 @@ import { projectHref } from "@/lib/project-href";
 import type {
   PlaybookSetupField,
   PveTemplatesMap,
+  SecretReuseChoice,
+  SecretReuseHit,
   SetupFieldValue,
   VarsSetupOrigin,
 } from "@/lib/playbook-setup";
@@ -67,6 +75,8 @@ import {
   parseStringList,
   envScopeLabel,
   ianaTimeZones,
+  reuseKeysFor,
+  secretReuseChoices,
   setupFieldCopyText,
   setupFieldInvalidMessage,
   setupFieldValueType,
@@ -260,6 +270,7 @@ export function PlaybookSetupDialog({
   const [origins, setOrigins] = useState<Record<string, VarsSetupOrigin>>({});
   const [comments, setComments] = useState<Record<string, string>>({});
   const [visible, setVisible] = useState<Record<string, boolean>>({});
+  const [reuseHits, setReuseHits] = useState<SecretReuseHit[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [layerBusy, setLayerBusy] = useState<string | null>(null);
@@ -416,6 +427,37 @@ export function PlaybookSetupDialog({
     // applyFile is local and uses current fileName/pveFactory
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, q, path, fileName, pveFactory]);
+
+  const reuseKeyList = useMemo(() => {
+    const keys = schema.fields
+      .filter((field) => field.input === "password")
+      .flatMap((field) => reuseKeysFor(field.key));
+    return [...new Set(keys)].sort();
+  }, [schema]);
+
+  useEffect(() => {
+    if (!open) {
+      setReuseHits([]);
+      return;
+    }
+    if (reuseKeyList.length === 0) {
+      setReuseHits([]);
+      return;
+    }
+    let cancelled = false;
+    void stargateJson<{ options?: SecretReuseHit[] }>(
+      `/atlas/vars-setup/reuse?${q}&keys=${encodeURIComponent(reuseKeyList.join(","))}`,
+    )
+      .then((data) => {
+        if (!cancelled) setReuseHits(data.options ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setReuseHits([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, q, reuseKeyList]);
 
   useEffect(() => {
     if (!open || loading || view !== "variables") return;
@@ -912,6 +954,15 @@ export function PlaybookSetupDialog({
                                   projectId={projectId}
                                   clusterId={clusterId}
                                   onSshFormOpenChange={setSshFormOpen}
+                                  reuseChoices={
+                                    field.input === "password"
+                                      ? secretReuseChoices(
+                                          field.key,
+                                          clusterId,
+                                          reuseHits,
+                                        )
+                                      : []
+                                  }
                                   onReveal={() =>
                                     setVisible((prev) => ({
                                       ...prev,
@@ -1452,6 +1503,7 @@ function SettingRow({
   projectId,
   clusterId,
   onSshFormOpenChange,
+  reuseChoices = [],
   onReveal,
   onChange,
   onToggleMap,
@@ -1470,6 +1522,7 @@ function SettingRow({
   projectId: string;
   clusterId: string;
   onSshFormOpenChange?: (open: boolean) => void;
+  reuseChoices?: SecretReuseChoice[];
   onReveal: () => void;
   onChange: (next: SetupFieldValue) => void;
   onToggleMap: () => void;
@@ -1595,15 +1648,47 @@ function SettingRow({
         </div>
         <div className="flex shrink-0 items-center gap-0.5 pt-0.5">
           {type === "password" ? (
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="ghost"
-              aria-label={`Generate ${field.key}`}
-              onClick={() => onChange(generateSetupSecret(field.key))}
-            >
-              <Sparkles />
-            </Button>
+            <>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  type="button"
+                  aria-label={`Use a saved value for ${field.key}`}
+                  className={buttonVariants({
+                    variant: "ghost",
+                    size: "sm",
+                    className: "h-8 px-2 text-[11px]",
+                  })}
+                >
+                  Use saved
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="z-[80] max-w-80">
+                  {reuseChoices.length === 0 ? (
+                    <DropdownMenuItem disabled>
+                      No saved values
+                    </DropdownMenuItem>
+                  ) : (
+                    reuseChoices.map((choice) => (
+                      <DropdownMenuItem
+                        key={choice.id}
+                        title={choice.label}
+                        onClick={() => onChange(choice.value)}
+                      >
+                        <span className="truncate">{choice.label}</span>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                aria-label={`Generate ${field.key}`}
+                onClick={() => onChange(generateSetupSecret(field.key))}
+              >
+                <Sparkles />
+              </Button>
+            </>
           ) : null}
           <Button
             type="button"

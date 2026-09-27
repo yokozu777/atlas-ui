@@ -18,14 +18,16 @@ def get_logging_settings():
         if execution_settings_file.exists():
             with open(execution_settings_file, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
-                log_level = settings.get('log_level', 'DEBUG').upper()
+                log_level = str(settings.get('log_level') or 'WARNING').upper()
+                if settings.get('debug_mode'):
+                    log_level = 'DEBUG'
                 max_log_size_mb = settings.get('max_log_size_mb', 10)
                 return log_level, max_log_size_mb
     except Exception:
         pass
     
     # Fallback: переменные окружения или значения по умолчанию
-    log_level = os.environ.get('LOG_LEVEL', 'DEBUG').upper()
+    log_level = os.environ.get('LOG_LEVEL', 'WARNING').upper()
     max_log_size_mb = int(os.environ.get('MAX_LOG_SIZE_MB', '10'))
     return log_level, max_log_size_mb
 
@@ -50,8 +52,8 @@ LOG_LEVEL_ENV, MAX_LOG_SIZE_MB = get_logging_settings()
 # Валидируем уровень логирования
 if not validate_log_level(LOG_LEVEL_ENV):
     import warnings
-    warnings.warn(f"Invalid log level '{LOG_LEVEL_ENV}', using DEBUG. Valid levels: {', '.join(VALID_LOG_LEVELS)}")
-    LOG_LEVEL_ENV = 'DEBUG'
+    warnings.warn(f"Invalid log level '{LOG_LEVEL_ENV}', using WARNING. Valid levels: {', '.join(VALID_LOG_LEVELS)}")
+    LOG_LEVEL_ENV = 'WARNING'
 
 LOG_LEVEL_MAP = {
     'DEBUG': logging.DEBUG,
@@ -60,7 +62,7 @@ LOG_LEVEL_MAP = {
     'ERROR': logging.ERROR,
     'CRITICAL': logging.CRITICAL
 }
-LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_ENV, logging.DEBUG)
+LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_ENV, logging.WARNING)
 
 # Унифицированный формат логирования: [TIMESTAMP] LEVEL: message
 UNIFIED_LOG_FORMAT = '[%(asctime)s] %(levelname)s: %(message)s'
@@ -117,7 +119,7 @@ def reload_log_level():
             logger.warning(f"Invalid log level '{log_level_str}', keeping current level")
             return False
         
-        level = LOG_LEVEL_MAP.get(log_level_str.upper(), logging.DEBUG)
+        level = LOG_LEVEL_MAP.get(log_level_str.upper(), logging.WARNING)
         
         if level == _current_log_level:
             return True  # Уровень не изменился — не спамим лог
@@ -128,7 +130,8 @@ def reload_log_level():
         logging.root.setLevel(level)
         _current_log_level = level
         
-        logger.info(f"Log level reloaded to: {log_level_str.upper()}")
+        emit = level if level >= logging.WARNING else logging.INFO
+        logger.log(emit, "Log level reloaded to: %s", log_level_str.upper())
         return True
     except Exception as e:
         logger.error(f"Error reloading log level: {e}", exc_info=True)

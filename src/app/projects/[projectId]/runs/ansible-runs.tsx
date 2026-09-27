@@ -64,7 +64,15 @@ type Execution = {
   };
 };
 
-type StatusTone = "success" | "destructive" | "warning" | "outline";
+type StatusTone =
+  | "success"
+  | "destructive"
+  | "live"
+  | "warning"
+  | "muted"
+  | "queued"
+  | "info"
+  | "outline";
 
 const PAGE_SIZE = 10;
 
@@ -138,8 +146,11 @@ function statusLabel(kind: ReturnType<typeof statusKind>): string {
 function statusTone(kind: ReturnType<typeof statusKind>): StatusTone {
   if (kind === "ok") return "success";
   if (kind === "fail") return "destructive";
-  if (kind === "running" || kind === "canceling") return "warning";
-  return "outline";
+  if (kind === "running") return "live";
+  if (kind === "canceling") return "warning";
+  if (kind === "canceled") return "muted";
+  if (kind === "queued") return "queued";
+  return "info";
 }
 
 function playbookIdOf(exec: Execution, playbooks: Playbook[]): string {

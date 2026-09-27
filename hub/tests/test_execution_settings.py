@@ -16,8 +16,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import logging  # noqa: E402
+
 import gateway  # noqa: E402
-from execution_settings_http import load_execution_settings, update_execution_settings  # noqa: E402
+from execution_settings_http import (  # noqa: E402
+    apply_hub_log_level,
+    load_execution_settings,
+    update_execution_settings,
+)
 
 
 class ExecutionSettingsTests(unittest.TestCase):
@@ -45,7 +51,7 @@ class ExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(got.status_code, 200, got.text)
         body = got.json()
         self.assertTrue(body.get("success"))
-        self.assertEqual(body["settings"]["log_level"], "INFO")
+        self.assertEqual(body["settings"]["log_level"], "WARNING")
         self.assertIn("count", body["stats"])
         saved = self.client.post(
             "/api/execution_settings",
@@ -83,6 +89,18 @@ class ExecutionSettingsTests(unittest.TestCase):
         self.assertTrue(body.get("success"))
         self.assertGreaterEqual(body.get("deletedCount") or 0, 1)
         self.assertFalse((exec_dir / "exec-1.json").exists())
+
+    def test_log_level_reaches_uvicorn_access_logger(self):
+        access = logging.getLogger("uvicorn.access")
+        access.setLevel(logging.INFO)
+        apply_hub_log_level("WARNING")
+        self.assertEqual(access.level, logging.WARNING)
+        saved = update_execution_settings(self.data_dir, {"debug_mode": True, "log_level": "WARNING"})
+        self.assertEqual(saved["settings"]["log_level"], "WARNING")
+        self.assertTrue(saved["settings"]["debug_mode"])
+        self.assertEqual(access.level, logging.DEBUG)
+        apply_hub_log_level("WARNING")
+        self.assertEqual(access.level, logging.WARNING)
 
 
 if __name__ == "__main__":

@@ -66,11 +66,11 @@ export function DebugLoggingSection({
         <div className="space-y-1.5">
           <Label>Logging level</Label>
           <Select
-            value={settings.log_level ?? "INFO"}
-            onValueChange={(value) => void onPatch({ log_level: value || "INFO" })}
+            value={settings.log_level ?? "WARNING"}
+            onValueChange={(value) => void onPatch({ log_level: value || "WARNING" })}
           >
             <SelectTrigger className="w-full">
-              <span>{settings.log_level ?? "INFO"}</span>
+              <span>{settings.log_level ?? "WARNING"}</span>
             </SelectTrigger>
             <SelectContent align="start" alignItemWithTrigger>
               {LEVELS.map((level) => (

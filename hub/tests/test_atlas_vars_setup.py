@@ -609,6 +609,87 @@ class VarsSetupHttpTests(unittest.TestCase):
                 leaf_text = (leaf_all / name).read_text(encoding="utf-8")
                 self.assertNotIn("dns_domain_suffix:", leaf_text, name)
 
+    def test_reuse_returns_saved_secret_and_skips_changeme(self) -> None:
+        headers = self._login()
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            ctl = tmp / "atlas-clusterctl"
+            ctl.mkdir()
+            binary = ctl / "cluster"
+            binary.write_text("#!/bin/sh\necho '{}'\n", encoding="utf-8")
+            binary.chmod(0o755)
+            clusters = tmp / "inventory" / "clusters"
+            infra = clusters / "lab" / "infra"
+            k8s = clusters / "lab" / "k8s"
+            for leaf, cid in ((infra, "lab/infra"), (k8s, "lab/k8s")):
+                leaf.mkdir(parents=True)
+                (leaf / "cluster.yaml").write_text(f"id: {cid}\n", encoding="utf-8")
+            infra_vars = infra / "group_vars" / "all"
+            infra_vars.mkdir(parents=True)
+            (infra_vars / "atlas-infra-edge.secrets.yml").write_text(
+                "provision_dns_key_secret: apex-from-infra\n"
+                "external_dns_tsig_secret: CHANGEME\n"
+                "bind_options:\n"
+                "  secret: nested\n",
+                encoding="utf-8",
+            )
+            k8s_vars = k8s / "group_vars" / "all"
+            k8s_vars.mkdir(parents=True)
+            (k8s_vars / "atlas-k8s-addons.secrets.yml").write_text(
+                "external_dns_apex_tsig_secret: CHANGEME_APEX\n",
+                encoding="utf-8",
+            )
+            created = self.client.post(
+                "/api/projects",
+                json={
+                    "name": "vars-setup-reuse",
+                    "kind": "atlas",
+                    "cluster_id": "lab/k8s",
+                    "clusterctlRoot": str(ctl),
+                },
+                headers=headers,
+            )
+            self.assertEqual(created.status_code, 200, created.text)
+            project_id = created.json()["project"]["id"]
+            updated = self.client.put(
+                f"/api/projects/{project_id}",
+                json={"clustersRoot": str(clusters)},
+                headers=headers,
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            res = self.client.get(
+                "/api/atlas/vars-setup/reuse",
+                headers=headers,
+                params={
+                    "project_id": project_id,
+                    "cluster_id": "lab/k8s",
+                    "keys": ",".join(
+                        [
+                            "provision_dns_key_secret",
+                            "external_dns_apex_tsig_secret",
+                            "k8s_lb_dns_key_secret",
+                            "external_dns_tsig_secret",
+                        ]
+                    ),
+                },
+            )
+            self.assertEqual(res.status_code, 200, res.text)
+            options = res.json()["options"]
+            self.assertEqual(
+                [
+                    {
+                        "key": "provision_dns_key_secret",
+                        "clusterId": "lab/infra",
+                        "file": "group_vars/all/atlas-infra-edge.secrets.yml",
+                        "origin": "leaf",
+                        "value": "apex-from-infra",
+                    }
+                ],
+                options,
+            )
+            blob = res.text
+            self.assertNotIn("CHANGEME", blob)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -306,3 +306,9 @@ export function templateProfile(name: string): TemplateProfile | null {
   }
   return null;
 }
+
+/** Golden-image factory declares no guest hosts, so init should not open the hosts dialog. */
+export function templateOpensHostsAfterInit(template: string): boolean {
+  const profile = templateProfile(template);
+  return profile == null || profile.servers > 0;
+}

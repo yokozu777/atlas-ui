@@ -9,11 +9,14 @@ from typing import Any, Optional
 import yaml
 
 from atlas_cluster_fs import load_cluster_yaml, resolve_atlas_inventory_leaf
+from atlas_inspect import inventory_leaf_path, list_inventory_cluster_ids
 from inventory_http import InventoryHttpError
 
 _KEY_LINE = re.compile(r"^([ \t]*)([A-Za-z0-9_]+)[ \t]*:(.*)$")
 PVE_TEMPLATE_NAMES = ("ubuntu-base", "oracle-base", "debian-base")
 _SCALAR_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
+_REUSE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CHANGEME = re.compile(r"^changeme(?:\b|_)", re.IGNORECASE)
 LEAF_DNS_SHARED_KEY = "dns_domain_suffix"
 
 
@@ -696,3 +699,69 @@ def move_vars_setup_key(
         _write_key_to_layer(layers, rel, "env", key, payload, nested=nested)
         _remove_key_from_leaf(layers, rel, key)
     return get_vars_setup_file(project_id, rel, cid)
+
+
+def _clusters_root_for_leaf(leaf: Path, cluster_id: str) -> Path:
+    root = leaf
+    for _part in cluster_id.split("/"):
+        if _part:
+            root = root.parent
+    return root
+
+
+def _reuse_scalar(value: Any) -> Optional[str]:
+    if value is None or isinstance(value, (bool, dict, list)):
+        return None
+    text = stringify_value(value).strip()
+    if not text or "{{" in text:
+        return None
+    if _CHANGEME.match(text):
+        return None
+    return text
+
+
+def list_reused_secrets(
+    project_id: str,
+    cluster_id: Optional[str],
+    keys: list[str],
+) -> dict[str, Any]:
+    """Saved scalars for the requested keys, read from every inventory leaf.
+
+    Values are returned to the caller and must not be written to logs.
+    """
+    leaf, cid = _require_leaf(project_id, cluster_id)
+    wanted = [key for key in dict.fromkeys(keys) if _REUSE_KEY.fullmatch(key)][:64]
+    options: list[dict[str, str]] = []
+    if not wanted:
+        return {"success": True, "clusterId": cid, "options": options}
+    clusters_root = _clusters_root_for_leaf(leaf, cid)
+    wanted_set = set(wanted)
+    for other_id in list_inventory_cluster_ids(clusters_root):
+        other_leaf = inventory_leaf_path(clusters_root, other_id)
+        group_vars = other_leaf / "group_vars"
+        if not group_vars.is_dir():
+            continue
+        origin = "env" if other_id == "default" or other_id.endswith("/default") else "leaf"
+        for path in sorted(group_vars.rglob("*")):
+            if not path.is_file() or path.suffix not in {".yml", ".yaml"}:
+                continue
+            data = _load_mapping(path)
+            if not data:
+                continue
+            rel = path.relative_to(other_leaf).as_posix()
+            for key in wanted:
+                if key not in data or key not in wanted_set:
+                    continue
+                text = _reuse_scalar(data[key])
+                if text is None:
+                    continue
+                options.append(
+                    {
+                        "key": key,
+                        "clusterId": other_id,
+                        "file": rel,
+                        "origin": origin,
+                        "value": text,
+                    }
+                )
+    return {"success": True, "clusterId": cid, "options": options}

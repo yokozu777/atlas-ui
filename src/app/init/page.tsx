@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ComponentType } from "react";
+import { useState, type ComponentType, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -65,6 +65,7 @@ import type { SecretOption } from "@/lib/project-sources";
 import { fetchProject, stargateJson } from "@/lib/stargate";
 import { useCan } from "@/lib/authz";
 import { INIT_TEMPLATES } from "@/lib/templates";
+import { templateOpensHostsAfterInit } from "@/lib/template-profiles";
 import { notify, notifyExecution } from "@/lib/notification-inbox";
 import { cn } from "@/lib/utils";
 
@@ -132,6 +133,75 @@ const TEMPLATE_BLURBS: Record<(typeof INIT_TEMPLATES)[number], string> = {
 };
 
 const APPLY_WAIT_MS = 600_000;
+
+type TemplateName = (typeof INIT_TEMPLATES)[number];
+
+const CLUSTER_TEMPLATES = INIT_TEMPLATES.filter(
+  (name) => name !== "pve_templates" && name !== "infra_edge",
+);
+
+function TemplateChoiceCard({
+  name,
+  selected,
+  dimmed,
+  onSelect,
+}: {
+  name: TemplateName;
+  selected: boolean;
+  dimmed: boolean;
+  onSelect: (name: TemplateName) => void;
+}) {
+  const family = TEMPLATE_FAMILY[name];
+  const Icon = TEMPLATE_ICON[name] ?? FAMILY_ICON[family];
+  return (
+    <Card
+      className={cn(
+        "cursor-pointer transition-colors",
+        selected && "ring-2",
+        selected && FAMILY_RING[family],
+        dimmed && "opacity-50",
+      )}
+      onClick={() => onSelect(name)}
+    >
+      <CardHeader>
+        <div className="flex items-start gap-3">
+          <span
+            className={cn(
+              "flex size-8 shrink-0 items-center justify-center rounded-lg ring-1",
+              FAMILY_ICON_CLASS[family],
+            )}
+          >
+            <Icon className="size-4" />
+          </span>
+          <div className="min-w-0 space-y-1">
+            <CardTitle className="text-base font-medium">{name}</CardTitle>
+            <CardDescription>{TEMPLATE_BLURBS[name]}</CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+    </Card>
+  );
+}
+
+function TemplateSection({
+  title,
+  note,
+  children,
+}: {
+  title: string;
+  note?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="space-y-1">
+        <h2 className="text-sm font-medium">{title}</h2>
+        {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
 
 function sanitizeClusterSegment(value: string) {
   return value.replaceAll("/", "").trim();
@@ -290,6 +360,12 @@ export default function InitPage() {
     if (status.sshSecretId) setInitKeyError(null);
   }
 
+  function doneHref(projectId: string) {
+    const href = projectHref(projectId);
+    if (!fromOverride && !templateOpensHostsAfterInit(template)) return href;
+    return `${href}?hosts=1`;
+  }
+
   function buildArgv() {
     const argv = ["init", clusterId];
     if (fromOverride) {
@@ -330,7 +406,7 @@ export default function InitPage() {
     const status = await fetchBootstrapStatus(clusterId, projectId);
     if (!bootstrapNeedsDialog(status)) {
       toast.success("Cluster initialized");
-      router.push(`${projectHref(projectId)}?hosts=1`);
+      router.push(doneHref(projectId));
       return;
     }
     setBootstrap(status);
@@ -596,7 +672,7 @@ export default function InitPage() {
             ? "Workspace and executor image applied"
             : "Workspace applied",
         );
-        router.push(`${projectHref(pid)}?hosts=1`);
+        router.push(doneHref(pid));
       } else {
         toast.success("Apply finished — some items are still missing");
       }
@@ -641,43 +717,42 @@ export default function InitPage() {
           href={failedLogHref}
         />
       ) : null}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {INIT_TEMPLATES.map((name) => {
-          const family = TEMPLATE_FAMILY[name];
-          const selected = !fromOverride && template === name;
-          const Icon = TEMPLATE_ICON[name] ?? FAMILY_ICON[family];
-          return (
-            <Card
-              key={name}
-              className={cn(
-                "cursor-pointer transition-colors",
-                selected && "ring-2",
-                selected && FAMILY_RING[family],
-                fromOverride && "opacity-50",
-              )}
-              onClick={() => setTemplate(name)}
-            >
-              <CardHeader>
-                <div className="flex items-start gap-3">
-                  <span
-                    className={cn(
-                      "flex size-8 shrink-0 items-center justify-center rounded-lg ring-1",
-                      FAMILY_ICON_CLASS[family],
-                    )}
-                  >
-                    <Icon className="size-4" />
-                  </span>
-                  <div className="min-w-0 space-y-1">
-                    <CardTitle className="text-base font-medium">
-                      {name}
-                    </CardTitle>
-                    <CardDescription>{TEMPLATE_BLURBS[name]}</CardDescription>
-                  </div>
-                </div>
-              </CardHeader>
-            </Card>
-          );
-        })}
+      <div className="flex flex-col gap-8">
+        <TemplateSection
+          title="Proxmox VM templates"
+          note="Guest VMs do not deploy without this leaf. Build the golden images here first."
+        >
+          <TemplateChoiceCard
+            name="pve_templates"
+            selected={!fromOverride && template === "pve_templates"}
+            dimmed={fromOverride}
+            onSelect={setTemplate}
+          />
+        </TemplateSection>
+        <TemplateSection
+          title="Edge / ingress infrastructure"
+          note="DNS, certificates, APT and YUM mirrors, Helm charts, and the container registry cache."
+        >
+          <TemplateChoiceCard
+            name="infra_edge"
+            selected={!fromOverride && template === "infra_edge"}
+            dimmed={fromOverride}
+            onSelect={setTemplate}
+          />
+        </TemplateSection>
+        <TemplateSection title="Clusters">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {CLUSTER_TEMPLATES.map((name) => (
+              <TemplateChoiceCard
+                key={name}
+                name={name}
+                selected={!fromOverride && template === name}
+                dimmed={fromOverride}
+                onSelect={setTemplate}
+              />
+            ))}
+          </div>
+        </TemplateSection>
       </div>
       {initSteps ? (
         <JobProgress

@@ -9,6 +9,7 @@ import {
   reuseKeysFor,
   secretReuseChoices,
   setupFieldCopyText,
+  setupFieldInvalidMessage,
   setupProgressFromValues,
   setupSchemaForVarsFile,
 } from "./playbook-setup.ts";
@@ -213,6 +214,21 @@ describe("k8s overlay setup schemas", () => {
     assert.equal(envScopeLabel("build31/k8s1", "leaf"), "env/build31");
     assert.equal(envScopeLabel("build31/k8s1", "missing"), "env/build31");
     assert.equal(envScopeLabel("build31/k8s1", "org"), "Default");
+  });
+
+  it("exposes DNS servers on node foundation", () => {
+    const field = setupSchemaForVarsFile("atlas-node-foundation.yml", "").fields.find(
+      (item) => item.key === "dns_servers",
+    );
+    assert.equal(field?.label, "DNS servers");
+    assert.equal(field?.valueType, "string_list");
+    assert.equal(field?.itemValueType, "ipv4");
+    assert.equal(isMissingSetupValue("", field), true);
+    assert.equal(isMissingSetupValue("192.168.1.218", field), false);
+    assert.equal(
+      setupFieldInvalidMessage(field!, "192.168.1.218\nexample.com"),
+      "Invalid IPv4 address",
+    );
   });
 
   it("exposes the package mirror domain on node foundation", () => {

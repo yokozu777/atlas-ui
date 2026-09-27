@@ -22,7 +22,7 @@ export type PlaybookSetupField = {
   kind?: PlaybookSetupFieldKind;
   group?: string;
   valueType?: PlaybookSetupValueType;
-  itemValueType?: "url" | "text";
+  itemValueType?: "url" | "text" | "ipv4";
   options?: string[];
   hint?: string;
 };
@@ -226,6 +226,14 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
     fields: [
       DNS_FIELD,
       CLUSTER_DOMAIN_FIELD,
+      {
+        key: "dns_servers",
+        label: "DNS servers",
+        group: "Network",
+        valueType: "string_list",
+        itemValueType: "ipv4",
+        hint: "Written to /etc/resolv.conf. On an infra node use the BIND address (DNS server IP).",
+      },
       {
         key: "pkg_repo_nginx_domain",
         label: "Package mirror domain",
@@ -966,6 +974,9 @@ export function setupFieldInvalidMessage(
       if (field.itemValueType === "url") {
         const message = httpUrlInvalid(item);
         if (message) return message;
+      }
+      if (field.itemValueType === "ipv4" && !isIpv4Address(item)) {
+        return "Invalid IPv4 address";
       }
     }
     return null;

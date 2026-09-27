@@ -242,6 +242,21 @@ class ExecuteAtlasInventoryTests(unittest.TestCase):
         self.assertEqual(env["SSH_KEY"], "/host/key")
         self.assertNotIn("FOO", env)
 
+    def test_merges_materialized_ssh_key_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            key = data / "projects" / "p1" / "tmp" / "git-ssh" / "e1" / "default"
+            key.parent.mkdir(parents=True)
+            key.write_text("dummy\n", encoding="utf-8")
+            with patch.dict(os.environ, {"DATA_DIR": str(data)}):
+                env = {"SSH_KEY": "/host/key"}
+                merge_atlas_git_env(env, {"SSH_KEY": str(key), "PATH": "/evil"})
+                self.assertEqual(env["SSH_KEY"], str(key))
+                self.assertNotIn("PATH", env)
+                ignored = {"SSH_KEY": "/host/key"}
+                merge_atlas_git_env(ignored, {"SSH_KEY": "/should/not/apply"})
+                self.assertEqual(ignored["SSH_KEY"], "/host/key")
+
     def test_config_yaml_paths_without_project_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

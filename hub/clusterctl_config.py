@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Optional
 
@@ -14,13 +15,45 @@ ENV_CONFIG_PATH = "ATLAS_CLUSTERCTL_CONFIG"
 ENV_CLUSTER_ROOT = "ATLAS_CLUSTER_ROOT"
 ENV_CLUSTERS_ROOT = "ATLAS_CLUSTERS_ROOT"
 ENV_WORKSPACE_ROOT = "ATLAS_WORKSPACE_ROOT"
+ENV_CLUSTER_ROOT_HOST = "ATLAS_CLUSTER_ROOT_HOST"
+ENV_CLUSTERS_ROOT_HOST = "ATLAS_CLUSTERS_ROOT_HOST"
+ENV_WORKSPACE_ROOT_HOST = "ATLAS_WORKSPACE_ROOT_HOST"
 ENV_UI_CONFIG_PATH = "ATLAS_UI_CONFIG"
+_HOST_BIND = {
+    ENV_CLUSTER_ROOT: ENV_CLUSTER_ROOT_HOST,
+    ENV_CLUSTERS_ROOT: ENV_CLUSTERS_ROOT_HOST,
+    ENV_WORKSPACE_ROOT: ENV_WORKSPACE_ROOT_HOST,
+}
 
 
 def _optional_path(raw: object) -> Optional[Path]:
     if raw is None or not str(raw).strip():
         return None
     return Path(str(raw).strip()).expanduser()
+
+
+def _norm_path(path: Path) -> Path:
+    return Path(os.path.normpath(str(path.expanduser())))
+
+
+def remap_host_bind_path(
+    raw: object, *, host_env: str, container_env: str
+) -> Optional[Path]:
+    """Rewrite a host bind path to the in-container mount (Docker Hub)."""
+    path = _optional_path(raw)
+    if path is None:
+        return None
+    host = _optional_path(os.environ.get(host_env, ""))
+    inside = _optional_path(os.environ.get(container_env, ""))
+    if host is None or inside is None:
+        return path
+    src = str(_norm_path(path))
+    prefix = str(_norm_path(host)).rstrip("/\\")
+    if src != prefix and not src.startswith(prefix + os.sep):
+        return path
+    rel = src[len(prefix) :].lstrip("/\\")
+    mapped = _norm_path(inside)
+    return mapped / rel if rel else mapped
 
 
 def _is_existing_dir(path: Optional[Path]) -> bool:
@@ -88,19 +121,37 @@ def clusterctl_root_from_ui_config() -> Optional[Path]:
     return Path(str(value).strip()).expanduser()
 
 
-def save_clusterctl_root_to_ui_config(root: Path) -> None:
-    """Persist ``clusterctlRoot`` for Settings / inspect fallback."""
+def _load_ui_config_dict() -> dict[str, Any]:
     path = ui_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            payload = raw
     except (OSError, json.JSONDecodeError):
-        payload = {}
-    payload["clusterctlRoot"] = str(Path(root).expanduser().resolve())
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_ui_config_dict(payload: dict[str, Any]) -> None:
+    path = ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def clusterctl_fetched_at_from_ui_config() -> Optional[str]:
+    raw = _load_ui_config_dict().get("clusterctlFetchedAt")
+    if not raw or not str(raw).strip():
+        return None
+    return str(raw).strip()
+
+
+def save_clusterctl_root_to_ui_config(root: Path, *, fetched: bool = False) -> None:
+    """Persist ``clusterctlRoot`` for Settings / inspect fallback."""
+    payload = _load_ui_config_dict()
+    payload["clusterctlRoot"] = str(Path(root).expanduser().resolve())
+    if fetched:
+        payload["clusterctlFetchedAt"] = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+    _save_ui_config_dict(payload)
 
 
 def default_clusterctl_root() -> Optional[Path]:
@@ -182,10 +233,18 @@ def _explicit_path(
     params: Mapping[str, Any], keys: tuple[str, ...], env_key: str
 ) -> Optional[Path]:
     candidates: list[Path] = []
+    host_env = _HOST_BIND.get(env_key, "")
     for key in keys:
         path = _optional_path(params.get(key))
-        if path is not None:
-            candidates.append(path)
+        if path is None:
+            continue
+        if host_env:
+            mapped = remap_host_bind_path(
+                path, host_env=host_env, container_env=env_key
+            )
+            if mapped is not None:
+                path = mapped
+        candidates.append(path)
     env_path = _optional_path(os.environ.get(env_key, ""))
     if env_path is not None:
         candidates.append(env_path)
@@ -302,8 +361,18 @@ def inspect_run_params_from_project(project: Mapping[str, Any]) -> dict[str, Any
         params["clusterctl_root"] = str(root)
     clusters = project.get("clustersRoot") or project.get("clusters_root")
     if clusters:
-        params["clusters_root"] = clusters
+        mapped = remap_host_bind_path(
+            clusters,
+            host_env=ENV_CLUSTERS_ROOT_HOST,
+            container_env=ENV_CLUSTERS_ROOT,
+        )
+        params["clusters_root"] = str(mapped) if mapped is not None else str(clusters)
     workspace = project.get("workspaceRoot") or project.get("workspace_root")
     if workspace:
-        params["workspace_root"] = workspace
+        mapped = remap_host_bind_path(
+            workspace,
+            host_env=ENV_WORKSPACE_ROOT_HOST,
+            container_env=ENV_WORKSPACE_ROOT,
+        )
+        params["workspace_root"] = str(mapped) if mapped is not None else str(workspace)
     return params

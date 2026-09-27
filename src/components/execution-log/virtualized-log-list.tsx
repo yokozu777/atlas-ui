@@ -66,6 +66,9 @@ export const VirtualizedLogList = forwardRef<
       defaultItemHeight={22}
       increaseViewportBy={240}
       followOutput={follow ? "auto" : false}
+      initialTopMostItemIndex={
+        follow && lines.length > 0 ? { index: lines.length - 1, align: "end" } : 0
+      }
       atBottomThreshold={64}
       atBottomStateChange={onAtBottomChange}
       rangeChanged={onRangeChanged}

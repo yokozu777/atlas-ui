@@ -9,6 +9,8 @@ from typing import Any, Mapping, Optional
 
 from clusterctl_config import (
     clusterctl_root_from_project,
+    _explicit_path,
+    ENV_CLUSTERS_ROOT,
     resolve_clusters_root,
     resolve_workspace_root,
 )
@@ -35,7 +37,9 @@ COMMAND_SUBS = {
     "config": frozenset({"show", "effective"}),
     "repos": frozenset({"status", "show"}),
 }
-FORBIDDEN_COMMANDS = frozenset({"run", "init", "use", "sync", "reset", "playbooks"})
+FORBIDDEN_COMMANDS = frozenset(
+    {"run", "init", "use", "sync", "reset", "playbooks", "docker"}
+)
 
 
 class InspectError(ValueError):
@@ -131,13 +135,11 @@ def resolve_clusters_root_for_list(
 ) -> Path:
     """Resolve inventory root without requiring a cluster leaf or ./cluster binary."""
     params = dict(run_params or {})
-    explicit = (
-        params.get("clusters_root")
-        or params.get("clustersRoot")
-        or os.environ.get("ATLAS_CLUSTERS_ROOT")
+    explicit = _explicit_path(
+        params, ("clusters_root", "clustersRoot"), ENV_CLUSTERS_ROOT
     )
-    if explicit and str(explicit).strip():
-        return Path(str(explicit).strip()).expanduser().resolve()
+    if explicit is not None:
+        return explicit
     root = clusterctl_root_from_params(params)
     return resolve_clusters_root(root, params)
 

@@ -19,6 +19,8 @@ const badgeVariants = cva(
         warning:
           "bg-warning/30 text-warning ring-1 ring-warning/40 focus-visible:ring-warning/30 dark:bg-warning/30 [a]:hover:bg-warning/40",
         info: "bg-info/30 text-info ring-1 ring-info/40 focus-visible:ring-info/30 dark:bg-info/30 [a]:hover:bg-info/40",
+        muted:
+          "bg-muted text-muted-foreground ring-1 ring-border focus-visible:ring-border [a]:hover:bg-muted/80",
         outline:
           "border-border text-foreground [a]:hover:bg-muted [a]:hover:text-muted-foreground",
         ghost:

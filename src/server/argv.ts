@@ -11,6 +11,7 @@ const SUBCOMMANDS = new Set([
   "smoke",
   "playbooks",
   "repos",
+  "docker",
   "limits",
   "vars",
 ]);
@@ -52,6 +53,12 @@ export function assertSafeArgv(argv: string[]): string[] {
       throw new Error("config requires show|effective");
     }
   }
+  if (command === "docker") {
+    const sub = cleaned[1];
+    if (!sub || sub !== "pull") {
+      throw new Error("docker requires pull");
+    }
+  }
   return cleaned;
 }
 
@@ -64,6 +71,9 @@ export function isMutatingArgv(argv: string[]): boolean {
     return true;
   }
   if (command === "workspace" && argv[1] === "reset") {
+    return true;
+  }
+  if (command === "docker" && argv[1] === "pull") {
     return true;
   }
   return false;

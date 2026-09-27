@@ -5,6 +5,7 @@ so tests/__init__.py does not run. Import this module first in those files.
 """
 import os
 
+os.environ.setdefault("ATLAS_CLUSTERCTL_AUTO_INSTALL", "0")
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-not-for-production")
 os.environ.setdefault("ATLAS_ADMIN_PASSWORD", "admin123")
 os.environ.setdefault(

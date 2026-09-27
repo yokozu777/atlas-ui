@@ -5,21 +5,22 @@ import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   BookOpen,
-  Boxes,
-  ChevronDown,
   Code,
   Eye,
   FileCode,
   FileText,
   Folder,
   Home,
+  Info,
   KeyRound,
   Layers,
   Library,
+  ListChecks,
   Lock,
+  Map,
   Notebook,
   Play,
-  Rocket,
+  ScrollText,
   Search,
   Server,
   Settings,
@@ -33,11 +34,11 @@ import {
   AtlasClusterSelectionProvider,
   useAtlasClusterSelection,
 } from "@/components/atlas-cluster-selection";
-import { ClusterHeaderSwitcher } from "@/components/cluster-header-switcher";
+import { AtlasClusterSwitcher } from "@/components/atlas-cluster-switcher";
+import { WorkingContextSwitcher } from "@/components/working-context-switcher";
 import { ClusterctlUser } from "@/components/clusterctl-user";
 import { CommandPalette } from "@/components/command-palette";
 import { NotificationsBell } from "@/components/notifications-bell";
-import { ProjectSwitcher } from "@/components/project-switcher";
 import { JobSessionProvider } from "@/components/job-session";
 import {
   Sidebar,
@@ -51,14 +52,10 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { cn } from "@/lib/utils";
 import { Separator } from "@/components/ui/separator";
 import { Kbd } from "@/components/ui/kbd";
 import { Button } from "@/components/ui/button";
@@ -70,29 +67,40 @@ import {
   setNavProjectId,
   writeLastProjectId,
 } from "@/lib/project-href";
-import { projectApiQuery } from "@/components/hosts-groups/helpers";
-import { fetchMe, fetchProject, stargateJson } from "@/lib/stargate";
+import { readCachedProject, writeCachedProject } from "@/lib/project-kind-cache";
+import { AuthzProvider, useAuthz, useCan } from "@/lib/authz";
+import { fetchProject } from "@/lib/stargate";
 import type { StargateProject } from "@/lib/project-types";
-
-function clusterIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/clusters\/([^/]+)/);
-  if (!match) return null;
-  return decodeURIComponent(match[1]);
-}
 
 function openPalette() {
   window.dispatchEvent(new Event("atlas-ui:palette"));
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  initialProject,
+  initialClusterId,
+}: {
+  children: React.ReactNode;
+  initialProject: StargateProject | null;
+  initialClusterId: string | null;
+}) {
   const pathname = usePathname();
-  const router = useRouter();
   const pathProjectId = projectIdFromPath(pathname);
-  const [storedProjectId, setStoredProjectId] = useState<string | null>(null);
+  const [storedProjectId, setStoredProjectId] = useState<string | null>(
+    () => pathProjectId ?? initialProject?.id ?? null,
+  );
   const projectId = pathProjectId ?? storedProjectId;
   setNavProjectId(projectId);
-  const clusterId = clusterIdFromPath(pathname);
-  const [project, setProject] = useState<StargateProject | null>(null);
+  const [project, setProject] = useState<StargateProject | null>(() => {
+    if (!initialProject) {
+      return null;
+    }
+    if (pathProjectId) {
+      return initialProject.id === pathProjectId ? initialProject : null;
+    }
+    return initialProject;
+  });
 
   useEffect(() => {
     if (pathProjectId) {
@@ -100,8 +108,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       setStoredProjectId(pathProjectId);
       return;
     }
-    setStoredProjectId(readLastProjectId());
-  }, [pathProjectId]);
+    setStoredProjectId(readLastProjectId() ?? initialProject?.id ?? null);
+  }, [pathProjectId, initialProject?.id]);
 
   useEffect(() => {
     function syncStored() {
@@ -122,15 +130,37 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       setProject(null);
       return;
     }
+    if (project?.id !== projectId) {
+      const cached = readCachedProject(projectId);
+      if (cached) {
+        setProject(cached);
+      } else if (initialProject?.id === projectId) {
+        setProject(initialProject);
+      }
+    }
     let cancelled = false;
     void fetchProject(projectId)
       .then((next) => {
-        if (!cancelled) {
-          setProject(next);
+        if (cancelled) {
+          return;
         }
+        writeCachedProject(next);
+        setProject(next);
       })
       .catch(() => {
         if (cancelled) {
+          return;
+        }
+        if (project?.id === projectId) {
+          return;
+        }
+        const cached = readCachedProject(projectId);
+        if (cached) {
+          setProject(cached);
+          return;
+        }
+        if (initialProject?.id === projectId) {
+          setProject(initialProject);
           return;
         }
         setProject(null);
@@ -141,23 +171,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, pathProjectId]);
-
-  useEffect(() => {
-    if (pathname === "/login" || pathname === "/change-password") {
-      return;
-    }
-    let cancelled = false;
-    void fetchMe().then((me) => {
-      if (cancelled || !me?.must_change_password) {
-        return;
-      }
-      router.replace("/change-password");
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [pathname, router]);
+    // Keep SSR kind on screen until the matching fetch returns.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, pathProjectId, initialProject?.id]);
 
   if (pathname === "/login" || pathname === "/change-password") {
     return <>{children}</>;
@@ -166,19 +182,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const kind = project?.kind;
   const atlasProjectId = kind === "atlas" ? projectId : null;
   const fallbackClusterId =
-    kind === "atlas" ? project?.cluster_id ?? null : clusterId;
+    kind === "atlas" ? project?.cluster_id ?? null : null;
 
   return (
+    <AuthzProvider>
+    <PasswordGate />
     <JobSessionProvider>
       <AtlasClusterSelectionProvider
+        key={atlasProjectId ?? "none"}
         projectId={atlasProjectId}
         fallbackClusterId={fallbackClusterId}
+        initialClusterId={
+          kind === "atlas" ? initialClusterId ?? fallbackClusterId : null
+        }
       >
         <AtlasClusterOverlays>
           <SidebarProvider className="h-full min-h-0">
           <Sidebar>
             <SidebarHeader className="gap-0 px-2 py-3">
-              <ProjectSwitcher projectId={projectId} project={project} />
+              <WorkingContextSwitcher projectId={projectId} project={project} />
             </SidebarHeader>
             <SidebarContent>
               <SidebarGroup>
@@ -198,62 +220,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </SidebarGroupContent>
               </SidebarGroup>
               {projectId && kind === "atlas" ? (
-                <>
-                  <SidebarGroup>
-                    <SidebarGroupLabel>Atlas</SidebarGroupLabel>
-                    <SidebarGroupContent>
-                      <SidebarMenu>
-                        <NavItem
-                          href={projectHref(projectId)}
-                          pathname={pathname}
-                          icon={<Home />}
-                          label="Overview"
-                          exact
-                        />
-                        <NavItem
-                          href={projectHref(projectId, "/cluster-yaml")}
-                          pathname={pathname}
-                          icon={<FileCode />}
-                          label="Cluster definition"
-                        />
-                        <NavItem
-                          href={projectHref(projectId, "/logs")}
-                          pathname={pathname}
-                          icon={<FileText />}
-                          label="Logs"
-                        />
-                        <NavItem
-                          href={projectHref(projectId, "/run")}
-                          pathname={pathname}
-                          icon={<Play />}
-                          label="Run"
-                        />
-                        <NavItem
-                          href={projectHref(projectId, "/workspace")}
-                          pathname={pathname}
-                          icon={<Layers />}
-                          label="Workspace"
-                        />
-                        <NavItem
-                          href={projectHref(projectId, "/init")}
-                          pathname={pathname}
-                          icon={<Rocket />}
-                          label="Init"
-                        />
-                        <NavItem
-                          href={projectHref(projectId, "/settings")}
-                          pathname={pathname}
-                          icon={<Settings />}
-                          label="Settings"
-                        />
-                      </SidebarMenu>
-                    </SidebarGroupContent>
-                  </SidebarGroup>
-                  <InfrastructureNav
-                    projectId={projectId}
-                    pathname={pathname}
-                  />
-                </>
+                <Suspense fallback={null}>
+                  <AtlasNav projectId={projectId} pathname={pathname} />
+                </Suspense>
               ) : null}
               {projectId && kind === "ansible" ? (
                 <>
@@ -301,69 +270,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   />
                 </>
               ) : null}
-              {clusterId && !projectId ? (
-                <SidebarGroup>
-                  <SidebarGroupLabel>Legacy cluster</SidebarGroupLabel>
-                  <SidebarGroupContent>
-                    <SidebarMenu>
-                      <SidebarMenuItem>
-                        <SidebarMenuButton render={<Link href="/projects" />}>
-                          <Boxes />
-                          <span>Go to projects</span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    </SidebarMenu>
-                  </SidebarGroupContent>
-                </SidebarGroup>
-              ) : null}
-              {projectId ? (
-                <Suspense fallback={null}>
-                  <RoleSettingsNav projectId={projectId} pathname={pathname} />
-                </Suspense>
-              ) : null}
-              <SidebarGroup>
-                <SidebarGroupLabel>System</SidebarGroupLabel>
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    <NavItem
-                      href="/workers"
-                      pathname={pathname}
-                      icon={<Server />}
-                      label="Workers"
-                    />
-                    <NavItem
-                      href="/server-logs"
-                      pathname={pathname}
-                      icon={<FileText />}
-                      label="Server logs"
-                    />
-                    <NavItem
-                      href="/secrets"
-                      pathname={pathname}
-                      icon={<KeyRound />}
-                      label="Secrets"
-                    />
-                    <NavItem
-                      href="/users"
-                      pathname={pathname}
-                      icon={<Users />}
-                      label="Users"
-                    />
-                    <NavItem
-                      href="/settings"
-                      pathname={pathname}
-                      icon={<Shield />}
-                      label="Settings"
-                    />
-                    <NavItem
-                      href="/docs"
-                      pathname={pathname}
-                      icon={<Library />}
-                      label="Docs"
-                    />
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </SidebarGroup>
+              <SystemNav pathname={pathname} />
             </SidebarContent>
             <SidebarFooter>
               <ClusterctlUser />
@@ -373,12 +280,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <SidebarInset className="min-h-0 overflow-hidden bg-transparent">
             <header
               data-slot="content-header"
-              className="flex h-12 shrink-0 items-center gap-2 border-b bg-card px-3"
+              className="flex h-12 shrink-0 items-center gap-2 overflow-x-auto border-b bg-card px-3"
             >
               <SidebarTrigger />
               <Separator orientation="vertical" className="h-4" />
-              <AppBreadcrumbs />
-              <div className="ml-auto flex items-center gap-2">
+              <div className="min-w-0 flex-1 overflow-hidden">
+                <AppBreadcrumbs kind={kind ?? null} />
+              </div>
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <AtlasClusterSwitcher />
                 <Button
                   type="button"
                   variant="ghost"
@@ -388,20 +298,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   aria-label="Search"
                 >
                   <Search />
-                  <span>Search</span>
-                  <span className="flex items-center gap-1">
+                  <span className="hidden lg:inline">Search</span>
+                  <span className="hidden md:flex items-center gap-1">
                     <Kbd>⌘</Kbd>
                     <Kbd>K</Kbd>
                   </span>
                 </Button>
                 <NotificationsBell />
-                {kind === "atlas" ? <ClusterHeaderSwitcher /> : null}
               </div>
             </header>
             <div
               className={
                 /\/projects\/[^/]+\/executions\/[^/]+\/?$/.test(pathname) ||
-                /\/(projects|clusters)\/[^/]+\/logs\/[^/]+\/?$/.test(pathname)
+                /\/(projects|clusters)\/[^/]+\/logs\/[^/]+\/?$/.test(pathname) ||
+                /\/projects\/[^/]+\/map\/?$/.test(pathname)
                   ? "flex min-h-0 flex-1 flex-col overflow-hidden p-4"
                   : "min-h-0 flex-1 overflow-y-auto p-8"
               }
@@ -417,6 +327,75 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </AtlasClusterOverlays>
       </AtlasClusterSelectionProvider>
     </JobSessionProvider>
+    </AuthzProvider>
+  );
+}
+
+function PasswordGate() {
+  const router = useRouter();
+  const { me, ready } = useAuthz();
+  useEffect(() => {
+    if (ready && me?.must_change_password) {
+      router.replace("/change-password");
+    }
+  }, [me, ready, router]);
+  return null;
+}
+
+function SystemNav({ pathname }: { pathname: string }) {
+  const can = useCan();
+  return (
+    <SidebarGroup>
+      <SidebarGroupLabel>System</SidebarGroupLabel>
+      <SidebarGroupContent>
+        <SidebarMenu>
+          {can("settings.read") ? (
+            <NavItem
+              href="/server-logs"
+              pathname={pathname}
+              icon={<FileText />}
+              label="Server logs"
+            />
+          ) : null}
+          {can("global_secrets.read") ? (
+            <NavItem
+              href="/secrets"
+              pathname={pathname}
+              icon={<KeyRound />}
+              label="Secrets Manager"
+            />
+          ) : null}
+          {can("users.read") ? (
+            <NavItem
+              href="/users"
+              pathname={pathname}
+              icon={<Users />}
+              label="Users"
+            />
+          ) : null}
+          {can("settings.read") ? (
+            <NavItem
+              href="/settings"
+              pathname={pathname}
+              icon={<Shield />}
+              label="Console"
+            />
+          ) : null}
+          <NavItem
+            href="/docs"
+            pathname={pathname}
+            icon={<Library />}
+            label="Docs"
+          />
+          <NavItem
+            href="/about"
+            pathname={pathname}
+            icon={<Info />}
+            label="About"
+          />
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
   );
 }
 
@@ -437,6 +416,152 @@ function SessionCommandPalette({
   );
 }
 
+function pathMatches(pathname: string, href: string) {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function AtlasNav({
+  projectId,
+  pathname,
+}: {
+  projectId: string;
+  pathname: string;
+}) {
+  const can = useCan();
+  const hostsHref = projectHref(projectId, "/hosts");
+  const inventoryHref = projectHref(projectId, "/inventory");
+  const varsHref = projectHref(projectId, "/vars");
+  const executionsHref = projectHref(projectId, "/executions");
+  const executionsLogsHref = projectHref(projectId, "/executions?tab=logs");
+  const logsHref = projectHref(projectId, "/logs");
+  const rolesHref = projectHref(projectId, "/roles");
+  const handbookHref = projectHref(projectId, "/handbook");
+  const settingsHref = projectHref(projectId, "/settings");
+  const ansibleConfigHref = projectHref(projectId, "/ansible-config");
+  const vaultHref = projectHref(projectId, "/vault");
+  const clustersHref = projectHref(projectId, "/clusters");
+  const searchParams = useSearchParams();
+  const logsTab = searchParams.get("tab") === "logs";
+
+  const inventoryActive =
+    pathMatches(pathname, hostsHref) ||
+    pathMatches(pathname, inventoryHref) ||
+    pathMatches(pathname, varsHref);
+  const onExecutions = pathMatches(pathname, executionsHref);
+  const executionsActive = onExecutions && !logsTab;
+  const logsActive =
+    (onExecutions && logsTab) || pathMatches(pathname, logsHref);
+  const rolesActive =
+    pathMatches(pathname, rolesHref) || pathMatches(pathname, handbookHref);
+
+  return (
+    <>
+      <SidebarGroup>
+        <SidebarGroupLabel>Cluster</SidebarGroupLabel>
+        <SidebarGroupContent>
+          <SidebarMenu>
+            <NavItem
+              href={projectHref(projectId)}
+              pathname={pathname}
+              icon={<Home />}
+              label="Overview"
+              exact
+            />
+            <NavItem
+              href={projectHref(projectId, "/cluster-yaml")}
+              pathname={pathname}
+              icon={<ListChecks />}
+              label="Setup"
+            />
+            <NavItem
+              href={projectHref(projectId, "/map")}
+              pathname={pathname}
+              icon={<Map />}
+              label="Map"
+            />
+            <NavItem
+              href={hostsHref}
+              pathname={pathname}
+              icon={<Server />}
+              label="Inventory"
+              active={inventoryActive}
+            />
+          </SidebarMenu>
+        </SidebarGroupContent>
+      </SidebarGroup>
+      <SidebarGroup>
+        <SidebarGroupLabel>Operate</SidebarGroupLabel>
+        <SidebarGroupContent>
+          <SidebarMenu>
+            <NavItem
+              href={executionsHref}
+              pathname={pathname}
+              icon={<FileText />}
+              label="Executions"
+              active={executionsActive}
+            />
+            <NavItem
+              href={executionsLogsHref}
+              pathname={pathname}
+              icon={<ScrollText />}
+              label="Logs"
+              active={logsActive}
+            />
+          </SidebarMenu>
+        </SidebarGroupContent>
+      </SidebarGroup>
+      <SidebarGroup>
+        <SidebarGroupLabel>Project</SidebarGroupLabel>
+        <SidebarGroupContent>
+          <SidebarMenu>
+            <NavItem
+              href={clustersHref}
+              pathname={pathname}
+              icon={<Layers />}
+              label="Clusters"
+            />
+            <NavItem
+              href={rolesHref}
+              pathname={pathname}
+              icon={<BookOpen />}
+              label="Roles"
+              active={rolesActive}
+            />
+            {can("secrets.read") ? (
+            <NavItem
+              href={projectHref(projectId, "/secrets")}
+              pathname={pathname}
+              icon={<KeyRound />}
+              label="Secrets"
+            />
+            ) : null}
+            <NavItem
+              href={ansibleConfigHref}
+              pathname={pathname}
+              icon={<FileCode />}
+              label="Ansible Config"
+            />
+            {can("secrets.read") ? (
+            <NavItem
+              href={vaultHref}
+              pathname={pathname}
+              icon={<Lock />}
+              label="Vaults"
+            />
+            ) : null}
+            <NavItem
+              href={settingsHref}
+              pathname={pathname}
+              icon={<Settings />}
+              label="Project Settings"
+            />
+          </SidebarMenu>
+        </SidebarGroupContent>
+      </SidebarGroup>
+    </>
+  );
+}
+
 function InfrastructureNav({
   projectId,
   pathname,
@@ -444,6 +569,7 @@ function InfrastructureNav({
   projectId: string;
   pathname: string;
 }) {
+  const can = useCan();
   return (
     <>
       <SidebarGroup>
@@ -482,18 +608,22 @@ function InfrastructureNav({
               icon={<Settings />}
               label="Ansible Config"
             />
+            {can("secrets.read") ? (
             <NavItem
               href={projectHref(projectId, "/vault")}
               pathname={pathname}
               icon={<Lock />}
               label="Vaults"
             />
+            ) : null}
+            {can("secrets.read") ? (
             <NavItem
               href={projectHref(projectId, "/secrets")}
               pathname={pathname}
               icon={<KeyRound />}
               label="Secrets"
             />
+            ) : null}
           </SidebarMenu>
         </SidebarGroupContent>
       </SidebarGroup>
@@ -550,310 +680,6 @@ function NavItem({
     <SidebarMenuItem>
       <SidebarMenuButton isActive={active} render={<Link href={href} />}>
         {icon}
-        <span>{label}</span>
-      </SidebarMenuButton>
-    </SidebarMenuItem>
-  );
-}
-
-type RoleNode = {
-  type?: string;
-  name?: string;
-  id?: string;
-  path?: string;
-  children?: RoleNode[];
-};
-
-function roleNodeId(node: RoleNode): string {
-  return node.id || node.path || node.name || "";
-}
-
-function nodeHasRoles(node: RoleNode): boolean {
-  if (node.type === "role") {
-    return true;
-  }
-  return (node.children ?? []).some(nodeHasRoles);
-}
-
-function visibleChildren(node: RoleNode): RoleNode[] {
-  return (node.children ?? []).filter(
-    (child) => child.type === "role" || nodeHasRoles(child),
-  );
-}
-
-function ancestorFolderIds(
-  nodes: RoleNode[],
-  roleId: string,
-  trail: string[] = [],
-): string[] | null {
-  for (const node of nodes) {
-    const id = roleNodeId(node);
-    if (node.type === "role") {
-      if (id === roleId) {
-        return trail;
-      }
-      continue;
-    }
-    const found = ancestorFolderIds(node.children ?? [], roleId, [...trail, id]);
-    if (found) {
-      return found;
-    }
-  }
-  return null;
-}
-
-function roleSidebarLabel(name: string): string {
-  const match = name.match(/^(\d+)/);
-  const number = match ? match[1] : "";
-  const rest = name.replace(/^\d+_/, "").replace(/_/g, " ");
-  return number ? `${number} ${rest}` : rest;
-}
-
-function RoleSettingsNav({
-  projectId,
-  pathname,
-}: {
-  projectId: string;
-  pathname: string;
-}) {
-  const { clusterId } = useAtlasClusterSelection();
-  const searchParams = useSearchParams();
-  const selected = searchParams.get("role") ?? "";
-  const [tree, setTree] = useState<RoleNode[]>([]);
-  const [open, setOpen] = useState(false);
-  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
-  const q = projectApiQuery(projectId, clusterId);
-
-  useEffect(() => {
-    let cancelled = false;
-    void stargateJson<{ tree?: RoleNode[] }>(`/roles/storage?${q}`)
-      .then((data) => {
-        if (!cancelled) {
-          setTree(data.tree ?? []);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setTree([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [q]);
-
-  useEffect(() => {
-    if (!selected || tree.length === 0) {
-      return;
-    }
-    const ancestors = ancestorFolderIds(tree, selected);
-    if (!ancestors) {
-      return;
-    }
-    setOpen(true);
-    setOpenIds((prev) => {
-      const next = new Set(prev);
-      for (const id of ancestors) {
-        next.add(id);
-      }
-      return next;
-    });
-  }, [selected, tree]);
-
-  function toggleFolder(id: string) {
-    setOpenIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }
-
-  const rolesHref = projectHref(projectId, "/roles");
-  const onRoles = pathname === rolesHref || pathname.startsWith(`${rolesHref}/`);
-  const items = tree.filter((node) => node.type === "role" || nodeHasRoles(node));
-
-  return (
-    <SidebarGroup>
-      <SidebarGroupLabel
-        render={<button type="button" />}
-        className="w-full cursor-pointer justify-between hover:text-sidebar-foreground"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        Role Settings
-        <ChevronDown
-          className={cn(
-            "transition-transform",
-            open ? "rotate-180" : "rotate-0",
-          )}
-        />
-      </SidebarGroupLabel>
-      {open ? (
-        <SidebarGroupContent>
-          <SidebarMenu>
-            {items.length === 0 ? (
-              <SidebarMenuItem>
-                <SidebarMenuButton disabled>
-                  <Settings />
-                  <span>No roles</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            ) : (
-              items.map((node) =>
-                node.type === "role" ? (
-                  <RoleNavLeaf
-                    key={roleNodeId(node)}
-                    node={node}
-                    nested={false}
-                    rolesHref={rolesHref}
-                    selected={selected}
-                    onRoles={onRoles}
-                  />
-                ) : (
-                  <RoleNavFolder
-                    key={roleNodeId(node)}
-                    node={node}
-                    nested={false}
-                    rolesHref={rolesHref}
-                    selected={selected}
-                    onRoles={onRoles}
-                    openIds={openIds}
-                    onToggle={toggleFolder}
-                  />
-                ),
-              )
-            )}
-          </SidebarMenu>
-        </SidebarGroupContent>
-      ) : null}
-    </SidebarGroup>
-  );
-}
-
-function RoleNavFolder({
-  node,
-  nested,
-  rolesHref,
-  selected,
-  onRoles,
-  openIds,
-  onToggle,
-}: {
-  node: RoleNode;
-  nested: boolean;
-  rolesHref: string;
-  selected: string;
-  onRoles: boolean;
-  openIds: Set<string>;
-  onToggle: (id: string) => void;
-}) {
-  const id = roleNodeId(node);
-  const expanded = openIds.has(id);
-  const kids = visibleChildren(node);
-  const label = node.name || id;
-  const toggle = (
-    <>
-      <Folder />
-      <span>{label}</span>
-      <ChevronDown
-        className={cn(
-          "ml-auto transition-transform",
-          expanded ? "rotate-180" : "rotate-0",
-        )}
-      />
-    </>
-  );
-  const body = (
-    <>
-      {nested ? (
-        <SidebarMenuSubButton
-          render={<button type="button" />}
-          className="w-full cursor-pointer"
-          aria-expanded={expanded}
-          onClick={() => onToggle(id)}
-        >
-          {toggle}
-        </SidebarMenuSubButton>
-      ) : (
-        <SidebarMenuButton
-          className="cursor-pointer"
-          aria-expanded={expanded}
-          onClick={() => onToggle(id)}
-        >
-          {toggle}
-        </SidebarMenuButton>
-      )}
-      {expanded ? (
-        <SidebarMenuSub>
-          {kids.map((child) =>
-            child.type === "role" ? (
-              <RoleNavLeaf
-                key={roleNodeId(child)}
-                node={child}
-                nested
-                rolesHref={rolesHref}
-                selected={selected}
-                onRoles={onRoles}
-              />
-            ) : (
-              <RoleNavFolder
-                key={roleNodeId(child)}
-                node={child}
-                nested
-                rolesHref={rolesHref}
-                selected={selected}
-                onRoles={onRoles}
-                openIds={openIds}
-                onToggle={onToggle}
-              />
-            ),
-          )}
-        </SidebarMenuSub>
-      ) : null}
-    </>
-  );
-  return nested ? (
-    <SidebarMenuSubItem>{body}</SidebarMenuSubItem>
-  ) : (
-    <SidebarMenuItem>{body}</SidebarMenuItem>
-  );
-}
-
-function RoleNavLeaf({
-  node,
-  nested,
-  rolesHref,
-  selected,
-  onRoles,
-}: {
-  node: RoleNode;
-  nested: boolean;
-  rolesHref: string;
-  selected: string;
-  onRoles: boolean;
-}) {
-  const id = roleNodeId(node);
-  const href = `${rolesHref}?role=${encodeURIComponent(id)}`;
-  const active = onRoles && selected === id;
-  const label = roleSidebarLabel(node.name || id);
-  if (nested) {
-    return (
-      <SidebarMenuSubItem>
-        <SidebarMenuSubButton isActive={active} render={<Link href={href} />}>
-          <Settings />
-          <span>{label}</span>
-        </SidebarMenuSubButton>
-      </SidebarMenuSubItem>
-    );
-  }
-  return (
-    <SidebarMenuItem>
-      <SidebarMenuButton isActive={active} render={<Link href={href} />}>
-        <Settings />
         <span>{label}</span>
       </SidebarMenuButton>
     </SidebarMenuItem>

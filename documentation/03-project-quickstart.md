@@ -13,7 +13,7 @@ Quick guide to creating a project and running work. Kind is **immutable** after 
 3. Enter a **Name** (description optional).
 4. Choose **Kind**:
    - **Ansible** — playbooks, inventory, Git sources, scheduler.
-   - **Atlas** — clusterctl cluster. Set **Cluster id** to an inventory leaf such as `dev/k8s`. No Ansible repo skeleton is created.
+   - **Atlas** — clusterctl inventory. Not bound to one cluster id; scaffold leaves with **New cluster**, then pick a cluster in the header.
 5. Click **Create**.
 
 Home is `/projects`. Opening a project lands on **Dashboard** (ansible) or **Overview** (atlas).
@@ -36,12 +36,12 @@ Visual playbook builder and a separate “visual role configurator” are not re
 
 ## 3. Atlas project
 
-1. Confirm the cluster in the header switcher (for example `dev/k8s`).
+1. Confirm the cluster in the header switcher (for example `dev/k8s`), or **New cluster** to scaffold a leaf (**Init**).
 2. **Overview** — plan, phases, host count, last activity. **Plan** / **Validate** / **Smoke** inspect; **Run** queues on the worker.
-3. **Cluster definition → Repos** — playbook repos from `cluster.yaml`. **Sync** / **Sync all** (lock SHA is shown when `playbooks.lock` has that repo). Assign a **Git pull key** (project default or per-repo) from **Secrets**.
-4. **Hosts & Groups** / **Vars** / **Logs** — inventory and run history for the selected cluster.
+3. **Definition → Repos** — playbook repos from `cluster.yaml`. **Sync** / **Sync all** (lock SHA is shown when `playbooks.lock` has that repo). Assign a **Git pull key** (project default or per-repo) from **Secrets**.
+4. **Inventory** — hosts, groups, inventory files, and vars for the selected cluster.
 5. **Run** — phases, tags, limit, extra vars, dry-run, executor `local` or `docker`. **Advanced → Executor** overrides `cluster.yaml`. `--root-ssh` needs permission `atlas.execute_root_ssh` (not granted by `atlas.execute` alone).
-6. **Init** lives under the atlas project, not next to Projects.
+6. **History** — worker jobs and clusterctl run stamps. Runtime reset, ansible.cfg, and vaults live under **Settings → Advanced**.
 
 Hub inspect uses the clusterctl checkout plus the inventory leaf (`/atlas/…` in Docker). Vars save is read-only on hub. Mutating jobs (`run`, `init`, `repos sync`, `workspace reset`) are single-flight.
 
@@ -53,5 +53,5 @@ Hub inspect uses the clusterctl checkout plus the inventory leaf (`/atlas/…` i
 |------|-------|--------|
 | 1 | Projects | Create project (`ansible` or `atlas`) |
 | 2a | Ansible: Settings → Sources, Hosts, Playbooks | Pull Git, bind SSH, Run |
-| 2b | Atlas: Overview, Cluster definition, Run | Pick cluster, sync repos, Queue on worker |
-| 3 | Runs / Logs / Workers | Watch execution; scale workers under Settings → Workers |
+| 2b | Atlas: Overview, Definition, Inventory, Run | Pick cluster, sync repos, Queue on worker |
+| 3 | History / Workers | Watch execution; scale workers under Console → Workers |

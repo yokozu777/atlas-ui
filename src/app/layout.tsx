@@ -3,7 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { Theme } from "@radix-ui/themes";
 import "@radix-ui/themes/styles.css";
 
-import { AppShell } from "@/components/app-shell";
+import { AppFrame } from "@/app/app-frame";
 import { RadixWallpaper } from "@/components/radix-wallpaper";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -43,11 +43,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <RadixWallpaper />
           <TooltipProvider>
             <div className="relative z-10 flex h-full min-h-0 flex-col">
-              <AppShell>{children}</AppShell>
-              <Toaster />
+              <AppFrame>{children}</AppFrame>
             </div>
           </TooltipProvider>
         </Theme>
+        <Toaster />
       </body>
     </html>
   );

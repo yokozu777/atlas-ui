@@ -1,25 +1,36 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Flame, ListTree, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 import { JsonBlock } from "@/components/json-block";
 import { StackList, StackListRow } from "@/components/stack-list";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { runClusterctl } from "@/lib/api";
 import type { PlanJson, SmokeJson, ValidateJson } from "@/lib/cluster-types";
 import { parseJobJson } from "@/lib/job-output";
 
 export type InspectKind = "plan" | "validate" | "smoke";
+
+const INSPECT_META: Record<
+  InspectKind,
+  { title: string; icon: ReactNode }
+> = {
+  plan: { title: "Plan", icon: <ListTree className="size-4" /> },
+  validate: { title: "Validate", icon: <ShieldCheck className="size-4" /> },
+  smoke: { title: "Smoke", icon: <Flame className="size-4" /> },
+};
 
 function argvFor(kind: InspectKind): string[] {
   return [kind, "--json"];
@@ -141,31 +152,44 @@ export function InspectSheet({
   kind: InspectKind | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  const lastKind = useRef<InspectKind | null>(kind);
+  if (kind) lastKind.current = kind;
+  const displayKind = kind ?? lastKind.current;
+  const meta = displayKind ? INSPECT_META[displayKind] : null;
   return (
-    <Sheet open={kind !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full sm:max-w-xl" showCloseButton>
-        <SheetHeader>
-          <SheetTitle className="font-display font-mono">
-            {kind ? `./cluster ${kind} --json` : "inspect"}
-          </SheetTitle>
-          <SheetDescription className="font-mono text-xs">
+    <Dialog open={kind !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] min-h-0 w-full flex-col overflow-hidden sm:max-w-3xl bg-[var(--color-panel-solid,#1c1c1f)] [backdrop-filter:none] [-webkit-backdrop-filter:none]">
+        <DialogHeader className="pr-8">
+          <DialogTitle className="flex items-center gap-2">
+            {meta?.icon}
+            {meta?.title ?? "Inspect"}
+          </DialogTitle>
+          <DialogDescription className="font-mono">
             {clusterId}
-          </SheetDescription>
-        </SheetHeader>
+            {displayKind ? ` · ./cluster ${displayKind} --json` : ""}
+          </DialogDescription>
+        </DialogHeader>
         {kind ? (
-          <InspectBody key={kind} clusterId={clusterId} kind={kind} />
+          <InspectBody
+            key={kind}
+            clusterId={clusterId}
+            kind={kind}
+            onClose={() => onOpenChange(false)}
+          />
         ) : null}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function InspectBody({
   clusterId,
   kind,
+  onClose,
 }: {
   clusterId: string;
   kind: InspectKind;
+  onClose: () => void;
 }) {
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -204,26 +228,29 @@ function InspectBody({
   }, [kind, clusterId]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4">
-      {busy ? (
-        <div className="space-y-2">
-          <Skeleton className="h-4 w-2/3" />
-          <Skeleton className="h-4 w-1/2" />
-          <Skeleton className="h-24 w-full" />
-        </div>
-      ) : error ? (
-        <p className="font-mono text-xs whitespace-pre-wrap text-destructive">
-          {error}
-        </p>
-      ) : kind === "plan" && raw ? (
-        <PlanView data={raw as PlanJson} />
-      ) : kind === "validate" && raw ? (
-        <ValidateView data={raw as ValidateJson} />
-      ) : kind === "smoke" && raw ? (
-        <SmokeView data={raw as SmokeJson} />
-      ) : null}
-      {raw ? (
-        <div>
+    <>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+        {busy ? (
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-2/3" />
+            <Skeleton className="h-4 w-1/2" />
+            <Skeleton className="h-24 w-full" />
+          </div>
+        ) : error ? (
+          <p className="font-mono text-xs whitespace-pre-wrap text-destructive">
+            {error}
+          </p>
+        ) : kind === "plan" && raw ? (
+          <PlanView data={raw as PlanJson} />
+        ) : kind === "validate" && raw ? (
+          <ValidateView data={raw as ValidateJson} />
+        ) : kind === "smoke" && raw ? (
+          <SmokeView data={raw as SmokeJson} />
+        ) : null}
+        {showRaw && raw ? <JsonBlock value={raw} /> : null}
+      </div>
+      <DialogFooter className="sm:justify-between">
+        {raw ? (
           <Button
             type="button"
             variant="ghost"
@@ -232,9 +259,13 @@ function InspectBody({
           >
             {showRaw ? "Hide JSON" : "Raw JSON"}
           </Button>
-          {showRaw ? <JsonBlock value={raw} /> : null}
-        </div>
-      ) : null}
-    </div>
+        ) : (
+          <span />
+        )}
+        <Button type="button" variant="ghost" onClick={onClose}>
+          Close
+        </Button>
+      </DialogFooter>
+    </>
   );
 }

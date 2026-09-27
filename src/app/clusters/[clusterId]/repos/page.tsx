@@ -13,6 +13,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { queueReposSync, waitHubExecution } from "@/lib/api";
 import { currentNavProjectId } from "@/lib/project-href";
+import { notify, notifyExecution } from "@/lib/notification-inbox";
+import { useEnsureClusterctlSshKey } from "@/hooks/use-ensure-clusterctl-ssh";
 
 export default function ReposPage({
   params,
@@ -28,10 +30,17 @@ export function ClusterReposView({ clusterId }: { clusterId: string }) {
   const [phase, setPhase] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const { ensure: ensureSshKey, dialog: sshDialog } = useEnsureClusterctlSshKey();
 
   async function runSync() {
     setBusy(true);
     try {
+      if (!(await ensureSshKey())) {
+        notify("error", "Add an SSH key in Secrets Manager to clone playbooks", {
+          href: "/secrets",
+        });
+        return;
+      }
       const result = await queueReposSync({
         clusterId,
         projectId: currentNavProjectId() ?? undefined,
@@ -39,17 +48,39 @@ export function ClusterReposView({ clusterId }: { clusterId: string }) {
         phase: phase.trim() || undefined,
       });
       if (result.executionId) {
-        toast.success("Sync queued on worker");
         const projectId = currentNavProjectId();
         if (projectId) {
+          notifyExecution(
+            "success",
+            "Sync queued on worker",
+            projectId,
+            result.executionId,
+          );
           const done = await waitHubExecution(projectId, result.executionId);
           if (done === "SUCCESS") {
-            toast.success("Repo sync finished");
+            notifyExecution(
+              "success",
+              "Repo sync finished",
+              projectId,
+              result.executionId,
+            );
           } else if (done === "TIMEOUT") {
-            toast.error("Repo sync is still running; refresh status later");
+            notifyExecution(
+              "error",
+              "Repo sync is still running; refresh status later",
+              projectId,
+              result.executionId,
+            );
           } else {
-            toast.error(`Repo sync ${done.toLowerCase()}`);
+            notifyExecution(
+              "error",
+              `Repo sync ${done.toLowerCase()}`,
+              projectId,
+              result.executionId,
+            );
           }
+        } else {
+          toast.success("Sync queued on worker");
         }
       } else if (result.exitCode) {
         toast.error("Repo sync failed");
@@ -103,6 +134,7 @@ export function ClusterReposView({ clusterId }: { clusterId: string }) {
         confirmLabel="Sync"
         onConfirm={() => void runSync()}
       />
+      {sshDialog}
     </div>
   );
 }

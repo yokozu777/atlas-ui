@@ -220,3 +220,34 @@ def iter_execution_log_sse(
             logger.error("Error in log stream for %s: %s", execution_id, exc, exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
             break
+
+
+def get_execution_log_tail(
+    execution_id: str,
+    project_id: str,
+    tail: int = 8192,
+) -> dict[str, Any]:
+    """Return the last ``tail`` bytes of an execution log (UTF-8, first partial line dropped)."""
+    size = max(1, min(int(tail), 1024 * 1024))
+    _empty, _next, file_size, is_complete = read_log_chunk(
+        execution_id,
+        offset=10**15,
+        limit=1,
+        project_id=project_id,
+    )
+    offset = max(0, file_size - size)
+    text, _next_offset, file_size, is_complete = read_log_chunk(
+        execution_id,
+        offset=offset,
+        limit=size,
+        project_id=project_id,
+    )
+    if offset > 0:
+        newline = text.find("\n")
+        if newline != -1:
+            text = text[newline + 1 :]
+    return {
+        "text": text,
+        "fileSize": file_size,
+        "isComplete": is_complete,
+    }

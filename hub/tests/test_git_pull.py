@@ -47,6 +47,10 @@ class GitPullHttpTests(unittest.TestCase):
 
     def setUp(self):
         secret_encryption._encryption_instance = None
+        from clusterctl_ssh import save_clusterctl_ssh_secret_id
+
+        save_clusterctl_ssh_secret_id(Path(os.environ["DATA_DIR"]), None)
+        save_clusterctl_ssh_secret_id(gateway.DATA_DIR, None)
 
     def _login(self):
         res = self.client.post(
@@ -210,6 +214,7 @@ class GitPullHttpTests(unittest.TestCase):
             data_dir=gateway.DATA_DIR,
         )
         self.assertIn("GIT_SSH_COMMAND", env)
+        self.assertNotIn("SSH_KEY", env)
         self.assertIn("PLAYBOOKS_ATLAS_K8S_CORE_SSH_KEY", env)
         key_path = Path(env["PLAYBOOKS_ATLAS_K8S_CORE_SSH_KEY"])
         self.assertTrue(key_path.is_file())
@@ -255,19 +260,109 @@ class GitPullHttpTests(unittest.TestCase):
         execution_id = queued.json()["executionId"]
         claimed = self.client.post(
             "/api/worker/claim",
-            json={},
+            json={"projectId": project_id},
             headers={"Authorization": f"Bearer {worker_token}"},
         )
         self.assertEqual(claimed.status_code, 200, claimed.text)
         params = claimed.json().get("runParams") or {}
         env = params.get("env") or {}
         self.assertIn("GIT_SSH_COMMAND", env)
+        self.assertNotIn("SSH_KEY", env)
         stored = get_execution(execution_id, project_id=project_id)
         stored_env = (stored.get("runParams") or {}).get("env") or {}
         self.assertNotIn("GIT_SSH_COMMAND", stored_env)
+        self.assertNotIn("SSH_KEY", stored_env)
         blob = json.dumps(stored)
         self.assertNotIn("BEGIN", blob)
         self.assertNotIn("privateKey", blob)
+
+    def test_system_default_ssh_without_git_pull(self):
+        project_id, headers = self._atlas_project("git-pull-system-ssh")
+        secret_id = self._create_git_ssh_secret(headers, "gitea-system-default")
+        saved = self.client.put(
+            "/api/global/clusterctl-ssh",
+            headers=headers,
+            json={"sshSecretId": secret_id},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json().get("sshSecretId"), secret_id)
+        got = self.client.get(f"/api/projects/{project_id}", headers=headers)
+        project = got.json()["project"]
+        execution_id = "exec-system-ssh"
+        env = materialize_git_pull_env(
+            project,
+            project_id=project_id,
+            execution_id=execution_id,
+            data_dir=gateway.DATA_DIR,
+        )
+        self.assertIn("SSH_KEY", env)
+        self.assertNotIn("GIT_SSH_COMMAND", env)
+        self.assertTrue(Path(env["SSH_KEY"]).is_file())
+        self.assertIn("BEGIN", Path(env["SSH_KEY"]).read_text(encoding="utf-8"))
+        cleanup_git_pull_keys(
+            project_id, execution_id, data_dir=gateway.DATA_DIR
+        )
+
+    def test_git_and_clusterctl_keys_stay_separate(self):
+        git_key = _ed25519_private_key()
+        vm_key = _ed25519_private_key()
+        self.assertNotEqual(git_key, vm_key)
+        project_id, headers = self._atlas_project("git-pull-split-keys")
+        git_created = self.client.post(
+            "/api/global/secrets",
+            headers=headers,
+            json={
+                "name": "gitea-playbooks",
+                "type": "git_ssh_key",
+                "privateKey": git_key,
+            },
+        )
+        self.assertEqual(git_created.status_code, 201, git_created.text)
+        git_id = git_created.json()["secret"]["id"]
+        vm_created = self.client.post(
+            "/api/global/secrets",
+            headers=headers,
+            json={
+                "name": "atlas-operator",
+                "type": "git_ssh_key",
+                "privateKey": vm_key,
+            },
+        )
+        self.assertEqual(vm_created.status_code, 201, vm_created.text)
+        vm_id = vm_created.json()["secret"]["id"]
+        self.client.put(
+            f"/api/projects/{project_id}",
+            json={"gitPull": {"defaultSecretId": git_id}},
+            headers=headers,
+        )
+        saved = self.client.put(
+            "/api/global/clusterctl-ssh",
+            headers=headers,
+            json={"sshSecretId": vm_id},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        got = self.client.get(f"/api/projects/{project_id}", headers=headers)
+        env = materialize_git_pull_env(
+            got.json()["project"],
+            project_id=project_id,
+            execution_id="exec-split-keys",
+            data_dir=gateway.DATA_DIR,
+        )
+        self.assertIn("GIT_SSH_COMMAND", env)
+        self.assertIn("SSH_KEY", env)
+        git_path = Path(env["SSH_KEY"]).parent / "default"
+        ssh_path = Path(env["SSH_KEY"])
+        self.assertTrue(git_path.is_file())
+        self.assertNotEqual(git_path.resolve(), ssh_path.resolve())
+        self.assertIn("BEGIN", git_path.read_text(encoding="utf-8"))
+        self.assertIn("BEGIN", ssh_path.read_text(encoding="utf-8"))
+        self.assertNotEqual(
+            git_path.read_text(encoding="utf-8"),
+            ssh_path.read_text(encoding="utf-8"),
+        )
+        cleanup_git_pull_keys(
+            project_id, "exec-split-keys", data_dir=gateway.DATA_DIR
+        )
 
 
 if __name__ == "__main__":

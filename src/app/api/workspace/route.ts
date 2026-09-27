@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { parseJobJson } from "@/lib/job-output";
+import { requireHubApiSession } from "@/server/hub-api-session";
 import { readJobLog, startJob, waitForJob } from "@/server/jobs";
 import {
   listWorkspaceDir,
@@ -26,6 +27,10 @@ async function workspaceRoot(clusterId: string): Promise<string> {
 }
 
 export async function GET(request: Request) {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   const url = new URL(request.url);
   const clusterId = url.searchParams.get("clusterId") ?? "";
   const rel = url.searchParams.get("rel") ?? "";

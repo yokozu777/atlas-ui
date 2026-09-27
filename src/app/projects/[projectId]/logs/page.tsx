@@ -1,4 +1,3 @@
-import { AtlasSessionLogsPage } from "@/components/atlas-session-cluster-view";
 import { resolveProjectPage } from "@/server/project-page";
 import { redirect } from "next/navigation";
 import { projectHref } from "@/lib/project-href";
@@ -13,5 +12,5 @@ export default async function ProjectLogsPage({
   if (project.kind === "ansible") {
     redirect(projectHref(projectId, "/executions"));
   }
-  return <AtlasSessionLogsPage />;
+  redirect(projectHref(projectId, "/executions?tab=logs"));
 }

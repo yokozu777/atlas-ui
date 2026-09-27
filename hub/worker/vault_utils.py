@@ -64,8 +64,11 @@ def get_key_password_for_vault(project_id: str, vault_uuid: str) -> Optional[str
     if not pass_file.exists():
         return None
     try:
-        with open(pass_file, 'r', encoding='utf-8') as f:
-            return f.read().rstrip('\n')
+        from vault_pass import VaultPassError, read_vault_pass_file
+
+        return read_vault_pass_file(pass_file)
+    except VaultPassError:
+        raise
     except Exception:
         return None
 

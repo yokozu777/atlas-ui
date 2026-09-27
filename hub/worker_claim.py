@@ -11,6 +11,28 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WORKER_MAX_CONCURRENCY_CAP = 8
+
+
+def worker_max_concurrency_cap(env=None) -> int:
+    raw = (env or os.environ).get("ATLAS_WORKER_MAX_CONCURRENCY_CAP", "")
+    try:
+        cap = int(str(raw).strip() or DEFAULT_WORKER_MAX_CONCURRENCY_CAP)
+    except (TypeError, ValueError):
+        cap = DEFAULT_WORKER_MAX_CONCURRENCY_CAP
+    return max(1, cap)
+
+
+def resolve_worker_max_concurrency(worker_data: Optional[dict], env=None) -> int:
+    """Hub-owned cap: stored worker.maxConcurrency clamped to 1..CAP. Claim body is ignored."""
+    cap = worker_max_concurrency_cap(env)
+    raw = (worker_data or {}).get("maxConcurrency", 1)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 1
+    return max(1, min(value, cap))
+
 
 def _projects_dir() -> Path:
     raw = os.environ.get("DATA_DIR")
@@ -69,8 +91,37 @@ def server_claim_next_execution(
     tags=None,
     projects_dir: Optional[Path] = None,
 ):
-    """Atomically claim the next QUEUED execution. Returns (id, data, project_id) or (None, None, None)."""
+    """Atomically claim the next QUEUED execution. Returns (id, data, project_id) or (None, None, None).
+
+    max_concurrency from the claim body is ignored; the hub uses worker_data.maxConcurrency.
+    """
+    from json_file_lock import exclusive_file
+    from worker_registry import worker_json_path
+
     root = Path(projects_dir) if projects_dir is not None else _projects_dir()
+    max_concurrency = resolve_worker_max_concurrency(worker_data)
+    lock_path = worker_json_path(str(worker_id))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with exclusive_file(lock_path):
+        return _claim_next_execution_locked(
+            worker_id,
+            worker_data,
+            project_id=project_id,
+            max_concurrency=max_concurrency,
+            tags=tags,
+            root=root,
+        )
+
+
+def _claim_next_execution_locked(
+    worker_id,
+    worker_data,
+    *,
+    project_id,
+    max_concurrency,
+    tags,
+    root: Path,
+):
     try:
         if _active_runs_count(worker_id, root) >= max_concurrency:
             logger.debug(

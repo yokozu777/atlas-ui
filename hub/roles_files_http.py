@@ -235,6 +235,141 @@ def list_role_files(project_id: str, role_path: str) -> dict[str, Any]:
     }
 
 
+_TEXT_SUFFIXES = {
+    ".yml",
+    ".yaml",
+    ".md",
+    ".j2",
+    ".json",
+    ".ini",
+    ".cfg",
+    ".sh",
+    ".txt",
+    ".py",
+}
+_MAX_SEARCH_FILE_BYTES = 256 * 1024
+_MAX_SEARCH_HITS = 80
+_MIN_SEARCH_QUERY = 2
+_MAX_SEARCH_QUERY = 200
+_VAULT_PREFIX = "$ANSIBLE_VAULT"
+
+
+def _iter_role_dirs(root: Path, pack_id: str) -> list[tuple[str, str, Path]]:
+    roles: list[tuple[str, str, Path]] = []
+
+    def walk(path: Path, rel: str) -> None:
+        has_tasks = (path / "tasks" / "main.yaml").is_file() or (
+            path / "tasks" / "main.yml"
+        ).is_file()
+        if has_tasks:
+            role_name = rel or path.name
+            roles.append((pack_id, role_name, path))
+            return
+        try:
+            for item in sorted(path.iterdir()):
+                if item.is_dir() and not item.name.startswith("."):
+                    child_rel = f"{rel}/{item.name}" if rel else item.name
+                    walk(item, child_rel)
+        except OSError:
+            return
+
+    if root.is_dir():
+        walk(root, "")
+    return roles
+
+
+def _search_roots(project_id: str) -> list[tuple[str, Path]]:
+    packs = atlas_role_packs()
+    if packs is not None:
+        return [(name, Path(root)) for name, root in sorted(packs.items())]
+    storage = roles_storage_root(project_id)
+    return [(storage.name, storage)]
+
+
+def _snippet(line: str, needle: str, width: int = 120) -> str:
+    compact = " ".join(line.split())
+    lower = compact.lower()
+    idx = lower.find(needle)
+    if idx < 0:
+        return compact[:width]
+    start = max(0, idx - width // 3)
+    end = min(len(compact), start + width)
+    snippet = compact[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(compact):
+        snippet = snippet + "…"
+    return snippet
+
+
+def search_role_files(project_id: str, query: str) -> dict[str, Any]:
+    q = (query or "").strip()
+    if len(q) < _MIN_SEARCH_QUERY or len(q) > _MAX_SEARCH_QUERY:
+        return {"success": True, "hits": []}
+    needle = q.lower()
+    hits: list[dict[str, Any]] = []
+    for pack_label, root in _search_roots(project_id):
+        if atlas_role_packs() is not None:
+            role_rows = _iter_role_dirs(root, pack_label)
+        else:
+            role_rows = _iter_role_dirs(root, "")
+        for pack_id, role_name, role_dir in role_rows:
+            hit_pack = pack_id or role_name
+            if len(hits) >= _MAX_SEARCH_HITS:
+                return {"success": True, "hits": hits}
+            try:
+                files = [
+                    item
+                    for item in role_dir.rglob("*")
+                    if item.is_file() and not item.name.startswith(".")
+                ]
+            except OSError:
+                continue
+            for item in sorted(files):
+                if len(hits) >= _MAX_SEARCH_HITS:
+                    return {"success": True, "hits": hits}
+                suffix = item.suffix.lower()
+                if suffix not in _TEXT_SUFFIXES:
+                    continue
+                rel = str(item.relative_to(role_dir)).replace("\\", "/")
+                if needle in rel.lower():
+                    hits.append(
+                        {
+                            "pack": hit_pack,
+                            "role": role_name,
+                            "path": rel,
+                            "line": 1,
+                            "snippet": rel,
+                        }
+                    )
+                    continue
+                try:
+                    if item.stat().st_size > _MAX_SEARCH_FILE_BYTES:
+                        continue
+                    text = item.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if "\0" in text:
+                    continue
+                stripped = text.lstrip()
+                if stripped.startswith(_VAULT_PREFIX):
+                    continue
+                for index, line in enumerate(text.splitlines(), start=1):
+                    if needle not in line.lower():
+                        continue
+                    hits.append(
+                        {
+                            "pack": hit_pack,
+                            "role": role_name,
+                            "path": rel,
+                            "line": index,
+                            "snippet": _snippet(line, needle),
+                        }
+                    )
+                    break
+    return {"success": True, "hits": hits}
+
+
 def _resolve_role_file(
     project_id: str, pack_id: str, role_name: str, file_path: str
 ) -> tuple[Path, Path]:

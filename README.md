@@ -16,12 +16,12 @@ Design, manage, and execute infrastructure as code — with Git integration, dis
 ```bash
 git clone git@github.com:yokozu777/atlas-ui.git
 cd atlas-ui
-cp .env.example .env   # host ATLAS_* paths and SSH_KEY
+cp .env.example .env   # host ATLAS_* paths; SSH key via System / Secrets Manager
 docker compose -f docker-compose.hub.yml pull
 docker compose -f docker-compose.hub.yml up -d
 ```
 
-Open http://localhost:3000 — username `admin`, password from `data/auth/admin-initial.txt` (change it after first login).
+Open http://localhost:3000 — username `admin`, password `admin` (change it after first login).
 
 Hub API: http://localhost:8000. Bind-mounts and `.env` are required for atlas/clusterctl runs; details in [Docker quick start](documentation/01-docker-quickstart.md).
 
@@ -87,7 +87,7 @@ For atlas projects: `cluster.yaml`, playbook repos, HEAD and lock SHA, per-repo 
 <p align="center">
  <img src="documentation/images/roles.png" width="900">
 </p>
-Browse roles from synced repositories, edit `defaults` and `tasks`, and save back to the clone. Role Settings in the sidebar follows the same Git trees.
+Browse roles from synced repositories, edit `defaults` and `tasks`, and save back to the clone. Handbook docs are a tab on the same Roles page.
 
 ---
 

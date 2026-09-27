@@ -9,12 +9,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from project_kind import (
     ProjectKindError,
     apply_create_fields,
+    atlas_owned_cluster_ids,
     ensure_ansible_infra_layout,
     ensure_project_layout,
     materialize_created_project,
     normalize_kind,
     reject_kind_mutation,
     with_kind,
+    with_owned_cluster_id,
 )
 
 
@@ -65,12 +67,39 @@ class ProjectKindTests(unittest.TestCase):
         with self.assertRaises(ProjectKindError):
             reject_kind_mutation({"kind": "ansible"}, {"kind": "atlas"})
 
-    def test_atlas_create_requires_cluster_id(self):
-        with self.assertRaises(ProjectKindError):
-            apply_create_fields({"kind": "atlas", "name": "k8s"})
+    def test_atlas_create_cluster_id_optional(self):
+        fields = apply_create_fields({"kind": "atlas", "name": "k8s"})
+        self.assertEqual(fields["kind"], "atlas")
+        self.assertNotIn("cluster_id", fields)
+        self.assertEqual(fields["clusterIds"], [])
         fields = apply_create_fields({"kind": "atlas", "cluster_id": "dev/k8s"})
         self.assertEqual(fields["kind"], "atlas")
         self.assertEqual(fields["cluster_id"], "dev/k8s")
+        self.assertEqual(fields["clusterIds"], ["dev/k8s"])
+
+    def test_owned_cluster_ids_missing_key(self):
+        self.assertEqual(atlas_owned_cluster_ids({"kind": "atlas"}), [])
+        self.assertEqual(
+            atlas_owned_cluster_ids({"kind": "atlas", "cluster_id": "dev/k8s"}),
+            ["dev/k8s"],
+        )
+        self.assertEqual(
+            atlas_owned_cluster_ids({"kind": "atlas", "clusterIds": []}),
+            [],
+        )
+        self.assertEqual(
+            with_owned_cluster_id({"kind": "atlas", "clusterIds": []}, "lab/pve"),
+            ["lab/pve"],
+        )
+
+    def test_materialize_atlas_without_cluster_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "atlas-proj"
+            materialize_created_project(root, {"kind": "atlas"})
+            cfg = json.loads((root / "project.json").read_text(encoding="utf-8"))
+            self.assertEqual(cfg["kind"], "atlas")
+            self.assertNotIn("cluster_id", cfg)
+            self.assertEqual(cfg.get("clusterIds"), [])
 
     def test_materialize_atlas_has_repo_and_atlas(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +113,7 @@ class ProjectKindTests(unittest.TestCase):
             cfg = json.loads((root / "project.json").read_text(encoding="utf-8"))
             self.assertEqual(cfg["kind"], "atlas")
             self.assertEqual(cfg["cluster_id"], "dev/k8s")
+            self.assertEqual(cfg.get("clusterIds"), ["dev/k8s"])
             self.assertEqual(cfg.get("sources"), {})
 
     def test_materialize_ansible_writes_ansible_cfg(self):

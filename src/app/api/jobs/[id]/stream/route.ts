@@ -1,9 +1,14 @@
+import { requireHubApiSession } from "@/server/hub-api-session";
 import { followJobLog, getJob } from "@/server/jobs";
 
 export async function GET(
   _request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   const { id } = await context.params;
   try {
     if (!getJob(id)) {

@@ -6,7 +6,6 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from project_kind import ProjectKindError
 from projects_create import create_project_record
 
 
@@ -49,14 +48,19 @@ class GatewayCreateTests(unittest.TestCase):
         self.assertTrue((pdir / "repo" / "playbooks").is_dir())
         self.assertTrue((pdir / "ansible-config" / "ansible.cfg").is_file())
 
-    def test_atlas_create_requires_cluster_id(self):
-        with self.assertRaises(ProjectKindError):
-            create_project_record(
-                {"name": "k8s", "kind": "atlas"},
-                username="admin",
-                config_file=self.config,
-                projects_dir=self.projects_dir,
-            )
+    def test_atlas_create_cluster_id_optional(self):
+        out = create_project_record(
+            {"name": "k8s-free", "kind": "atlas"},
+            username="admin",
+            config_file=self.config,
+            projects_dir=self.projects_dir,
+        )
+        project = out["project"]
+        self.assertEqual(project["kind"], "atlas")
+        self.assertFalse(project.get("cluster_id"))
+        pdir = self.projects_dir / project["id"]
+        cfg = json.loads((pdir / "project.json").read_text(encoding="utf-8"))
+        self.assertNotIn("cluster_id", cfg)
 
 
 if __name__ == "__main__":

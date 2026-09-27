@@ -48,6 +48,17 @@ export function addCounts(counts: LogCounts, added: ParsedLogLine[]): LogCounts 
   };
 }
 
+export function parseLogText(value: string): ParsedLogLine[] {
+  if (!value) {
+    return [];
+  }
+  const consumed = consumeLogChunk("", value);
+  const raw = consumed.rest
+    ? consumed.lines.concat(consumed.rest)
+    : consumed.lines;
+  return appendParsedLines([], raw).lines;
+}
+
 export function joinPlainLines(lines: ParsedLogLine[]): string {
   if (lines.length === 0) {
     return "";

@@ -20,7 +20,10 @@ const RECAP_HOST =
   /^(\S+)\s+:\s+ok=\d+\s+changed=\d+\s+unreachable=(\d+)\s+failed=(\d+)/;
 
 const KIND_STATUS: Record<
-  Exclude<LogLineKind, "play" | "task" | "recap" | "handler" | "output">,
+  Exclude<
+    LogLineKind,
+    "play" | "task" | "recap" | "handler" | "phase" | "atlas" | "docker" | "output"
+  >,
   { status: LogLineStatus; severity: LogLineSeverity }
 > = {
   ok: { status: "success", severity: "info" },
@@ -59,6 +62,49 @@ function heading(
 export function parseAnsibleLine(plain: string): AnsibleLineMeta {
   const { timestamp, rest } = splitTimestamp(plain);
   const trimmed = rest.replace(/^\s+/, "");
+
+  if (/^atlas:/.test(trimmed)) {
+    return {
+      timestamp,
+      kind: "atlas",
+      status: "neutral",
+      severity: "info",
+      host: null,
+      task: null,
+    };
+  }
+  if (/^docker:/.test(trimmed)) {
+    return {
+      timestamp,
+      kind: "docker",
+      status: "neutral",
+      severity: "info",
+      host: null,
+      task: trimmed.slice("docker:".length).trim() || null,
+    };
+  }
+  const phaseHeader = /^--- phase (\S+)(?:\s+\(([^)]*)\))?\s*---/.exec(trimmed);
+  if (phaseHeader) {
+    return {
+      timestamp,
+      kind: "phase",
+      status: "running",
+      severity: "info",
+      host: null,
+      task: phaseHeader[1] ?? null,
+    };
+  }
+  const invHeader = /^--- (\S+) \[(\d+)\/(\d+)\]/.exec(trimmed);
+  if (invHeader) {
+    return {
+      timestamp,
+      kind: "phase",
+      status: "running",
+      severity: "info",
+      host: null,
+      task: invHeader[1] ?? null,
+    };
+  }
 
   const play = /^PLAY \[([^\]]*)\]/.exec(trimmed);
   if (play) {

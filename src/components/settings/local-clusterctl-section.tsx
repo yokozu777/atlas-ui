@@ -13,15 +13,18 @@ export function LocalClusterctlSection({
   defaultGitUrl?: string;
 }) {
   return (
-    <SettingsSection icon={<Folder className="size-4" />} title="Local / clusterctl">
+    <SettingsSection icon={<Folder className="size-4" />} title="atlas-clusterctl">
       <SetupForm
         defaultPath={defaultPath}
         defaultGitUrl={defaultGitUrl}
         submitLabel="Update path"
-        redirectTo="/settings"
+        redirectTo="/settings?tab=atlas-clusterctl"
       />
       <p className="text-xs text-muted-foreground">
-        Clone public atlas-clusterctl from GitHub into the checkout path. In
+        Check version lists tags and <code className="font-mono">main</code> from
+        the Git URL, then Install or Update that ref into the checkout path. An
+        empty dest is filled automatically with the latest tag on first start.
+        Last fetched time comes from the last clone, pull, or install. In
         Docker the dest is <code className="font-mono">/atlas/clusterctl</code>{" "}
         (host folder from <code className="font-mono">ATLAS_CLUSTER_ROOT</code>{" "}
         / compose project dir). Without Docker, default is{" "}

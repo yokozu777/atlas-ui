@@ -95,6 +95,37 @@ class AdminWorkersCrudTests(unittest.TestCase):
         got = self.client.get(f"/api/admin/workers/{worker_id}", headers=headers)
         self.assertEqual(got.json()["worker"]["runtime"], "local")
 
+    def test_heartbeat_ignores_max_concurrency_patch_sets_cap(self):
+        from worker_registry import load_worker, save_worker
+
+        headers = self._login()
+        created = self.client.post(
+            "/api/admin/workers",
+            headers=headers,
+            json={"name": "cap-worker"},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        worker_id = created.json()["workerId"]
+        token = created.json()["workerToken"]
+        worker = load_worker(worker_id)
+        worker["maxConcurrency"] = 1
+        self.assertTrue(save_worker(worker))
+        heartbeat = self.client.post(
+            "/api/worker/heartbeat",
+            json={"maxConcurrency": 999},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+        self.assertEqual(load_worker(worker_id).get("maxConcurrency"), 1)
+        patched = self.client.patch(
+            f"/api/admin/workers/{worker_id}",
+            headers=headers,
+            json={"maxConcurrency": 2},
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        self.assertEqual(patched.json()["worker"]["maxConcurrency"], 2)
+        self.assertEqual(load_worker(worker_id).get("maxConcurrency"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

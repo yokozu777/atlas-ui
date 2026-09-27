@@ -13,8 +13,9 @@ export default function SetupPage() {
         title="Clusterctl path"
         description={
           <>
-            Clone atlas-clusterctl from GitHub or point at an existing checkout.
-            atlas-ui only spawns <code className="font-mono">./cluster</code>{" "}
+            Pick a tag or <code className="font-mono">main</code> from the Git
+            URL, then Install or point at an existing checkout. atlas-ui only
+            spawns <code className="font-mono">./cluster</code>{" "}
             inside that directory. Bind is loopback — same trust as a shell on
             this host.
           </>

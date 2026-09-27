@@ -3,14 +3,18 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, Folder, FolderOpen, Pencil, Plus, Trash2, Undo2 } from "lucide-react";
+import { Archive, Folder, FolderOpen, Pencil, Plus, Search, Star, Trash2, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
 import { EmptyState } from "@/components/empty-state";
+import { FavoriteStar } from "@/components/favorite-star";
+import { ProjectKindBadge } from "@/components/project-kind-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { projectKindLabel } from "@/components/project-kind-badge";
 import {
   LAST_PROJECT_EVENT,
   projectHref,
@@ -18,10 +22,14 @@ import {
   writeLastProjectId,
 } from "@/lib/project-href";
 import { stargateJson } from "@/lib/stargate";
+import { useCan } from "@/lib/authz";
+import { FAVORITE_PROJECTS_KEY, sortFavoritesFirst } from "@/lib/favorites";
+import { useFavoriteIds } from "@/hooks/use-favorite-ids";
 import type { StargateProject } from "@/lib/project-types";
 import { cn } from "@/lib/utils";
 
 type ConfirmKind = "archive" | "restore" | "delete";
+type KindFilter = "all" | "atlas" | "ansible";
 
 function formatCreatedAt(value?: number): string {
   if (value == null || !Number.isFinite(value) || value <= 0) {
@@ -56,9 +64,13 @@ export function ProjectsCatalog({
   loadError: string | null;
 }) {
   const router = useRouter();
+  const can = useCan();
   const currentId = useCurrentProjectId();
+  const { starred, isFavorite, toggle } = useFavoriteIds(FAVORITE_PROJECTS_KEY);
   const [projects, setProjects] = useState(initial);
   const [tab, setTab] = useState("active");
+  const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [confirm, setConfirm] = useState<{
     kind: ConfirmKind;
     project: StargateProject;
@@ -72,13 +84,38 @@ export function ProjectsCatalog({
     () => projects.find((row) => row.id === currentId) ?? null,
     [projects, currentId],
   );
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return projects.filter((row) => {
+      if (kindFilter !== "all" && row.kind !== kindFilter) {
+        return false;
+      }
+      if (!q) {
+        return true;
+      }
+      return `${row.name} ${row.description ?? ""} ${row.id} ${row.kind} ${projectKindLabel(row.kind)}`
+        .toLowerCase()
+        .includes(q);
+    });
+  }, [kindFilter, projects, query]);
+
   const active = useMemo(
-    () => projects.filter((row) => !row.isArchived),
-    [projects],
+    () =>
+      sortFavoritesFirst(
+        visible.filter((row) => !row.isArchived),
+        starred,
+        (row) => row.id,
+      ),
+    [visible, starred],
   );
   const archived = useMemo(
-    () => projects.filter((row) => row.isArchived),
-    [projects],
+    () => visible.filter((row) => row.isArchived),
+    [visible],
+  );
+  const favorites = useMemo(
+    () => active.filter((row) => starred.has(row.id)),
+    [active, starred],
   );
 
   function openProject(id: string) {
@@ -177,55 +214,115 @@ export function ProjectsCatalog({
             ) : null}
           </div>
         </div>
-        <Button nativeButton={false} render={<Link href="/projects/new" />}>
-          <Plus />
-          Create Project
-        </Button>
+        {can("projects.create") ? (
+          <Button nativeButton={false} render={<Link href="/projects/new" />}>
+            <Plus />
+            Create Project
+          </Button>
+        ) : null}
       </div>
 
       {loadError ? (
         <EmptyState title="Could not load projects" description={loadError} />
       ) : (
         <Tabs value={tab} onValueChange={setTab} className="gap-6">
-          <TabsList
-            variant="line"
-            className="h-auto w-full justify-start gap-0 rounded-none border-b border-border p-0"
-          >
-            <TabsTrigger
-              value="active"
-              className="rounded-none px-5 py-3 text-foreground/80 data-active:bg-transparent data-active:text-foreground dark:data-active:bg-transparent dark:data-active:text-foreground"
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border">
+            <TabsList
+              variant="line"
+              className="h-auto w-auto justify-start gap-0 rounded-none border-0 p-0"
             >
-              Active Projects
-              <span
-                className={cn(
-                  "rounded-full px-1.5 py-px text-[11px] font-semibold",
-                  tab === "active"
-                    ? "bg-foreground/15 text-foreground"
-                    : "bg-muted text-muted-foreground",
-                )}
+              <TabsTrigger
+                value="active"
+                className="rounded-none px-5 py-3 text-foreground/80 data-active:bg-transparent data-active:text-foreground dark:data-active:bg-transparent dark:data-active:text-foreground"
               >
-                {active.length}
-              </span>
-            </TabsTrigger>
-            <TabsTrigger
-              value="archived"
-              className="rounded-none px-5 py-3 text-foreground/80 data-active:bg-transparent data-active:text-foreground dark:data-active:bg-transparent dark:data-active:text-foreground"
-            >
-              Archived Projects
-              {archived.length > 0 ? (
+                Active Projects
                 <span
                   className={cn(
                     "rounded-full px-1.5 py-px text-[11px] font-semibold",
-                    tab === "archived"
+                    tab === "active"
                       ? "bg-foreground/15 text-foreground"
                       : "bg-muted text-muted-foreground",
                   )}
                 >
-                  {archived.length}
+                  {active.length}
                 </span>
-              ) : null}
-            </TabsTrigger>
-          </TabsList>
+              </TabsTrigger>
+              <TabsTrigger
+                value="favorites"
+                className="rounded-none px-5 py-3 text-foreground/80 data-active:bg-transparent data-active:text-foreground dark:data-active:bg-transparent dark:data-active:text-foreground"
+              >
+                Favorites
+                <span
+                  className={cn(
+                    "rounded-full px-1.5 py-px text-[11px] font-semibold",
+                    tab === "favorites"
+                      ? "bg-foreground/15 text-foreground"
+                      : "bg-muted text-muted-foreground",
+                  )}
+                >
+                  {favorites.length}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="archived"
+                className="rounded-none px-5 py-3 text-foreground/80 data-active:bg-transparent data-active:text-foreground dark:data-active:bg-transparent dark:data-active:text-foreground"
+              >
+                Archived Projects
+                {archived.length > 0 ? (
+                  <span
+                    className={cn(
+                      "rounded-full px-1.5 py-px text-[11px] font-semibold",
+                      tab === "archived"
+                        ? "bg-foreground/15 text-foreground"
+                        : "bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {archived.length}
+                  </span>
+                ) : null}
+              </TabsTrigger>
+            </TabsList>
+            <div className="flex min-w-0 flex-wrap items-center gap-2 pb-2 sm:pb-0">
+              <div className="relative min-w-44 flex-1 sm:max-w-64">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  className="h-8 pl-8"
+                  placeholder="Search projects..."
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  aria-label="Search projects"
+                />
+              </div>
+              <div
+                className="flex items-center rounded-lg border border-input p-0.5"
+                role="group"
+                aria-label="Project kind"
+              >
+                {(
+                  [
+                    ["all", "All"],
+                    ["atlas", "Atlas"],
+                    ["ansible", "Ansible"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <Button
+                    key={id}
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    aria-pressed={kindFilter === id}
+                    className={cn(
+                      "rounded-md",
+                      kindFilter === id && "bg-white/10 text-foreground",
+                    )}
+                    onClick={() => setKindFilter(id)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
 
           <TabsContent value="active">
             {active.length === 0 ? (
@@ -233,12 +330,16 @@ export function ProjectsCatalog({
                 <FolderOpen className="size-14 text-muted-foreground/40" />
                 <p className="text-lg font-medium">No projects yet</p>
                 <p className="text-sm text-muted-foreground">
-                  Create your first project to get started
+                  {query.trim() || kindFilter !== "all"
+                    ? "No projects match this search"
+                    : "Create your first project to get started"}
                 </p>
+                {can("projects.create") ? (
                 <Button nativeButton={false} render={<Link href="/projects/new" />}>
                   <Plus />
                   Create Project
                 </Button>
+                ) : null}
               </div>
             ) : (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
@@ -274,7 +375,7 @@ export function ProjectsCatalog({
                                 Active
                               </span>
                             ) : null}
-                            <Badge variant="outline">{row.kind}</Badge>
+                            <ProjectKindBadge kind={row.kind} />
                           </div>
                           {row.description?.trim() ? (
                             <p className="mt-2 line-clamp-2 text-[13px] text-muted-foreground">
@@ -282,6 +383,11 @@ export function ProjectsCatalog({
                             </p>
                           ) : null}
                         </div>
+                        <FavoriteStar
+                          pressed={isFavorite(row.id)}
+                          label={row.name}
+                          onToggle={() => toggle(row.id)}
+                        />
                       </div>
                       <div className="mt-4 flex items-center justify-between gap-2 border-t border-border pt-3">
                         <p className="text-[11px] text-muted-foreground">
@@ -299,6 +405,7 @@ export function ProjectsCatalog({
                           >
                             <Pencil />
                           </IconAction>
+                          {can("projects.update") ? (
                           <IconAction
                             label="Archive project"
                             onClick={() =>
@@ -307,6 +414,8 @@ export function ProjectsCatalog({
                           >
                             <Archive />
                           </IconAction>
+                          ) : null}
+                          {can("projects.delete") ? (
                           <IconAction
                             label="Delete project"
                             danger
@@ -316,6 +425,112 @@ export function ProjectsCatalog({
                           >
                             <Trash2 />
                           </IconAction>
+                          ) : null}
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="favorites">
+            {favorites.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+                <Star className="size-14 text-muted-foreground/40" />
+                <p className="text-lg font-medium">No favorite projects</p>
+                <p className="text-sm text-muted-foreground">
+                  {query.trim() || kindFilter !== "all"
+                    ? "No favorites match this search"
+                    : "Star a project to pin it here"}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
+                {favorites.map((row) => {
+                  const isCurrent = row.id === currentId;
+                  return (
+                    <article
+                      key={row.id}
+                      data-slot="panel"
+                      className={cn(
+                        "cursor-pointer rounded-xl bg-card p-5 transition-shadow hover:shadow-[0_0_0_1px_var(--gray-a8)]",
+                        isCurrent && "shadow-[0_0_0_1px_var(--accent-8)]",
+                      )}
+                      onClick={() => openProject(row.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openProject(row.id);
+                        }
+                      }}
+                      role="link"
+                      tabIndex={0}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Folder className="size-3.5 shrink-0 text-primary" />
+                            <h2 className="truncate text-base font-semibold">
+                              {row.name}
+                            </h2>
+                            {isCurrent ? (
+                              <span className="rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-emerald-400 ring-1 ring-emerald-500/35 bg-emerald-500/15">
+                                Active
+                              </span>
+                            ) : null}
+                            <ProjectKindBadge kind={row.kind} />
+                          </div>
+                          {row.description?.trim() ? (
+                            <p className="mt-2 line-clamp-2 text-[13px] text-muted-foreground">
+                              {row.description}
+                            </p>
+                          ) : null}
+                        </div>
+                        <FavoriteStar
+                          pressed
+                          label={row.name}
+                          onToggle={() => toggle(row.id)}
+                        />
+                      </div>
+                      <div className="mt-4 flex items-center justify-between gap-2 border-t border-border pt-3">
+                        <p className="text-[11px] text-muted-foreground">
+                          Created: {formatCreatedAt(row.createdAt)}
+                        </p>
+                        <div className="flex items-center gap-1.5">
+                          <IconAction
+                            label="Edit project"
+                            onClick={() => {
+                              writeLastProjectId(row.id);
+                              router.push(
+                                `${projectHref(row.id, "/settings")}?tab=project`,
+                              );
+                            }}
+                          >
+                            <Pencil />
+                          </IconAction>
+                          {can("projects.update") ? (
+                          <IconAction
+                            label="Archive project"
+                            onClick={() =>
+                              setConfirm({ kind: "archive", project: row })
+                            }
+                          >
+                            <Archive />
+                          </IconAction>
+                          ) : null}
+                          {can("projects.delete") ? (
+                          <IconAction
+                            label="Delete project"
+                            danger
+                            onClick={() =>
+                              setConfirm({ kind: "delete", project: row })
+                            }
+                          >
+                            <Trash2 />
+                          </IconAction>
+                          ) : null}
                         </div>
                       </div>
                     </article>
@@ -331,7 +546,9 @@ export function ProjectsCatalog({
                 <Archive className="size-14 text-muted-foreground/40" />
                 <p className="text-lg font-medium">No archived projects</p>
                 <p className="text-sm text-muted-foreground">
-                  Archived projects will appear here
+                  {query.trim() || kindFilter !== "all"
+                    ? "No archived projects match this search"
+                    : "Archived projects will appear here"}
                 </p>
               </div>
             ) : (
@@ -342,13 +559,20 @@ export function ProjectsCatalog({
                     data-slot="panel"
                     className="rounded-xl bg-card p-5 opacity-80"
                   >
+                    <div className="flex items-start justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <Archive className="size-3.5 shrink-0 text-muted-foreground" />
                       <h2 className="truncate text-base font-semibold text-muted-foreground">
                         {row.name}
                       </h2>
                       <Badge variant="warning">Archived</Badge>
-                      <Badge variant="outline">{row.kind}</Badge>
+                      <ProjectKindBadge kind={row.kind} />
+                    </div>
+                    <FavoriteStar
+                      pressed={isFavorite(row.id)}
+                      label={row.name}
+                      onToggle={() => toggle(row.id)}
+                    />
                     </div>
                     {row.description?.trim() ? (
                       <p className="mt-2 line-clamp-2 text-[13px] text-muted-foreground">
@@ -360,6 +584,7 @@ export function ProjectsCatalog({
                         Created: {formatCreatedAt(row.createdAt)}
                       </p>
                       <div className="flex items-center gap-1.5">
+                        {can("projects.update") ? (
                         <Button
                           type="button"
                           size="xs"
@@ -371,6 +596,8 @@ export function ProjectsCatalog({
                           <Undo2 />
                           Restore
                         </Button>
+                        ) : null}
+                        {can("projects.delete") ? (
                         <Button
                           type="button"
                           size="xs"
@@ -383,6 +610,7 @@ export function ProjectsCatalog({
                           <Trash2 />
                           Delete
                         </Button>
+                        ) : null}
                       </div>
                     </div>
                   </article>

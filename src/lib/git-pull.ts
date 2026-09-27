@@ -9,12 +9,10 @@ export async function loadGitPullSecrets(
   const [secretData, globalData] = await Promise.all([
     stargateJson<{ secrets?: { name?: string; type?: string }[] }>(
       `/secrets?project_id=${encodeURIComponent(projectId)}`,
-    ).catch(() => ({ secrets: [] as { name?: string; type?: string }[] })),
+    ),
     stargateJson<{
       options?: { id?: string; name?: string; type?: string }[];
-    }>("/global/secrets/options?purpose=git").catch(() => ({
-      options: [] as { id?: string; name?: string; type?: string }[],
-    })),
+    }>("/global/secrets/options?purpose=git"),
   ]);
   const global: SecretOption[] = (globalData.options ?? [])
     .filter(

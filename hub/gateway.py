@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 import logging
 import shutil
+import sys
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from fastapi import Body, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 _app_dir = Path(__file__).resolve().parent
@@ -23,6 +24,8 @@ PROJECTS_DIR = DATA_DIR / "projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger(__name__)
 
+HUB_VERSION = "0.1.0"
+
 from atlas_cluster_fs import (  # noqa: E402
     AtlasClusterFsError,
     is_atlas_project,
@@ -34,10 +37,33 @@ from atlas_cluster_fs import (  # noqa: E402
     write_atlas_cluster_yaml,
     write_atlas_playbook_yaml,
 )
+from atlas_clusters import (  # noqa: E402
+    AtlasClustersError,
+    archive_cluster,
+    list_project_clusters,
+    patch_cluster_display_name,
+    restore_cluster,
+    unlink_cluster,
+)
+from atlas_hosts import (  # noqa: E402
+    AtlasHostsError,
+    list_hosts_topology,
+    save_hosts_topology,
+)
+from atlas_operator_ssh import (  # noqa: E402
+    AtlasOperatorSshError,
+    operator_pubkey_status,
+    write_operator_pubkey,
+)
+from atlas_vars_setup import (  # noqa: E402
+    get_vars_setup,
+    get_vars_setup_file,
+    move_vars_setup_key,
+    put_vars_setup_file,
+)
 from atlas_inspect import (  # noqa: E402
     InspectError,
     inspect_atlas,
-    list_atlas_inventory_clusters,
     list_atlas_logs,
     list_atlas_workspace,
     read_atlas_file,
@@ -53,9 +79,20 @@ from clusterctl_config import (  # noqa: E402
 )
 from clusterctl_git import (  # noqa: E402
     ClusterctlGitError,
+    auto_install_enabled,
     clone_clusterctl,
+    ensure_clusterctl,
     inspect_checkout,
+    install_clusterctl,
+    list_clusterctl_refs,
     pull_clusterctl,
+)
+from auth_avatar import (  # noqa: E402
+    AvatarError,
+    delete_avatar,
+    has_avatar,
+    read_avatar,
+    write_avatar,
 )
 from git_pull import (  # noqa: E402
     GitPullError,
@@ -69,10 +106,16 @@ from project_kind import (  # noqa: E402
     with_kind,
 )
 from projects_create import create_project_record  # noqa: E402
-from projects_store import get_project, load_projects, save_projects  # noqa: E402
+from projects_store import (  # noqa: E402
+    ensure_atlas_owned_cluster_ids,
+    get_project,
+    load_projects,
+    save_projects,
+)
 from executions_http import (  # noqa: E402
     ExecutionHttpError,
     cancel_execution,
+    get_execution_log_tail,
     iter_execution_log_sse,
     list_executions,
     stop_execution,
@@ -138,6 +181,8 @@ from playbooks_http import (  # noqa: E402
     list_playbooks as list_playbook_records,
     next_run_time,
     preview_playbook,
+    inspect_atlas_bootstrap,
+    queue_atlas_execution_pull,
     queue_atlas_init,
     queue_atlas_repos_sync,
     queue_atlas_run,
@@ -153,6 +198,7 @@ from secrets_http import (  # noqa: E402
     SecretsHttpError,
     create_secret,
     delete_secret,
+    export_secret,
     get_secret,
     list_secrets,
     list_secrets_meta,
@@ -168,6 +214,7 @@ from roles_files_http import (  # noqa: E402
     list_role_handbook,
     put_role_file,
     reset_atlas_role_packs,
+    search_role_files,
 )
 from sources_http import (  # noqa: E402
     SourcesHttpError,
@@ -239,14 +286,20 @@ from global_secrets_http import (  # noqa: E402
     create_global_secret,
     delete_global_secret,
     encryption_key_status,
+    export_global_secret,
+    get_clusterctl_ssh,
     get_global_secret,
     global_secret_options,
     global_secrets_permissions,
     list_global_secrets,
+    put_clusterctl_ssh,
     replace_encryption_key,
     update_global_secret,
 )
-from worker_claim import server_claim_next_execution  # noqa: E402
+from worker_claim import (  # noqa: E402
+    resolve_worker_max_concurrency,
+    server_claim_next_execution,
+)
 from worker_registry import (  # noqa: E402
     create_worker,
     delete_worker,
@@ -265,12 +318,13 @@ from worker_registry import (  # noqa: E402
 )
 
 try:
-    from auth import generate_token, verify_token, get_token_from_header
+    from auth import add_token_to_blacklist, generate_token, get_token_from_header, verify_token
     from user_service import UserService
     from role_service import RoleService, PermissionService
-    from auth_validators import validate_username, validate_password
-    from auth_seed import seed_default_roles, seed_default_user
+    from auth_validators import validate_email, validate_username, validate_password
+    from auth_seed import align_bootstrap_admin, seed_default_roles, seed_default_user
 except ImportError:
+    add_token_to_blacklist = None  # type: ignore
     generate_token = None  # type: ignore
     verify_token = None  # type: ignore
     get_token_from_header = None  # type: ignore
@@ -279,10 +333,31 @@ except ImportError:
     PermissionService = None  # type: ignore
     seed_default_roles = None  # type: ignore
     seed_default_user = None  # type: ignore
+    align_bootstrap_admin = None  # type: ignore
     validate_username = None  # type: ignore
     validate_password = None  # type: ignore
+    validate_email = None  # type: ignore
 
-app = FastAPI(title="atlas-ui hub", version="0.1.0")
+
+@asynccontextmanager
+async def _hub_lifespan(_app: FastAPI):
+    if auto_install_enabled():
+        try:
+            result = ensure_clusterctl()
+            if result.get("ok"):
+                logger.info(
+                    "clusterctl ready: %s (fetched %s)",
+                    result.get("version") or result.get("dest"),
+                    result.get("fetchedAt"),
+                )
+            elif result.get("error"):
+                logger.warning("clusterctl bootstrap: %s", result["error"])
+        except Exception:
+            logger.exception("clusterctl bootstrap failed")
+    yield
+
+
+app = FastAPI(title="atlas-ui hub", version=HUB_VERSION, lifespan=_hub_lifespan)
 user_service = UserService(DATA_DIR) if UserService else None
 role_service = RoleService(DATA_DIR) if RoleService else None
 permission_service = PermissionService(DATA_DIR) if PermissionService else None
@@ -291,14 +366,34 @@ try:
     from permission_service import AccessControlService
 except ImportError:
     AccessControlService = None  # type: ignore
-access_control = AccessControlService(DATA_DIR) if AccessControlService else None
+access_control = (
+    AccessControlService(
+        DATA_DIR,
+        user_service=user_service,
+        role_service=role_service,
+        permission_service=permission_service,
+    )
+    if AccessControlService
+    else None
+)
 if user_service and role_service and permission_service and seed_default_roles and seed_default_user:
     seed_default_roles(
         role_service, permission_service, DATA_DIR, user_service=user_service
     )
     seed_default_user(user_service, role_service, DATA_DIR)
+    align_bootstrap_admin(user_service, DATA_DIR)
 ensure_default_worker()
 ensure_worker_token_file_mode()
+try:
+    from lab_secrets import ensure_lab_secrets
+    ensure_lab_secrets(DATA_DIR)
+except Exception:
+    logger.warning("lab secrets ensure failed", exc_info=True)
+try:
+    from ssh_temp import sweep_stale_ssh_files
+    sweep_stale_ssh_files(DATA_DIR, projects_dir=PROJECTS_DIR, scope="hub")
+except Exception:
+    logger.warning("SSH identity sweeper failed", exc_info=True)
 
 
 def _bearer(authorization: Optional[str]) -> Optional[str]:
@@ -319,9 +414,26 @@ def _require_user(authorization: Optional[str], *, allow_must_change: bool = Fal
     payload = verify_token(token, DATA_DIR, token_type="access")
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
+    if user_service:
+        user = user_service.get_user_by_id(str(payload.get("user_id") or ""))
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if not _token_version_matches(payload, user):
+            raise HTTPException(status_code=401, detail="Invalid token")
     if payload.get("must_change_password") and not allow_must_change:
         raise HTTPException(status_code=403, detail="Password change required")
     return payload
+
+
+def _token_version_matches(payload: dict[str, Any], user: Any) -> bool:
+    expected = int(getattr(user, "token_version", 0) or 0)
+    got = payload.get("tv")
+    if got is None:
+        return expected == 0
+    try:
+        return int(got) == expected
+    except (TypeError, ValueError):
+        return False
 
 
 def _role_names_for_user(user: Any) -> list[str]:
@@ -336,7 +448,85 @@ def _role_names_for_user(user: Any) -> list[str]:
 
 
 def _token_extra(user: Any) -> dict[str, Any]:
-    return {"must_change_password": bool(getattr(user, "must_change_password", False))}
+    return {
+        "must_change_password": bool(getattr(user, "must_change_password", False)),
+        "tv": int(getattr(user, "token_version", 0) or 0),
+    }
+
+
+class PermissionRequired(Exception):
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"{name} required")
+
+    @property
+    def detail(self) -> str:
+        return f"{self.name} required"
+
+
+@app.exception_handler(PermissionRequired)
+async def _permission_required_handler(_request: Request, exc: PermissionRequired):
+    return JSONResponse(
+        {"success": False, "error": exc.detail, "detail": exc.detail},
+        status_code=403,
+    )
+
+
+def _is_admin_user(user_id: Any) -> bool:
+    if not access_control or not user_id:
+        return False
+    return bool(access_control.has_role(str(user_id), "admin"))
+
+
+def _catalog_permission_names() -> list[str]:
+    if not permission_service:
+        return []
+    return sorted({perm.name for perm in permission_service.get_all_permissions()})
+
+
+def _authz_for_user(user: Any, payload: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
+    user_id = (user.id if user else None) or payload.get("user_id")
+    roles = _role_names_for_user(user) if user else list(payload.get("roles") or [])
+    is_admin = _is_admin_user(user_id)
+    if is_admin:
+        return True, _catalog_permission_names(), roles
+    names: list[str] = []
+    if access_control and user_id:
+        names = sorted(access_control.get_user_permissions(str(user_id)))
+    return False, names, roles
+
+
+def _me_payload(user: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (user.id if user else None) or payload.get("user_id")
+    username = (user.username if user else None) or payload.get("username")
+    email = getattr(user, "email", None) if user else None
+    must_change = (
+        bool(user.must_change_password)
+        if user
+        else bool(payload.get("must_change_password"))
+    )
+    avatar = bool(user_id) and has_avatar(DATA_DIR, str(user_id))
+    is_admin, permissions, roles = _authz_for_user(user, payload)
+    body = {
+        "id": user_id,
+        "username": username,
+        "email": email,
+        "hasAvatar": avatar,
+        "roles": roles,
+        "permissions": permissions,
+        "isAdmin": is_admin,
+        "must_change_password": must_change,
+    }
+    return {
+        "success": True,
+        "username": username,
+        "email": email,
+        "hasAvatar": avatar,
+        "must_change_password": must_change,
+        "isAdmin": is_admin,
+        "permissions": permissions,
+        "user": body,
+    }
 
 
 def _require_worker(authorization: Optional[str]) -> tuple[str, dict[str, Any]]:
@@ -351,6 +541,49 @@ def _require_worker(authorization: Optional[str]) -> tuple[str, dict[str, Any]]:
 
 _claim_rate_limits: dict[str, float] = {}
 CLAIM_RATE_LIMIT_SECONDS = 1
+
+_login_failures: dict[str, dict[str, float]] = {}
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+
+
+def _login_client_ip(request: Request) -> str:
+    host = request.client.host if request.client else ""
+    return str(host or "unknown").strip() or "unknown"
+
+
+def _login_lock_key(username: str, ip: str) -> str:
+    return f"{username.lower()}|{ip}"
+
+
+def _login_lockout_remaining(key: str) -> int:
+    row = _login_failures.get(key)
+    if not row:
+        return 0
+    until = float(row.get("locked_until") or 0)
+    remaining = int(until - time.time())
+    return remaining if remaining > 0 else 0
+
+
+def _record_login_failure(key: str) -> int:
+    now = time.time()
+    remaining = _login_lockout_remaining(key)
+    if remaining > 0:
+        return remaining
+    row = _login_failures.get(key) or {"count": 0.0, "locked_until": 0.0}
+    count = int(row.get("count") or 0) + 1
+    if count >= LOGIN_MAX_FAILURES:
+        _login_failures[key] = {
+            "count": float(count),
+            "locked_until": now + LOGIN_LOCKOUT_SECONDS,
+        }
+        return LOGIN_LOCKOUT_SECONDS
+    _login_failures[key] = {"count": float(count), "locked_until": 0.0}
+    return 0
+
+
+def _clear_login_failures(key: str) -> None:
+    _login_failures.pop(key, None)
 
 
 def _execution_http_error(exc: ExecutionHttpError) -> JSONResponse:
@@ -372,7 +605,10 @@ def _domain_error(
     | ExecutionSettingsHttpError
     | GlobalSecretsHttpError
     | BackupHttpError
-    | AtlasClusterFsError,
+    | AtlasClusterFsError
+    | AtlasClustersError
+    | AtlasHostsError
+    | AtlasOperatorSshError,
 ) -> JSONResponse:
     payload: dict[str, Any] = {"success": False, "error": exc.message}
     code = getattr(exc, "error_code", None)
@@ -385,13 +621,25 @@ def _domain_error(
 
 
 def _user_can(payload: dict[str, Any], names: list[str]) -> bool:
-    roles = payload.get("roles") or []
-    if "admin" in roles:
-        return True
     user_id = payload.get("user_id")
+    if _is_admin_user(user_id):
+        return True
     if access_control and user_id:
-        return access_control.has_any_permission(user_id, names)
+        return access_control.has_any_permission(str(user_id), names)
     return False
+
+
+def _require_perm(
+    authorization: Optional[str],
+    *names: str,
+    allow_must_change: bool = False,
+) -> dict[str, Any]:
+    payload = _require_user(authorization, allow_must_change=allow_must_change)
+    if not names:
+        return payload
+    if not _user_can(payload, list(names)):
+        raise PermissionRequired(names[0])
+    return payload
 
 
 def _query_project_id(
@@ -404,11 +652,47 @@ def _query_project_id(
 
 @app.get("/health")
 def health():
-    return {"ok": True, "plane": "fastapi"}
+    return {"ok": True, "plane": "fastapi", "version": HUB_VERSION}
+
+
+@app.get("/api/about")
+def about(authorization: Optional[str] = Header(None)):
+    _require_user(authorization)
+    try:
+        checkout = inspect_checkout()
+    except Exception as exc:
+        checkout = {
+            "version": "",
+            "dest": None,
+            "ok": False,
+            "error": str(exc),
+        }
+    return {
+        "success": True,
+        "name": "atlas-ui hub",
+        "version": HUB_VERSION,
+        "python": sys.version.split()[0],
+        "plane": "fastapi",
+        "clusterctl": {
+            "version": checkout.get("version") or "",
+            "dest": checkout.get("dest"),
+            "ok": bool(checkout.get("ok")),
+            "error": checkout.get("error"),
+        },
+    }
+
+
+@app.get("/api/auth/bootstrap")
+def auth_bootstrap():
+    show = False
+    if user_service:
+        admin = user_service.get_user_by_username("admin")
+        show = bool(admin and admin.must_change_password)
+    return {"success": True, "showDefaultCredentials": show}
 
 
 @app.post("/api/auth/login")
-def login(body: dict[str, Any]):
+def login(request: Request, body: dict[str, Any] = Body(...)):
     if not user_service or not generate_token:
         raise HTTPException(status_code=503, detail="Auth modules unavailable")
     username = str(body.get("username") or "").strip()
@@ -417,13 +701,27 @@ def login(body: dict[str, Any]):
         ok, err = validate_username(username)
         if not ok:
             raise HTTPException(status_code=400, detail=err)
-    if validate_password:
-        ok, err = validate_password(password)
-        if not ok:
-            raise HTTPException(status_code=400, detail=err)
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+    lock_key = _login_lock_key(username, _login_client_ip(request))
+    remaining = _login_lockout_remaining(lock_key)
+    if remaining > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts",
+            headers={"Retry-After": str(remaining)},
+        )
     user = user_service.authenticate(username, password)
     if not user:
+        retry_after = _record_login_failure(lock_key)
+        if retry_after > 0:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many login attempts",
+                headers={"Retry-After": str(retry_after)},
+            )
         raise HTTPException(status_code=401, detail="Incorrect username or password")
+    _clear_login_failures(lock_key)
     role_names = _role_names_for_user(user)
     extra = _token_extra(user)
     access_token = generate_token(
@@ -460,19 +758,66 @@ def login(body: dict[str, Any]):
 def me(authorization: Optional[str] = Header(None)):
     payload = _require_user(authorization, allow_must_change=True)
     user = user_service.get_user_by_id(payload.get("user_id")) if user_service else None
-    must_change = bool(user.must_change_password) if user else bool(payload.get("must_change_password"))
-    username = (user.username if user else None) or payload.get("username")
-    return {
-        "success": True,
-        "username": username,
-        "must_change_password": must_change,
-        "user": {
-            "id": payload.get("user_id"),
-            "username": username,
-            "roles": payload.get("roles") or [],
-            "must_change_password": must_change,
-        },
-    }
+    return _me_payload(user, payload)
+
+
+@app.patch("/api/auth/profile")
+def patch_profile(body: dict[str, Any], authorization: Optional[str] = Header(None)):
+    payload = _require_user(authorization)
+    if not user_service:
+        raise HTTPException(status_code=503, detail="Auth modules unavailable")
+    user_id = str(payload.get("user_id") or "")
+    if "email" not in body:
+        user = user_service.get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return _me_payload(user, payload)
+    email = (body.get("email") or "").strip() or None
+    if validate_email:
+        ok, err = validate_email(email)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+    user = user_service.update_user(user_id, email=email)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return _me_payload(user, payload)
+
+
+@app.get("/api/auth/avatar")
+def get_avatar(authorization: Optional[str] = Header(None)):
+    payload = _require_user(authorization, allow_must_change=True)
+    user_id = str(payload.get("user_id") or "")
+    try:
+        found = read_avatar(DATA_DIR, user_id)
+    except AvatarError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if not found:
+        raise HTTPException(status_code=404, detail="No avatar")
+    path, media = found
+    return FileResponse(path, media_type=media)
+
+
+@app.put("/api/auth/avatar")
+async def put_avatar(request: Request, authorization: Optional[str] = Header(None)):
+    payload = _require_user(authorization)
+    user_id = str(payload.get("user_id") or "")
+    raw = await request.body()
+    try:
+        write_avatar(DATA_DIR, user_id, raw)
+    except AvatarError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {"success": True, "hasAvatar": True}
+
+
+@app.delete("/api/auth/avatar")
+def remove_avatar(authorization: Optional[str] = Header(None)):
+    payload = _require_user(authorization)
+    user_id = str(payload.get("user_id") or "")
+    try:
+        deleted = delete_avatar(DATA_DIR, user_id)
+    except AvatarError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {"success": True, "hasAvatar": False, "deleted": deleted}
 
 
 @app.post("/api/auth/change-password")
@@ -523,7 +868,7 @@ def change_password(body: dict[str, Any], authorization: Optional[str] = Header(
 
 @app.get("/api/projects")
 def list_projects(include_archived: bool = False, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     projects = load_projects(PROJECTS_CONFIG_FILE)
     if not include_archived:
         projects = [p for p in projects if not p.get("isArchived")]
@@ -532,7 +877,7 @@ def list_projects(include_archived: bool = False, authorization: Optional[str] =
 
 @app.post("/api/projects")
 def create_project(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "projects.create")
     try:
         return create_project_record(
             body,
@@ -546,7 +891,7 @@ def create_project(body: dict[str, Any], authorization: Optional[str] = Header(N
 
 @app.get("/api/projects/{project_id}")
 def get_project_route(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -555,7 +900,7 @@ def get_project_route(project_id: str, authorization: Optional[str] = Header(Non
 
 @app.put("/api/projects/{project_id}")
 def update_project(project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.update")
     projects = load_projects(PROJECTS_CONFIG_FILE)
     project = next((p for p in projects if p.get("id") == project_id), None)
     if not project:
@@ -594,8 +939,6 @@ def _require_atlas_project(project_id: str) -> dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="atlas inspect is only available for atlas projects"
         )
-    if not str(project.get("cluster_id") or "").strip():
-        raise HTTPException(status_code=400, detail="cluster_id is required")
     return project
 
 
@@ -651,7 +994,7 @@ def _resolve_atlas_cluster_id(
 def atlas_path_defaults_route(
     project_id: str, authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = _require_atlas_project(project_id)
     defaults = load_path_defaults(clusterctl_root_from_project(project))
     return {"success": True, **defaults}
@@ -661,12 +1004,158 @@ def atlas_path_defaults_route(
 def atlas_clusters_route(
     project_id: str, authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = _require_atlas_project(project_id)
     try:
-        listed = list_atlas_inventory_clusters(_inspect_params(project))
-    except InspectError as exc:
-        return _inspect_http_error(exc)
+        ensure_atlas_owned_cluster_ids(PROJECTS_CONFIG_FILE, project_id, project)
+        project = get_project(PROJECTS_CONFIG_FILE, project_id) or project
+        listed = list_project_clusters(project)
+    except AtlasClustersError as exc:
+        return _domain_error(exc)
+    return {"success": True, **listed}
+
+
+def _cluster_id_arg(
+    cluster_id: Optional[str] = None, body: Optional[dict[str, Any]] = None
+) -> str:
+    payload = body or {}
+    raw = (
+        cluster_id
+        or payload.get("cluster_id")
+        or payload.get("clusterId")
+    )
+    text = str(raw or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="cluster_id is required")
+    return text
+
+
+def _require_atlas_execute(authorization: Optional[str]) -> dict[str, Any]:
+    return _require_perm(authorization, "atlas.execute")
+
+
+@app.post("/api/projects/{project_id}/atlas/clusters/archive")
+def atlas_cluster_archive_route(
+    project_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.update")
+    project = _require_atlas_project(project_id)
+    try:
+        listed = archive_cluster(
+            PROJECTS_CONFIG_FILE,
+            project_id,
+            project,
+            _cluster_id_arg(cluster_id, body),
+        )
+    except AtlasClustersError as exc:
+        return _domain_error(exc)
+    return {"success": True, **listed}
+
+
+@app.post("/api/projects/{project_id}/atlas/clusters/restore")
+def atlas_cluster_restore_route(
+    project_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.update")
+    project = _require_atlas_project(project_id)
+    try:
+        listed = restore_cluster(
+            PROJECTS_CONFIG_FILE,
+            project_id,
+            project,
+            _cluster_id_arg(cluster_id, body),
+        )
+    except AtlasClustersError as exc:
+        return _domain_error(exc)
+    return {"success": True, **listed}
+
+
+@app.patch("/api/projects/{project_id}/atlas/clusters")
+def atlas_cluster_patch_route(
+    project_id: str,
+    body: dict[str, Any],
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.update")
+    project = _require_atlas_project(project_id)
+    name = body.get("displayName")
+    if name is None:
+        name = body.get("display_name")
+    try:
+        row = patch_cluster_display_name(
+            project,
+            _cluster_id_arg(None, body),
+            str(name or ""),
+        )
+    except AtlasClustersError as exc:
+        return _domain_error(exc)
+    return {"success": True, "cluster": row}
+
+
+@app.delete("/api/projects/{project_id}/atlas/clusters")
+def atlas_cluster_delete_route(
+    project_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+    cluster_id: Optional[str] = Query(None),
+    purge: bool = Query(False),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.delete")
+    project = _require_atlas_project(project_id)
+    payload = body or {}
+    do_purge = bool(purge or payload.get("purge"))
+    try:
+        listed = unlink_cluster(
+            PROJECTS_CONFIG_FILE,
+            project_id,
+            project,
+            _cluster_id_arg(cluster_id, payload),
+            purge=do_purge,
+        )
+    except AtlasClustersError as exc:
+        return _domain_error(exc)
+    return {"success": True, **listed}
+
+
+@app.get("/api/projects/{project_id}/atlas/hosts")
+def atlas_hosts_get_route(
+    project_id: str,
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.read")
+    _require_atlas_project(project_id)
+    try:
+        listed = list_hosts_topology(project_id, cluster_id)
+    except AtlasHostsError as exc:
+        return _domain_error(exc)
+    return {"success": True, **listed}
+
+
+@app.put("/api/projects/{project_id}/atlas/hosts")
+def atlas_hosts_put_route(
+    project_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.update")
+    _require_atlas_project(project_id)
+    payload = body or {}
+    try:
+        listed = save_hosts_topology(
+            project_id,
+            _cluster_id_arg(cluster_id, payload),
+            payload.get("groups"),
+        )
+    except AtlasHostsError as exc:
+        return _domain_error(exc)
     return {"success": True, **listed}
 
 
@@ -680,11 +1169,32 @@ def atlas_inspect_route(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    payload = _require_perm(authorization, "atlas.execute")
     project = _require_atlas_project(project_id)
     argv = body.get("argv") if isinstance(body, dict) else None
     if not isinstance(argv, list):
         raise HTTPException(status_code=400, detail="argv must be an array")
+    if any(str(item) == "--root-ssh" for item in argv) and not _user_can(
+        payload, ["atlas.execute_root_ssh"]
+    ):
+        raise PermissionRequired("atlas.execute_root_ssh")
+    if argv and str(argv[0]).strip() == "init":
+        try:
+            queued = queue_atlas_init(
+                project,
+                project_id,
+                body or {},
+                can_execute=_user_can(payload, ["atlas.execute"]),
+                config_file=PROJECTS_CONFIG_FILE,
+            )
+        except PlaybookHttpError as exc:
+            return _domain_error(exc)
+        return {
+            **queued,
+            "argv": queued.get("argv") or argv,
+            "return_code": 0,
+            "log": "Init queued on worker",
+        }
     requested = _requested_cluster_id(
         body.get("cluster_id") if isinstance(body, dict) else None,
         body.get("clusterId") if isinstance(body, dict) else None,
@@ -708,7 +1218,7 @@ def atlas_log_route(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = _require_atlas_project(project_id)
     params = _inspect_params(project)
     try:
@@ -731,7 +1241,7 @@ def atlas_file_route(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = _require_atlas_project(project_id)
     try:
         resolved = _resolve_atlas_cluster_id(
@@ -750,7 +1260,7 @@ def atlas_workspace_ls_route(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = _require_atlas_project(project_id)
     try:
         resolved = _resolve_atlas_cluster_id(
@@ -771,7 +1281,7 @@ def atlas_workspace_file_route(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     project = _require_atlas_project(project_id)
     try:
         resolved = _resolve_atlas_cluster_id(
@@ -791,7 +1301,7 @@ def atlas_cluster_yaml_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -811,7 +1321,7 @@ def atlas_cluster_yaml_put(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -832,7 +1342,7 @@ def atlas_cluster_yaml_put(
 
 @app.post("/api/projects/{project_id}/restore")
 def restore_project(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.update")
     projects = load_projects(PROJECTS_CONFIG_FILE)
     project = next((p for p in projects if p.get("id") == project_id), None)
     if not project:
@@ -847,7 +1357,7 @@ def restore_project(project_id: str, authorization: Optional[str] = Header(None)
 
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.delete")
     projects = load_projects(PROJECTS_CONFIG_FILE)
     project = next((p for p in projects if p.get("id") == project_id), None)
     if not project:
@@ -864,15 +1374,17 @@ def delete_project(project_id: str, authorization: Optional[str] = Header(None))
 def auth_refresh(body: dict[str, Any]):
     if not user_service or not generate_token or not verify_token:
         raise HTTPException(status_code=503, detail="Auth modules unavailable")
-    refresh_token = str(body.get("refresh_token") or "").strip()
-    if not refresh_token:
+    presented = str(body.get("refresh_token") or "").strip()
+    if not presented:
         raise HTTPException(status_code=400, detail="Refresh token обязателен")
-    payload = verify_token(refresh_token, DATA_DIR, token_type="refresh")
+    payload = verify_token(presented, DATA_DIR, token_type="refresh")
     if not payload:
         raise HTTPException(status_code=401, detail="Невалидный или истекший refresh token")
     user = user_service.get_user_by_id(payload.get("user_id"))
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Пользователь не найден или неактивен")
+    if not _token_version_matches(payload, user):
+        raise HTTPException(status_code=401, detail="Невалидный или истекший refresh token")
     extra = _token_extra(user)
     role_names = _role_names_for_user(user)
     access_token = generate_token(
@@ -883,14 +1395,41 @@ def auth_refresh(body: dict[str, Any]):
         token_type="access",
         extra=extra,
     )
-    return {"success": True, "access_token": access_token}
+    new_refresh = generate_token(
+        user_id=user.id,
+        username=user.username,
+        roles=role_names,
+        data_dir=DATA_DIR,
+        token_type="refresh",
+        extra=extra,
+    )
+    if add_token_to_blacklist:
+        add_token_to_blacklist(DATA_DIR, presented)
+    return {
+        "success": True,
+        "access_token": access_token,
+        "refresh_token": new_refresh,
+    }
+
+
+@app.post("/api/auth/logout")
+def auth_logout(
+    body: dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(None),
+):
+    if add_token_to_blacklist:
+        access = _bearer(authorization)
+        if access:
+            add_token_to_blacklist(DATA_DIR, access)
+        refresh = str((body or {}).get("refresh_token") or "").strip()
+        if refresh:
+            add_token_to_blacklist(DATA_DIR, refresh)
+    return {"success": True}
 
 
 @app.post("/api/worker/register")
 def worker_register(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    payload = _require_user(authorization)
-    if not _user_can(payload, ["admin"]):
-        return JSONResponse({"success": False, "error": "Permission denied"}, status_code=403)
+    _require_perm(authorization, "settings.update")
     name = str((body or {}).get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Worker name is required")
@@ -915,7 +1454,6 @@ def worker_claim(body: dict[str, Any], authorization: Optional[str] = Header(Non
         worker_id=worker_id,
         worker_data=worker_data,
         project_id=payload.get("projectId"),
-        max_concurrency=payload.get("maxConcurrency", 1),
         tags=payload.get("tags"),
         projects_dir=PROJECTS_DIR,
     )
@@ -963,7 +1501,11 @@ def worker_claim(body: dict[str, Any], authorization: Optional[str] = Header(Non
 def worker_heartbeat(body: dict[str, Any], authorization: Optional[str] = Header(None)):
     worker_id, _worker = _require_worker(authorization)
     payload = body or {}
-    update_worker_heartbeat(worker_id, current_execution_id=payload.get("currentExecutionId"))
+    update_worker_heartbeat(
+        worker_id,
+        current_execution_id=payload.get("currentExecutionId"),
+        max_concurrency=payload.get("maxConcurrency"),
+    )
     worker = load_worker(worker_id)
     request_system_info = bool(worker and worker.get("systemInfoRequested"))
     if request_system_info and worker:
@@ -1098,8 +1640,11 @@ def worker_execution_finish(
         else:
             host_name = run_params.get("host") or run_params.get("limit_host")
             host_status = "unknown"
-            if status == "SUCCESS" and isinstance(result, dict):
-                host_status = "online" if result.get("available") else "offline"
+            if status == "SUCCESS":
+                if isinstance(result, dict) and "available" in result:
+                    host_status = "online" if result.get("available") else "offline"
+                else:
+                    host_status = "online"
             elif status in ("FAILED", "CANCELED"):
                 host_status = "offline"
             if host_name:
@@ -1124,7 +1669,7 @@ def executions_list(
     playbook_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read", "playbooks.read")
     if not project_id:
         raise HTTPException(status_code=400, detail="Project ID is required")
     try:
@@ -1145,7 +1690,7 @@ def executions_clear(
     body: dict[str, Any] = Body(default_factory=dict),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     project_id = body.get("project_id")
     deleted = clear_all_executions(str(project_id) if project_id else None)
     return {"success": True, "deletedCount": deleted}
@@ -1157,11 +1702,24 @@ def executions_get(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read", "playbooks.read")
     execution = get_execution(execution_id, project_id=project_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
     return {"success": True, "execution": execution}
+
+
+@app.get("/api/executions/{execution_id}/log")
+def executions_log_get(
+    execution_id: str,
+    project_id: Optional[str] = Query(None),
+    tail: int = Query(8192),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.read", "playbooks.read")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="Project ID is required")
+    return get_execution_log_tail(execution_id, project_id, tail)
 
 
 @app.get("/api/executions/{execution_id}/log/stream")
@@ -1171,7 +1729,7 @@ def executions_log_stream(
     offset: int = Query(0),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read", "playbooks.read")
     if not project_id:
         raise HTTPException(status_code=400, detail="Project ID is required")
 
@@ -1195,7 +1753,7 @@ def executions_cancel(
     execution_id: str,
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "atlas.execute", "playbooks.execute")
     try:
         return cancel_execution(project_id, execution_id)
     except ExecutionHttpError as exc:
@@ -1208,7 +1766,7 @@ def executions_stop(
     execution_id: str,
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "atlas.execute", "playbooks.execute")
     try:
         return stop_execution(project_id, execution_id)
     except ExecutionHttpError as exc:
@@ -1227,13 +1785,14 @@ def _public_worker(worker_id: str, worker_data: dict[str, Any]) -> dict[str, Any
         "createdAt": worker_data.get("createdAt"),
         "lastSeenAt": worker_data.get("lastSeenAt"),
         "currentExecutionId": worker_data.get("currentExecutionId"),
+        "maxConcurrency": resolve_worker_max_concurrency(worker_data),
         "runtime": infer_worker_runtime(worker_data),
     }
 
 
 @app.get("/api/admin/workers")
 def admin_list_workers(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     workers = load_all_workers()
     return {
         "success": True,
@@ -1245,9 +1804,7 @@ def admin_list_workers(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/admin/workers")
 def admin_create_worker(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    payload = _require_user(authorization)
-    if not _user_can(payload, ["admin"]):
-        return JSONResponse({"success": False, "error": "Permission denied"}, status_code=403)
+    _require_perm(authorization, "settings.update")
     name = str((body or {}).get("name") or "").strip()
     if not name:
         return JSONResponse({"success": False, "error": "Worker name is required"}, status_code=400)
@@ -1266,9 +1823,7 @@ def admin_create_worker(body: dict[str, Any], authorization: Optional[str] = Hea
 
 @app.post("/api/admin/workers/{worker_id}/rotate-token")
 def admin_rotate_worker(worker_id: str, authorization: Optional[str] = Header(None)):
-    payload = _require_user(authorization)
-    if not _user_can(payload, ["admin"]):
-        return JSONResponse({"success": False, "error": "Permission denied"}, status_code=403)
+    payload = _require_perm(authorization, "settings.update")
     try:
         plaintext_token = rotate_worker_token(worker_id)
     except ValueError:
@@ -1282,7 +1837,7 @@ def admin_rotate_worker(worker_id: str, authorization: Optional[str] = Header(No
 
 @app.post("/api/admin/workers/{worker_id}/enable")
 def admin_enable_worker(worker_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     if not enable_worker(worker_id):
         raise HTTPException(status_code=404, detail="Worker not found")
     return {"success": True}
@@ -1290,7 +1845,7 @@ def admin_enable_worker(worker_id: str, authorization: Optional[str] = Header(No
 
 @app.post("/api/admin/workers/{worker_id}/disable")
 def admin_disable_worker(worker_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     if not disable_worker(worker_id):
         raise HTTPException(status_code=404, detail="Worker not found")
     return {"success": True}
@@ -1298,7 +1853,7 @@ def admin_disable_worker(worker_id: str, authorization: Optional[str] = Header(N
 
 @app.get("/api/admin/workers/{worker_id}")
 def admin_get_worker(worker_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     worker = load_worker(worker_id)
     if not worker:
         return JSONResponse({"success": False, "error": "Worker not found"}, status_code=404)
@@ -1311,9 +1866,7 @@ def admin_patch_worker(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    payload = _require_user(authorization)
-    if not _user_can(payload, ["admin"]):
-        return JSONResponse({"success": False, "error": "Permission denied"}, status_code=403)
+    payload = _require_perm(authorization, "settings.update")
     tags = body.get("tags") if isinstance(body, dict) else None
     if tags is not None and not isinstance(tags, list):
         return JSONResponse({"success": False, "error": "tags must be a list"}, status_code=400)
@@ -1322,6 +1875,9 @@ def admin_patch_worker(
         name=body.get("name") if "name" in (body or {}) else None,
         description=body.get("description") if "description" in (body or {}) else None,
         tags=tags,
+        max_concurrency=(
+            body.get("maxConcurrency") if "maxConcurrency" in (body or {}) else None
+        ),
     )
     if not ok:
         return JSONResponse({"success": False, "error": "Worker not found"}, status_code=404)
@@ -1331,9 +1887,7 @@ def admin_patch_worker(
 
 @app.delete("/api/admin/workers/{worker_id}")
 def admin_delete_worker(worker_id: str, authorization: Optional[str] = Header(None)):
-    payload = _require_user(authorization)
-    if not _user_can(payload, ["admin"]):
-        return JSONResponse({"success": False, "error": "Permission denied"}, status_code=403)
+    payload = _require_perm(authorization, "settings.update")
     if not delete_worker(worker_id):
         return JSONResponse({"success": False, "error": "Worker not found"}, status_code=404)
     return {"success": True, "message": "Worker deleted"}
@@ -1345,7 +1899,7 @@ def inventory_list(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1361,7 +1915,7 @@ def inventory_hosts(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1376,7 +1930,7 @@ def inventory_host_status(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1391,7 +1945,7 @@ def inventory_preview(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1407,7 +1961,7 @@ def inventory_groups_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1418,7 +1972,7 @@ def inventory_groups_get(
 
 @app.post("/api/inventory/groups")
 def inventory_groups_post(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.create")
     try:
         pid = _query_project_id(None, body)
         with _atlas_infra_scope(pid, body.get("cluster_id")):
@@ -1434,7 +1988,7 @@ def inventory_groups_post(body: dict[str, Any], authorization: Optional[str] = H
 
 @app.post("/api/inventory/add_host")
 def inventory_add_host(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.create")
     try:
         pid = _query_project_id(None, body)
         with _atlas_infra_scope(pid, body.get("cluster_id")):
@@ -1457,7 +2011,7 @@ def inventory_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1468,7 +2022,7 @@ def inventory_get(
 
 @app.post("/api/inventory/save")
 def inventory_save(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(None, body)
         with _atlas_infra_scope(pid, body.get("cluster_id")):
@@ -1487,7 +2041,7 @@ def inventory_export(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1505,7 +2059,7 @@ async def inventory_import(
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.create")
     try:
         pid = _query_project_id(project_id)
         payload = await file.read()
@@ -1517,11 +2071,74 @@ async def inventory_import(
 
 @app.post("/api/inventory/delete")
 def inventory_delete(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.delete")
     try:
         pid = _query_project_id(None, body)
         with _atlas_infra_scope(pid, body.get("cluster_id")):
             return delete_inventory_file(pid, str(body.get("file") or body.get("path") or ""))
+    except InventoryHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/atlas/vars-setup")
+def atlas_vars_setup_list(
+    project_id: Optional[str] = Query(None),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.read")
+    try:
+        pid = _query_project_id(project_id)
+        return get_vars_setup(pid, cluster_id)
+    except InventoryHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/atlas/vars-setup/file")
+def atlas_vars_setup_get(
+    project_id: Optional[str] = Query(None),
+    path: str = Query(""),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.read")
+    try:
+        pid = _query_project_id(project_id)
+        return get_vars_setup_file(pid, path, cluster_id)
+    except InventoryHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.put("/api/atlas/vars-setup/file")
+def atlas_vars_setup_put(body: dict[str, Any], authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "inventory.update")
+    try:
+        pid = _query_project_id(None, body)
+        return put_vars_setup_file(
+            pid,
+            str(body.get("path") or ""),
+            cluster_id=str(body.get("cluster_id") or "") or None,
+            updates=body.get("updates") if isinstance(body.get("updates"), dict) else {},
+            nested=body.get("nested") if isinstance(body.get("nested"), dict) else {},
+        )
+    except InventoryHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.post("/api/atlas/vars-setup/layer")
+def atlas_vars_setup_layer(body: dict[str, Any], authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "inventory.update")
+    try:
+        pid = _query_project_id(None, body)
+        return move_vars_setup_key(
+            pid,
+            str(body.get("path") or ""),
+            str(body.get("key") or ""),
+            str(body.get("action") or ""),
+            cluster_id=str(body.get("cluster_id") or "") or None,
+            value=body.get("value"),
+            nested=bool(body.get("nested")),
+        )
     except InventoryHttpError as exc:
         return _domain_error(exc)
 
@@ -1533,7 +2150,7 @@ def inventory_vars_list(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1549,7 +2166,7 @@ def inventory_vars_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1560,7 +2177,7 @@ def inventory_vars_get(
 
 @app.put("/api/inventory/vars/file")
 def inventory_vars_put(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(None, body)
         content = body.get("content")
@@ -1581,7 +2198,7 @@ def inventory_vars_delete(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.delete")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1597,7 +2214,7 @@ def inventory_group_vars_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1614,7 +2231,7 @@ def inventory_group_vars_put(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(project_id, body)
         content = body.get("content")
@@ -1636,7 +2253,7 @@ def inventory_groups_delete(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.delete")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -1651,7 +2268,7 @@ def inventory_groups_hosts_put(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(None, body)
         with _atlas_infra_scope(pid, body.get("cluster_id")):
@@ -1667,7 +2284,7 @@ def inventory_groups_hosts_put(
 
 @app.post("/api/inventory/assign_host")
 def inventory_assign_host(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(None, body)
         with _atlas_infra_scope(pid, body.get("cluster_id")):
@@ -1689,7 +2306,7 @@ def host_connection_secret(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(project_id, body)
         with _atlas_infra_scope(pid, cluster_id, body.get("cluster_id")):
@@ -1710,7 +2327,7 @@ def ansible_config_list(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         return list_ansible_config(pid)
@@ -1724,7 +2341,7 @@ def ansible_config_get(
     file: str = Query("ansible-config/ansible.cfg"),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.read")
     try:
         pid = _query_project_id(project_id)
         return get_ansible_config(pid, file)
@@ -1734,7 +2351,7 @@ def ansible_config_get(
 
 @app.post("/api/ansible_config/save")
 def ansible_config_save(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(None, body)
         return save_ansible_config(
@@ -1748,7 +2365,7 @@ def ansible_config_save(body: dict[str, Any], authorization: Optional[str] = Hea
 
 @app.post("/api/ansible_config/select")
 def ansible_config_select(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.update")
     try:
         pid = _query_project_id(None, body)
         return select_ansible_config(
@@ -1761,7 +2378,7 @@ def ansible_config_select(body: dict[str, Any], authorization: Optional[str] = H
 
 @app.post("/api/ansible_config/delete")
 def ansible_config_delete(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "inventory.delete")
     try:
         pid = _query_project_id(None, body)
         return delete_ansible_config(pid, str(body.get("file") or body.get("path") or ""))
@@ -1775,7 +2392,7 @@ def playbooks_list(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1793,7 +2410,7 @@ def playbooks_list(
 def playbooks_create(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.create")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1821,7 +2438,7 @@ def playbooks_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     try:
         if resolve_atlas_inventory_leaf(project_id, cluster_id, project=project) is not None:
@@ -1844,7 +2461,7 @@ def playbooks_put(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.update")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     try:
         requested = _requested_cluster_id(cluster_id, (body or {}).get("cluster_id"))
@@ -1875,7 +2492,7 @@ def playbooks_preview(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     playbook = body.get("playbook")
     if not playbook:
         raise HTTPException(status_code=400, detail="Playbook data is required")
@@ -1889,7 +2506,7 @@ def playbooks_validate(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     try:
         return validate_playbook_payload(
             playbook_storage, project_id, playbook_id, body or {}
@@ -1902,7 +2519,7 @@ def playbooks_validate(
 def playbooks_schedule_get(
     project_id: str, playbook_id: str, authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1924,7 +2541,7 @@ def playbooks_schedule_put(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.update")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1943,7 +2560,7 @@ def playbooks_schedule_put(
 def playbooks_schedule_next(
     project_id: str, playbook_id: str, authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1965,7 +2582,7 @@ def playbooks_run(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.execute")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1982,7 +2599,7 @@ def playbooks_run(
 
 @app.post("/api/check_host")
 def check_host_route(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.execute")
     try:
         pid = _query_project_id(None, body)
         return queue_host_check(pid, body or {})
@@ -1996,7 +2613,7 @@ def host_facts_route(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.execute")
     try:
         pid = _query_project_id(None, body)
         payload = dict(body or {})
@@ -2010,7 +2627,7 @@ def host_facts_route(
 def atlas_run_route(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "atlas.execute")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -2030,7 +2647,7 @@ def atlas_run_route(
 def atlas_workspace_reset_route(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "atlas.execute")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -2049,7 +2666,7 @@ def atlas_workspace_reset_route(
 def atlas_init_route(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "atlas.execute")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -2059,8 +2676,68 @@ def atlas_init_route(
             project_id,
             body or {},
             can_execute=_user_can(payload, ["atlas.execute"]),
+            config_file=PROJECTS_CONFIG_FILE,
         )
     except PlaybookHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/projects/{project_id}/atlas/bootstrap")
+def atlas_bootstrap_route(
+    project_id: str,
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.read")
+    project = _require_atlas_project(project_id)
+    try:
+        return inspect_atlas_bootstrap(project, cluster_id=cluster_id)
+    except PlaybookHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/projects/{project_id}/atlas/operator-ssh")
+def atlas_operator_ssh_get(
+    project_id: str,
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "projects.read")
+    project = _require_atlas_project(project_id)
+    try:
+        cid = str(cluster_id or project.get("cluster_id") or "").strip()
+        payload = operator_pubkey_status(project, cid, data_dir=DATA_DIR)
+        payload["success"] = True
+        return payload
+    except AtlasOperatorSshError as exc:
+        return _domain_error(exc)
+
+
+@app.post("/api/projects/{project_id}/atlas/operator-ssh")
+def atlas_operator_ssh_write(
+    project_id: str,
+    body: dict[str, Any],
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "atlas.execute")
+    project = _require_atlas_project(project_id)
+    try:
+        cid = str((body or {}).get("cluster_id") or project.get("cluster_id") or "").strip()
+        ssh_secret_id = str((body or {}).get("sshSecretId") or "").strip() or None
+        project_secret_name = (
+            str((body or {}).get("projectSecretName") or "").strip() or None
+        )
+        payload = write_operator_pubkey(
+            project,
+            cid,
+            data_dir=DATA_DIR,
+            ssh_secret_id=ssh_secret_id,
+            project_secret_name=project_secret_name,
+            project_id=project_id,
+        )
+        payload["success"] = True
+        return payload
+    except AtlasOperatorSshError as exc:
         return _domain_error(exc)
 
 
@@ -2068,12 +2745,31 @@ def atlas_init_route(
 def atlas_repos_sync_route(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "atlas.execute")
     project = get_project(PROJECTS_CONFIG_FILE, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     try:
         return queue_atlas_repos_sync(
+            with_kind(project),
+            project_id,
+            body or {},
+            can_execute=_user_can(payload, ["atlas.execute"]),
+        )
+    except PlaybookHttpError as exc:
+        return _domain_error(exc)
+
+
+@app.post("/api/projects/{project_id}/atlas/execution/pull")
+def atlas_execution_pull_route(
+    project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
+):
+    payload = _require_perm(authorization, "atlas.execute")
+    project = get_project(PROJECTS_CONFIG_FILE, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return queue_atlas_execution_pull(
             with_kind(project),
             project_id,
             body or {},
@@ -2090,7 +2786,7 @@ def _require_project(project_id: str) -> None:
 
 @app.get("/api/projects/{project_id}/vault-keys")
 def vault_keys_list(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     _require_project(project_id)
     return list_vault_keys(project_id)
 
@@ -2099,7 +2795,7 @@ def vault_keys_list(project_id: str, authorization: Optional[str] = Header(None)
 def vault_keys_create(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.create")
     _require_project(project_id)
     try:
         return create_vault_key(project_id, body or {})
@@ -2109,7 +2805,7 @@ def vault_keys_create(
 
 @app.get("/api/projects/{project_id}/vault-keys/{key_id}")
 def vault_keys_get(project_id: str, key_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     _require_project(project_id)
     try:
         return get_vault_key(project_id, key_id)
@@ -2124,7 +2820,7 @@ def vault_keys_put(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return update_vault_key(project_id, key_id, body or {})
@@ -2134,7 +2830,7 @@ def vault_keys_put(
 
 @app.delete("/api/projects/{project_id}/vault-keys/{key_id}")
 def vault_keys_delete(project_id: str, key_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.delete")
     _require_project(project_id)
     try:
         return delete_vault_key(project_id, key_id)
@@ -2144,7 +2840,7 @@ def vault_keys_delete(project_id: str, key_id: str, authorization: Optional[str]
 
 @app.get("/api/projects/{project_id}/vaults")
 def vaults_list(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     _require_project(project_id)
     return list_vaults(project_id)
 
@@ -2153,7 +2849,7 @@ def vaults_list(project_id: str, authorization: Optional[str] = Header(None)):
 def vaults_create(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.create")
     _require_project(project_id)
     try:
         return create_vault(project_id, body or {})
@@ -2163,7 +2859,7 @@ def vaults_create(
 
 @app.get("/api/projects/{project_id}/vaults/{vault_id}")
 def vaults_get(project_id: str, vault_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     _require_project(project_id)
     try:
         return get_vault(project_id, vault_id)
@@ -2178,7 +2874,7 @@ def vaults_put(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return update_vault(project_id, vault_id, body or {})
@@ -2188,7 +2884,7 @@ def vaults_put(
 
 @app.delete("/api/projects/{project_id}/vaults/{vault_id}")
 def vaults_delete(project_id: str, vault_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.delete")
     _require_project(project_id)
     try:
         return delete_vault(project_id, vault_id)
@@ -2203,7 +2899,7 @@ def vaults_encrypt(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return encrypt_vault_content(project_id, vault_id, str((body or {}).get("content") or ""))
@@ -2218,7 +2914,7 @@ def vaults_decrypt(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return decrypt_vault_content(project_id, vault_id, str((body or {}).get("content") or ""))
@@ -2236,7 +2932,7 @@ def vault_files_get(
     key_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     _require_project(project_id)
     try:
         return get_vault_file(
@@ -2253,7 +2949,7 @@ def vault_files_get(
 def vault_files_encrypt(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return encrypt_vault_file(project_id, body or {})
@@ -2265,7 +2961,7 @@ def vault_files_encrypt(
 def vault_files_decrypt(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return decrypt_vault_file(project_id, body or {})
@@ -2277,7 +2973,7 @@ def vault_files_decrypt(
 def vault_files_save(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     _require_project(project_id)
     try:
         return save_vault_file(project_id, body or {})
@@ -2290,7 +2986,7 @@ def secrets_meta(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     try:
         pid = _query_project_id(project_id)
         return list_secrets_meta(pid)
@@ -2303,7 +2999,7 @@ def secrets_list(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     try:
         pid = _query_project_id(project_id)
         return list_secrets(pid)
@@ -2317,10 +3013,24 @@ def secrets_create(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.create")
     try:
         pid = _query_project_id(project_id, body)
         return create_secret(pid, body or {})
+    except (InventoryHttpError, SecretsHttpError) as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/secrets/{secret_name}/export")
+def secrets_export(
+    secret_name: str,
+    project_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "secrets.read")
+    try:
+        pid = _query_project_id(project_id)
+        return export_secret(pid, secret_name)
     except (InventoryHttpError, SecretsHttpError) as exc:
         return _domain_error(exc)
 
@@ -2331,7 +3041,7 @@ def secrets_get(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.read")
     try:
         pid = _query_project_id(project_id)
         return get_secret(pid, secret_name)
@@ -2346,7 +3056,7 @@ def secrets_put(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.update")
     try:
         pid = _query_project_id(project_id, body)
         return update_secret(pid, secret_name, body or {})
@@ -2360,7 +3070,7 @@ def secrets_delete(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "secrets.delete")
     try:
         pid = _query_project_id(project_id)
         return delete_secret(pid, secret_name)
@@ -2370,7 +3080,7 @@ def secrets_delete(
 
 @app.get("/api/projects/{project_id}/sources/status")
 def sources_status(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     _require_project(project_id)
     return get_sources_status(project_id)
 
@@ -2379,7 +3089,7 @@ def sources_status(project_id: str, authorization: Optional[str] = Header(None))
 def sources_test(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.update")
     _require_project(project_id)
     try:
         return test_source(project_id, body or {})
@@ -2393,7 +3103,7 @@ def sources_sync(
     body: Optional[dict[str, Any]] = None,
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.update")
     _require_project(project_id)
     try:
         return sync_source(project_id, body or {})
@@ -2403,7 +3113,7 @@ def sources_sync(
 
 @app.get("/api/projects/{project_id}/sources")
 def sources_get(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     _require_project(project_id)
     return get_sources(project_id)
 
@@ -2412,7 +3122,7 @@ def sources_get(project_id: str, authorization: Optional[str] = Header(None)):
 def sources_put(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.update")
     _require_project(project_id)
     try:
         return update_sources(project_id, body or {})
@@ -2422,7 +3132,7 @@ def sources_put(
 
 @app.get("/api/projects/{project_id}/autosync")
 def autosync_get(project_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.read")
     _require_project(project_id)
     try:
         return get_autosync(project_id)
@@ -2434,7 +3144,7 @@ def autosync_get(project_id: str, authorization: Optional[str] = Header(None)):
 def autosync_put(
     project_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "projects.update")
     _require_project(project_id)
     try:
         return update_autosync(project_id, body or {})
@@ -2448,7 +3158,7 @@ def roles_storage_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -2463,7 +3173,7 @@ def roles_handbook_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -2480,11 +3190,27 @@ def roles_handbook_file_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
             return get_role_handbook_file(pid, pack, doc)
+    except (InventoryHttpError, RolesFilesHttpError) as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/roles/search")
+def roles_search_get(
+    q: str = Query(""),
+    project_id: Optional[str] = Query(None),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "playbooks.read")
+    try:
+        pid = _query_project_id(project_id)
+        with _atlas_infra_scope(pid, cluster_id):
+            return search_role_files(pid, q)
     except (InventoryHttpError, RolesFilesHttpError) as exc:
         return _domain_error(exc)
 
@@ -2496,7 +3222,7 @@ def roles_files_get(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -2516,7 +3242,7 @@ def roles_file_get(
     vaultId: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.read")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id):
@@ -2537,7 +3263,7 @@ def roles_file_put(
     cluster_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "playbooks.update")
     try:
         pid = _query_project_id(project_id)
         with _atlas_infra_scope(pid, cluster_id, (body or {}).get("cluster_id")):
@@ -2548,7 +3274,7 @@ def roles_file_put(
 
 @app.get("/api/roles")
 def rbac_roles_get(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "roles.read")
     if not role_service:
         raise HTTPException(status_code=503, detail="Role service unavailable")
     try:
@@ -2559,7 +3285,7 @@ def rbac_roles_get(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/roles")
 def rbac_roles_post(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "roles.create")
     if not role_service:
         raise HTTPException(status_code=503, detail="Role service unavailable")
     try:
@@ -2573,7 +3299,7 @@ def rbac_roles_post(body: dict[str, Any], authorization: Optional[str] = Header(
 
 @app.get("/api/roles/{role_id}")
 def rbac_roles_get_one(role_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "roles.read")
     if not role_service:
         raise HTTPException(status_code=503, detail="Role service unavailable")
     try:
@@ -2586,7 +3312,7 @@ def rbac_roles_get_one(role_id: str, authorization: Optional[str] = Header(None)
 def rbac_roles_put(
     role_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "roles.update")
     if not role_service:
         raise HTTPException(status_code=503, detail="Role service unavailable")
     try:
@@ -2597,7 +3323,7 @@ def rbac_roles_put(
 
 @app.delete("/api/roles/{role_id}")
 def rbac_roles_delete(role_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "roles.delete")
     if not role_service:
         raise HTTPException(status_code=503, detail="Role service unavailable")
     try:
@@ -2608,7 +3334,7 @@ def rbac_roles_delete(role_id: str, authorization: Optional[str] = Header(None))
 
 @app.get("/api/users")
 def users_get(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "users.read")
     if not user_service or not role_service:
         raise HTTPException(status_code=503, detail="User service unavailable")
     try:
@@ -2619,7 +3345,7 @@ def users_get(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/users")
 def users_post(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "users.create")
     if not user_service or not role_service:
         raise HTTPException(status_code=503, detail="User service unavailable")
     try:
@@ -2633,7 +3359,7 @@ def users_post(body: dict[str, Any], authorization: Optional[str] = Header(None)
 
 @app.get("/api/users/{user_id}")
 def users_get_one(user_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "users.read")
     if not user_service or not role_service:
         raise HTTPException(status_code=503, detail="User service unavailable")
     try:
@@ -2646,7 +3372,7 @@ def users_get_one(user_id: str, authorization: Optional[str] = Header(None)):
 def users_put(
     user_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "users.update")
     if not user_service or not role_service:
         raise HTTPException(status_code=503, detail="User service unavailable")
     try:
@@ -2663,18 +3389,20 @@ def users_put(
 
 @app.delete("/api/users/{user_id}")
 def users_delete(user_id: str, authorization: Optional[str] = Header(None)):
-    payload = _require_user(authorization)
+    payload = _require_perm(authorization, "users.delete")
     if not user_service:
         raise HTTPException(status_code=503, detail="User service unavailable")
     try:
-        return delete_user_record(user_service, user_id, payload.get("user_id"))
+        return delete_user_record(
+            user_service, user_id, payload.get("user_id"), role_service
+        )
     except UsersHttpError as exc:
         return _domain_error(exc)
 
 
 @app.get("/api/permissions/by-resource/{resource}")
 def permissions_by_resource(resource: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "permissions.read")
     if not permission_service:
         raise HTTPException(status_code=503, detail="Permission service unavailable")
     try:
@@ -2685,7 +3413,7 @@ def permissions_by_resource(resource: str, authorization: Optional[str] = Header
 
 @app.get("/api/permissions")
 def permissions_get(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "permissions.read")
     if not permission_service:
         raise HTTPException(status_code=503, detail="Permission service unavailable")
     try:
@@ -2696,7 +3424,7 @@ def permissions_get(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/permissions")
 def permissions_post(body: dict[str, Any], authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "permissions.create")
     if not permission_service:
         raise HTTPException(status_code=503, detail="Permission service unavailable")
     try:
@@ -2710,7 +3438,7 @@ def permissions_post(body: dict[str, Any], authorization: Optional[str] = Header
 
 @app.get("/api/permissions/{perm_id}")
 def permissions_get_one(perm_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "permissions.read")
     if not permission_service:
         raise HTTPException(status_code=503, detail="Permission service unavailable")
     try:
@@ -2723,7 +3451,7 @@ def permissions_get_one(perm_id: str, authorization: Optional[str] = Header(None
 def permissions_put(
     perm_id: str, body: dict[str, Any], authorization: Optional[str] = Header(None)
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "permissions.update")
     if not permission_service:
         raise HTTPException(status_code=503, detail="Permission service unavailable")
     try:
@@ -2734,7 +3462,7 @@ def permissions_put(
 
 @app.delete("/api/permissions/{perm_id}")
 def permissions_delete(perm_id: str, authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "permissions.delete")
     if not permission_service:
         raise HTTPException(status_code=503, detail="Permission service unavailable")
     try:
@@ -2753,7 +3481,7 @@ def server_logs_get(
     date_to: str = Query(""),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     return list_server_logs(
         DATA_DIR,
         lines=lines,
@@ -2771,8 +3499,57 @@ def atlas_clusterctl_get(
     url: Optional[str] = Query(None),
     dest: Optional[str] = Query(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     return inspect_checkout(url=url, dest=dest)
+
+
+@app.get("/api/atlas/clusterctl/refs")
+def atlas_clusterctl_refs(
+    authorization: Optional[str] = Header(None),
+    url: Optional[str] = Query(None),
+):
+    _require_perm(authorization, "settings.read")
+    try:
+        return list_clusterctl_refs(url=url)
+    except ClusterctlGitError as exc:
+        return JSONResponse(
+            {"success": False, "error": exc.message},
+            status_code=exc.status_code,
+        )
+
+
+@app.post("/api/atlas/clusterctl/install")
+def atlas_clusterctl_install(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    try:
+        return install_clusterctl(
+            url=body.get("url"),
+            dest=body.get("dest"),
+            ref=body.get("ref"),
+        )
+    except ClusterctlGitError as exc:
+        return JSONResponse(
+            {"success": False, "error": exc.message},
+            status_code=exc.status_code,
+        )
+
+
+@app.post("/api/atlas/clusterctl/ensure")
+def atlas_clusterctl_ensure(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    try:
+        return ensure_clusterctl(url=body.get("url"), dest=body.get("dest"))
+    except ClusterctlGitError as exc:
+        return JSONResponse(
+            {"success": False, "error": exc.message},
+            status_code=exc.status_code,
+        )
 
 
 @app.post("/api/atlas/clusterctl/clone")
@@ -2780,7 +3557,7 @@ def atlas_clusterctl_clone(
     body: dict[str, Any] = Body(default_factory=dict),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     try:
         return clone_clusterctl(url=body.get("url"), dest=body.get("dest"))
     except ClusterctlGitError as exc:
@@ -2795,7 +3572,7 @@ def atlas_clusterctl_pull(
     body: dict[str, Any] = Body(default_factory=dict),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     try:
         return pull_clusterctl(url=body.get("url"), dest=body.get("dest"))
     except ClusterctlGitError as exc:
@@ -2807,7 +3584,7 @@ def atlas_clusterctl_pull(
 
 @app.get("/api/execution_settings")
 def execution_settings_get(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     return {
         "success": True,
         "settings": load_execution_settings(DATA_DIR),
@@ -2820,7 +3597,7 @@ def execution_settings_post(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     try:
         return update_execution_settings(DATA_DIR, body or {})
     except ExecutionSettingsHttpError as exc:
@@ -2829,7 +3606,7 @@ def execution_settings_post(
 
 @app.get("/api/backup-settings")
 def backup_settings_get(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     return get_backup_settings(DATA_DIR)
 
 
@@ -2838,7 +3615,7 @@ def backup_settings_put(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     try:
         return update_backup_settings(DATA_DIR, body or {})
     except BackupHttpError as exc:
@@ -2850,7 +3627,7 @@ def backups_create(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     try:
         project_id = str((body or {}).get("project_id") or "").strip()
         reason = str((body or {}).get("reason") or "manual")
@@ -2864,7 +3641,7 @@ def backups_archives_list(
     project_id: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     try:
         return list_project_archives(DATA_DIR, str(project_id or ""))
     except BackupHttpError as exc:
@@ -2877,7 +3654,7 @@ def backups_archives_download(
     path: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.read")
     try:
         archive = download_archive_path(DATA_DIR, str(project_id or ""), path)
     except BackupHttpError as exc:
@@ -2894,7 +3671,7 @@ def backups_archives_restore(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "settings.update")
     try:
         payload = body or {}
         project_id = str(payload.get("project_id") or "").strip()
@@ -2904,13 +3681,31 @@ def backups_archives_restore(
         return _domain_error(exc)
 
 
+@app.get("/api/global/clusterctl-ssh")
+def global_clusterctl_ssh_get(authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "global_secrets.read")
+    return get_clusterctl_ssh(DATA_DIR)
+
+
+@app.put("/api/global/clusterctl-ssh")
+def global_clusterctl_ssh_put(
+    body: dict[str, Any],
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "global_secrets.update")
+    try:
+        return put_clusterctl_ssh(DATA_DIR, body or {})
+    except GlobalSecretsHttpError as exc:
+        return _domain_error(exc)
+
+
 @app.get("/api/global/secrets")
 def global_secrets_list(
     secret_type: Optional[str] = Query(None, alias="type"),
     search: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.read")
     try:
         return list_global_secrets(DATA_DIR, secret_type=secret_type, search=search)
     except GlobalSecretsHttpError as exc:
@@ -2922,7 +3717,7 @@ def global_secrets_create(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.create")
     try:
         payload, status = create_global_secret(DATA_DIR, body or {})
         return JSONResponse(payload, status_code=status)
@@ -2935,7 +3730,7 @@ def global_secrets_options(
     purpose: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.read")
     try:
         return global_secret_options(DATA_DIR, purpose=purpose)
     except GlobalSecretsHttpError as exc:
@@ -2944,13 +3739,13 @@ def global_secrets_options(
 
 @app.get("/api/global/secrets/permissions")
 def global_secrets_perms(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.read")
     return global_secrets_permissions()
 
 
 @app.get("/api/global/secrets/encryption-key")
 def global_secrets_key_get(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.read")
     return encryption_key_status(DATA_DIR)
 
 
@@ -2959,7 +3754,7 @@ def global_secrets_key_post(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.update")
     try:
         return replace_encryption_key(DATA_DIR, str((body or {}).get("key") or ""))
     except GlobalSecretsHttpError as exc:
@@ -2968,7 +3763,7 @@ def global_secrets_key_post(
 
 @app.post("/api/global/secrets/encryption-key/create")
 def global_secrets_key_create(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.update")
     try:
         return create_encryption_key(DATA_DIR)
     except GlobalSecretsHttpError as exc:
@@ -2977,7 +3772,7 @@ def global_secrets_key_create(authorization: Optional[str] = Header(None)):
 
 @app.get("/api/global/secrets/encryption-key/download")
 def global_secrets_key_download(authorization: Optional[str] = Header(None)):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.read")
     return JSONResponse(
         {
             "success": False,
@@ -2988,12 +3783,24 @@ def global_secrets_key_download(authorization: Optional[str] = Header(None)):
     )
 
 
+@app.get("/api/global/secrets/{secret_id}/export")
+def global_secrets_export(
+    secret_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "global_secrets.read")
+    try:
+        return export_global_secret(DATA_DIR, secret_id)
+    except GlobalSecretsHttpError as exc:
+        return _domain_error(exc)
+
+
 @app.get("/api/global/secrets/{secret_id}")
 def global_secrets_get(
     secret_id: str,
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.read")
     try:
         return get_global_secret(DATA_DIR, secret_id)
     except GlobalSecretsHttpError as exc:
@@ -3006,7 +3813,7 @@ def global_secrets_put(
     body: dict[str, Any],
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.update")
     try:
         return update_global_secret(DATA_DIR, secret_id, body or {})
     except GlobalSecretsHttpError as exc:
@@ -3018,7 +3825,7 @@ def global_secrets_delete(
     secret_id: str,
     authorization: Optional[str] = Header(None),
 ):
-    _require_user(authorization)
+    _require_perm(authorization, "global_secrets.delete")
     try:
         return delete_global_secret(DATA_DIR, secret_id)
     except GlobalSecretsHttpError as exc:

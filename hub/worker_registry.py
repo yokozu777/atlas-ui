@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Dict, Tuple
 
+from json_file_lock import load_json_file, update_json_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,13 +22,9 @@ def _get_data_dir():
     env = os.environ.get("DATA_DIR")
     if env and str(env).strip():
         return Path(env).expanduser().resolve()
-    try:
-        from .app import DATA_DIR
-        return DATA_DIR
-    except ImportError:
-        here = Path(__file__).resolve().parent
-        base = here.parent if here.name in {"backend", "hub"} else here
-        return base / "data"
+    here = Path(__file__).resolve().parent
+    base = here.parent if here.name in {"backend", "hub"} else here
+    return base / "data"
 
 DATA_DIR = _get_data_dir()
 
@@ -71,15 +69,18 @@ def infer_worker_runtime(worker_data: Optional[Dict[str, Any]]) -> Optional[str]
     return None
 
 
+def worker_json_path(worker_id: str) -> Path:
+    return WORKERS_DIR / f"{worker_id}.json"
+
+
 def load_worker(worker_id: str) -> Optional[Dict]:
     """Загружает данные worker по ID"""
-    worker_file = WORKERS_DIR / f'{worker_id}.json'
+    worker_file = worker_json_path(worker_id)
     if not worker_file.exists():
         return None
-    
     try:
-        with open(worker_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        data = load_json_file(worker_file, default={})
+        return data if isinstance(data, dict) and data.get("id") else None
     except Exception as e:
         logger.error(f"Error loading worker {worker_id}: {e}")
         return None
@@ -90,11 +91,15 @@ def save_worker(worker_data: Dict) -> bool:
     worker_id = worker_data.get('id')
     if not worker_id:
         return False
-    
-    worker_file = WORKERS_DIR / f'{worker_id}.json'
+
+    def replace(data):
+        if not isinstance(data, dict):
+            data = {}
+        data.clear()
+        data.update(worker_data)
+
     try:
-        with open(worker_file, 'w', encoding='utf-8') as f:
-            json.dump(worker_data, f, indent=2, ensure_ascii=False)
+        update_json_file(worker_json_path(worker_id), replace, default={})
         return True
     except Exception as e:
         logger.error(f"Error saving worker {worker_id}: {e}")
@@ -196,59 +201,73 @@ def rotate_worker_token(worker_id: str) -> str:
         raise Exception("Failed to save worker")
 
 
+def _mutate_worker(worker_id: str, mutator) -> bool:
+    path = worker_json_path(worker_id)
+    if not path.exists():
+        return False
+    found = {"ok": False}
+
+    def inner(data):
+        if not isinstance(data, dict) or not data.get("id"):
+            return None
+        mutator(data)
+        found["ok"] = True
+        return True
+
+    try:
+        update_json_file(path, inner, default={})
+    except Exception as e:
+        logger.error(f"Error updating worker {worker_id}: {e}")
+        return False
+    return found["ok"]
+
+
 def update_worker(worker_id: str, name: Optional[str] = None, description: Optional[str] = None, 
-                 tags: Optional[list] = None, tagColors: Optional[dict] = None) -> bool:
+                 tags: Optional[list] = None, tagColors: Optional[dict] = None,
+                 max_concurrency: Optional[Any] = None) -> bool:
     """
-    Обновляет данные worker (name, description, tags, tagColors)
-    
-    Args:
-        worker_id: ID worker
-        name: Новое имя (опционально)
-        description: Новое описание (опционально, может быть пустой строкой для удаления)
-        tags: Новые теги (опционально)
-        tagColors: Словарь цветов тегов {tag_name: color} (опционально)
-    
-    Returns:
-        True если успешно обновлён
+    Обновляет данные worker (name, description, tags, tagColors, maxConcurrency)
     """
-    worker_data = load_worker(worker_id)
-    if not worker_data:
-        return False
-    
-    if name is not None:
-        worker_data['name'] = name.strip()
-    
-    if description is not None:
-        # Пустая строка означает удаление description
-        if description.strip():
-            worker_data['description'] = description.strip()
-        else:
-            worker_data.pop('description', None)
-    
-    if tags is not None:
-        worker_data['tags'] = tags
-    
-    if tagColors is not None:
-        if 'tagColors' not in worker_data:
-            worker_data['tagColors'] = {}
-        worker_data['tagColors'].update(tagColors)
-    
-    worker_data['updatedAt'] = time.time()
-    
-    return save_worker(worker_data)
+    def mutator(worker_data):
+        if name is not None:
+            worker_data['name'] = name.strip()
+        if description is not None:
+            if description.strip():
+                worker_data['description'] = description.strip()
+            else:
+                worker_data.pop('description', None)
+        if tags is not None:
+            worker_data['tags'] = tags
+        if tagColors is not None:
+            if 'tagColors' not in worker_data:
+                worker_data['tagColors'] = {}
+            worker_data['tagColors'].update(tagColors)
+        if max_concurrency is not None:
+            from worker_claim import resolve_worker_max_concurrency
+
+            try:
+                raw = {"maxConcurrency": int(max_concurrency)}
+            except (TypeError, ValueError):
+                raw = {"maxConcurrency": 1}
+            worker_data["maxConcurrency"] = resolve_worker_max_concurrency(raw)
+        worker_data['updatedAt'] = time.time()
+
+    return _mutate_worker(worker_id, mutator)
 
 
-def update_worker_heartbeat(worker_id: str, current_execution_id: Optional[str] = None) -> bool:
-    """Обновляет lastSeenAt для worker"""
-    worker_data = load_worker(worker_id)
-    if not worker_data:
-        return False
-    
-    worker_data['lastSeenAt'] = time.time()
-    if current_execution_id is not None:
-        worker_data['currentExecutionId'] = current_execution_id
-    
-    return save_worker(worker_data)
+def update_worker_heartbeat(
+    worker_id: str,
+    current_execution_id: Optional[str] = None,
+    max_concurrency: Optional[Any] = None,
+) -> bool:
+    """Обновляет lastSeenAt для worker. max_concurrency is ignored (admin PATCH only)."""
+
+    def mutator(worker_data):
+        worker_data['lastSeenAt'] = time.time()
+        if current_execution_id is not None:
+            worker_data['currentExecutionId'] = current_execution_id
+
+    return _mutate_worker(worker_id, mutator)
 
 
 def get_worker_active_runs_count(worker_id: str) -> int:
@@ -301,27 +320,17 @@ def is_worker_online(worker_id: str, ttl_seconds: int = 60) -> bool:
 
 def enable_worker(worker_id: str) -> bool:
     """Включает worker"""
-    worker_data = load_worker(worker_id)
-    if not worker_data:
-        return False
-    
-    worker_data['enabled'] = True
-    return save_worker(worker_data)
+    return _mutate_worker(worker_id, lambda data: data.__setitem__("enabled", True))
 
 
 def disable_worker(worker_id: str) -> bool:
     """Отключает worker"""
-    worker_data = load_worker(worker_id)
-    if not worker_data:
-        return False
-    
-    worker_data['enabled'] = False
-    return save_worker(worker_data)
+    return _mutate_worker(worker_id, lambda data: data.__setitem__("enabled", False))
 
 
 def delete_worker(worker_id: str) -> bool:
     """Удаляет worker"""
-    worker_file = WORKERS_DIR / f'{worker_id}.json'
+    worker_file = worker_json_path(worker_id)
     if worker_file.exists():
         try:
             worker_file.unlink()

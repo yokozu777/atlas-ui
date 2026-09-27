@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 
+import { requireHubApiSession } from "@/server/hub-api-session";
 import { loadVarsCatalog, readVarsFile, writeVarsFile } from "@/server/vars";
 
 export async function GET(request: Request) {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   const url = new URL(request.url);
   const clusterId = url.searchParams.get("clusterId") ?? "";
   const rel = url.searchParams.get("rel");
@@ -23,6 +28,10 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   const body = (await request.json()) as {
     clusterId?: string;
     rel?: string;

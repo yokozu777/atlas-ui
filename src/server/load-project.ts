@@ -1,3 +1,5 @@
+import { cache } from "react";
+
 import { listLocalProjects, getLocalProject } from "@/server/projects-local";
 import { stargateAccessToken, stargateApiUrl } from "@/server/stargate";
 import type { StargateProject } from "@/lib/project-types";
@@ -20,6 +22,8 @@ export async function loadProject(
   const data = (await res.json()) as { project?: StargateProject };
   return data.project ?? null;
 }
+
+export const loadProjectCached = cache(loadProject);
 
 export async function loadProjectsList(): Promise<StargateProject[]> {
   const base = stargateApiUrl();

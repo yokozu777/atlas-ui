@@ -17,6 +17,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_UNSET = object()
+
 
 class UserService:
     """Сервис для работы с пользователями"""
@@ -123,6 +125,7 @@ class UserService:
             created_at=now,
             updated_at=now,
             must_change_password=must_change_password,
+            token_version=0,
         )
         
         users[user_id] = user
@@ -149,9 +152,14 @@ class UserService:
         users = self._load_users()
         return list(users.values())
     
-    def update_user(self, user_id: str, username: Optional[str] = None,
-                   email: Optional[str] = None, roles: Optional[List[str]] = None,
-                   is_active: Optional[bool] = None) -> Optional[User]:
+    def update_user(
+        self,
+        user_id: str,
+        username: Optional[str] = None,
+        email: Any = _UNSET,
+        roles: Optional[List[str]] = None,
+        is_active: Optional[bool] = None,
+    ) -> Optional[User]:
         """
         Обновить пользователя
         
@@ -179,7 +187,7 @@ class UserService:
                     raise ValueError(f"Пользователь с именем '{username}' уже существует")
             user.username = username
         
-        if email is not None:
+        if email is not _UNSET:
             user.email = email
         
         if roles is not None:
@@ -220,19 +228,27 @@ class UserService:
         # Устанавливаем новый пароль
         user.password_hash = self._hash_password(new_password)
         user.must_change_password = False
+        user.token_version = int(getattr(user, "token_version", 0) or 0) + 1
         user.updated_at = datetime.utcnow().isoformat()
         
         self._save_users(users)
         logger.info(f"Changed password for user: {user.username} (ID: {user_id})")
         return True
     
-    def set_password(self, user_id: str, new_password: str) -> bool:
+    def set_password(
+        self,
+        user_id: str,
+        new_password: str,
+        *,
+        must_change_password: bool = False,
+    ) -> bool:
         """
         Установить новый пароль (без проверки старого, для администратора)
         
         Args:
             user_id: ID пользователя
             new_password: Новый пароль
+            must_change_password: If True, keep the forced-change gate
         
         Returns:
             True, если пароль успешно установлен, False в противном случае
@@ -244,7 +260,8 @@ class UserService:
         
         user = users[user_id]
         user.password_hash = self._hash_password(new_password)
-        user.must_change_password = False
+        user.must_change_password = must_change_password
+        user.token_version = int(getattr(user, "token_version", 0) or 0) + 1
         user.updated_at = datetime.utcnow().isoformat()
         
         self._save_users(users)

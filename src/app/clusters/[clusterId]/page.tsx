@@ -1,48 +1,68 @@
 "use client";
 
 import Link from "next/link";
-import { use, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-
-import { Layers, Server, Timer } from "lucide-react";
-
-import { useClusterOverlays } from "@/components/cluster-overlays";
-import { useJobSession } from "@/components/job-session";
-import { LogViewer } from "@/components/log-viewer";
-import { MetricCard } from "@/components/metric-card";
-import { OverviewActivity } from "@/components/overview-activity";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import {
-  OverviewHero,
-  overviewHeroKind,
-} from "@/components/overview-hero";
+  CheckCircle2,
+  FileText,
+  KeyRound,
+  ListChecks,
+  ListOrdered,
+  MoreHorizontal,
+  Play,
+  Server,
+  Zap,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { AtlasMetricsGrid } from "@/components/atlas-metrics-grid";
+import { AtlasPackMapLive } from "@/components/atlas-pack-map-live";
+import { AtlasRunProgressCard } from "@/components/atlas-run-progress-card";
+import { useClusterOverlays } from "@/components/cluster-overlays";
 import { OverviewPipeline } from "@/components/overview-pipeline";
-import { PageHeader } from "@/components/page-header";
+import { OverviewReadiness } from "@/components/overview-readiness";
+import { PlaybookSetupCard } from "@/components/playbook-setup-card";
 import { Panel } from "@/components/panel";
 import { ExecutionCharts } from "@/components/project-dashboard/execution-charts";
+import { QuickActions } from "@/components/project-dashboard/quick-actions";
+import { RecentExecutions } from "@/components/project-dashboard/recent-executions";
 import { SectionHeader } from "@/components/section-header";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
+import { StatusBadge } from "@/components/status-badge";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
-  clusterHref,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
+import { projectApiQuery } from "@/components/hosts-groups/helpers";
+import { useExecutionStream } from "@/hooks/use-execution-stream";
+import {
   fetchClusters,
-  fetchClusterRuns,
-  runClusterctl,
+  type ClusterPhase,
+  type ClusterPlaybookRepo,
   type ClusterRow,
-  type RunLogRow,
 } from "@/lib/api";
 import {
-  atlasRunsToDashboardExecutions,
-  averageRunDurationLabel,
-} from "@/lib/atlas-overview";
-import type { PlanJson } from "@/lib/cluster-types";
-import { lastRunStatus } from "@/lib/cluster-types";
-import { formatAge, formatDuration, metaString } from "@/lib/format-time";
-import { parseJobJson } from "@/lib/job-output";
-
-type LimitsJson = {
-  hosts?: { key: string }[];
-  groups?: string[];
-};
+  cancelOrStopExecution,
+  isActiveExecutionStatus,
+  isClusterAtlasRun,
+  mapAtlasDashboardExecution,
+  type AtlasExecution,
+} from "@/lib/atlas-run";
+import {
+  countOnlineHosts,
+  executionIdOf,
+  executionStatusKind,
+  executionStatusLabel,
+  isWorkerOnline,
+  type HostStatusRow,
+  type RawWorker,
+} from "@/lib/project-dashboard";
+import { projectHref, projectIdFromPath } from "@/lib/project-href";
+import { stargateJson } from "@/lib/stargate";
 
 export default function ClusterHomePage({
   params,
@@ -54,229 +74,496 @@ export default function ClusterHomePage({
 }
 
 export function ClusterHomeView({ clusterId }: { clusterId: string }) {
-  const { openRun, openInspect } = useClusterOverlays();
-  const { job, log } = useJobSession();
+  const { openRun, openInspect, liveExecutionId, followExecution } =
+    useClusterOverlays();
   const router = useRouter();
-  const sessionForCluster = job?.clusterId === clusterId;
-  const running = Boolean(sessionForCluster && job?.status === "running");
-  const [plan, setPlan] = useState<PlanJson | null>(null);
-  const [planError, setPlanError] = useState<string | null>(null);
-  const [planLoading, setPlanLoading] = useState(true);
-  const [runs, setRuns] = useState<RunLogRow[]>([]);
-  const [hostCount, setHostCount] = useState<number | null>(null);
+  const pathname = usePathname();
+  const projectId = projectIdFromPath(pathname);
+  const q = projectId ? projectApiQuery(projectId, clusterId) : "";
+
   const [cluster, setCluster] = useState<ClusterRow | null>(null);
+  const [phases, setPhases] = useState<ClusterPhase[]>([]);
+  const [sourceCount, setSourceCount] = useState(0);
+  const [phasesError, setPhasesError] = useState<string | null>(null);
+  const [phasesLoading, setPhasesLoading] = useState(true);
+  const [runs, setRuns] = useState<AtlasExecution[]>([]);
+  const [executionsError, setExecutionsError] = useState<string | null>(null);
+  const [hostsTotal, setHostsTotal] = useState(0);
+  const [hostsOnline, setHostsOnline] = useState(0);
+  const [hostsError, setHostsError] = useState<string | null>(null);
+  const [clusterError, setClusterError] = useState<string | null>(null);
+  const [workersOnline, setWorkersOnline] = useState<number | null>(null);
+  const [workersTotal, setWorkersTotal] = useState<number | null>(null);
+  const [workersError, setWorkersError] = useState<string | null>(null);
+  const [executionId, setExecutionId] = useState<string | null>(null);
+  const [executionStatus, setExecutionStatus] = useState<string | null>(null);
+
+  const { text, running } = useExecutionStream(
+    projectId ?? "",
+    projectId ? executionId : null,
+  );
+
+  const dashboardExecutions = useMemo(
+    () =>
+      runs.map((row) => {
+        const mapped = mapAtlasDashboardExecution(row, clusterId);
+        if (
+          executionId &&
+          mapped.id === executionId &&
+          running &&
+          (mapped.rawStatus === "QUEUED" || mapped.status === "pending")
+        ) {
+          return { ...mapped, status: "running" as const, rawStatus: "RUNNING" };
+        }
+        return mapped;
+      }),
+    [runs, clusterId, executionId, running],
+  );
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("run") !== "1") {
+      return;
+    }
+    openRun();
+    params.delete("run");
+    const search = params.toString();
+    router.replace(search ? `${pathname}?${search}` : pathname, {
+      scroll: false,
+    });
+  }, [clusterId, openRun, pathname, router]);
 
   useEffect(() => {
     let cancelled = false;
     void fetchClusters()
       .then((rows) => {
         if (!cancelled) {
+          setClusterError(null);
           setCluster(rows.find((row) => row.id === clusterId) ?? null);
         }
       })
-      .catch(() => {
-        if (!cancelled) setCluster(null);
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setCluster(null);
+          setClusterError(err instanceof Error ? err.message : String(err));
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [clusterId]);
 
+  const loadPhases = useCallback(async () => {
+    if (!projectId) {
+      setPhases([]);
+      setSourceCount(0);
+      return;
+    }
+    const data = await stargateJson<{
+      phases?: ClusterPhase[];
+      playbooks?: ClusterPlaybookRepo[];
+    }>(
+      `/projects/${encodeURIComponent(projectId)}/atlas/cluster-yaml?${q}`,
+    );
+    setPhases(data.phases ?? []);
+    setSourceCount((data.playbooks ?? []).length);
+  }, [projectId, q]);
+
+  const loadRuns = useCallback(async () => {
+    if (!projectId) {
+      setRuns([]);
+      setExecutionsError(null);
+      return;
+    }
+    try {
+      const data = await stargateJson<{ executions?: AtlasExecution[] }>(
+        `/executions?project_id=${encodeURIComponent(projectId)}`,
+      );
+      setRuns(
+        (data.executions ?? []).filter((row) =>
+          isClusterAtlasRun(row, clusterId),
+        ),
+      );
+      setExecutionsError(null);
+    } catch (err) {
+      setRuns([]);
+      setExecutionsError(err instanceof Error ? err.message : String(err));
+    }
+  }, [projectId, clusterId]);
+
+  const loadHosts = useCallback(async () => {
+    if (!projectId) {
+      setHostsTotal(0);
+      setHostsOnline(0);
+      setHostsError(null);
+      return;
+    }
+    try {
+      const [hostsData, hostStatusData] = await Promise.all([
+        stargateJson<{ hosts?: unknown[] }>(`/inventory/hosts?${q}`),
+        stargateJson<{ hosts?: Record<string, HostStatusRow> }>(
+          `/inventory/host-status?${q}`,
+        ),
+      ]);
+      const counted = countOnlineHosts(
+        Array.isArray(hostsData.hosts) ? hostsData.hosts : [],
+        hostStatusData.hosts ?? {},
+      );
+      setHostsTotal(counted.total);
+      setHostsOnline(counted.online);
+      setHostsError(null);
+    } catch (err: unknown) {
+      setHostsError(err instanceof Error ? err.message : String(err));
+    }
+  }, [projectId, q]);
+
+  const loadWorkers = useCallback(async () => {
+    try {
+      const data = await stargateJson<{ workers?: RawWorker[] }>("/admin/workers");
+      const workers = data.workers ?? [];
+      setWorkersTotal(workers.length);
+      setWorkersOnline(workers.filter((row) => isWorkerOnline(row)).length);
+      setWorkersError(null);
+    } catch (err: unknown) {
+      setWorkersError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    void runClusterctl({
-      argv: ["plan", "--json"],
-      clusterId,
-      wait: true,
-    })
-      .then((result) => {
-        if (cancelled) return;
-        setPlan(parseJobJson<PlanJson>(result.log ?? "{}"));
-        setPlanError(null);
+    setPhasesLoading(true);
+    setPhasesError(null);
+    void loadPhases()
+      .then(() => {
+        if (!cancelled) setPhasesLoading(false);
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
-        setPlan(null);
-        setPlanError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setPlanLoading(false);
+        if (!cancelled) {
+          setPhasesError(err instanceof Error ? err.message : String(err));
+          setPhasesLoading(false);
+        }
       });
+    void loadRuns();
+    void loadHosts();
+    void loadWorkers();
     return () => {
       cancelled = true;
     };
-  }, [clusterId]);
+  }, [loadPhases, loadRuns, loadHosts, loadWorkers]);
 
   useEffect(() => {
-    let cancelled = false;
-    void runClusterctl({ argv: ["limits", "--json"], clusterId, wait: true })
-      .then((result) => {
-        if (cancelled) return;
-        const data = parseJobJson<LimitsJson>(result.log ?? "{}");
-        setHostCount((data.hosts ?? []).length);
-      })
-      .catch(() => {
-        if (!cancelled) setHostCount(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [clusterId]);
+    if (liveExecutionId) {
+      setExecutionId(liveExecutionId);
+      setExecutionStatus("QUEUED");
+      void loadRuns();
+    }
+  }, [liveExecutionId, loadRuns]);
 
   useEffect(() => {
-    let cancelled = false;
-    void fetchClusterRuns(clusterId)
-      .then((data) => {
-        if (!cancelled) setRuns(data.runs);
-      })
-      .catch(() => {
-        if (!cancelled) setRuns([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [clusterId, job?.id, job?.status]);
+    if (executionId) {
+      return;
+    }
+    const active = runs.find((row) => isActiveExecutionStatus(row.status));
+    if (!active) {
+      return;
+    }
+    const id = executionIdOf(active);
+    if (id) {
+      setExecutionId(id);
+      if (active.status) {
+        setExecutionStatus(active.status);
+      }
+    }
+  }, [runs, executionId]);
 
-  const skipped = new Map(
-    (plan?.filter_skipped ?? []).map((item) => [item.phase_ref, item.reason]),
-  );
+  useEffect(() => {
+    if (!executionId) {
+      return;
+    }
+    if (!running) {
+      void loadRuns();
+      void loadWorkers();
+      return;
+    }
+    void loadRuns();
+    const timer = window.setInterval(() => {
+      void loadRuns();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [executionId, running, loadRuns, loadWorkers]);
+
+  useEffect(() => {
+    if (!executionId) {
+      return;
+    }
+    const row = runs.find((item) => executionIdOf(item) === executionId);
+    if (row?.status) {
+      setExecutionStatus(row.status);
+    } else if (running) {
+      setExecutionStatus("RUNNING");
+    }
+  }, [executionId, runs, running]);
+
+  const liveStatus =
+    executionStatus === "CANCELING" || executionStatus === "CANCELED"
+      ? executionStatus
+      : running
+        ? "RUNNING"
+        : executionStatus;
+  const liveKind = executionStatusKind(liveStatus ?? undefined);
+  const liveActive = isActiveExecutionStatus(liveStatus);
+  const liveRow = runs.find((row) => executionIdOf(row) === executionId);
   const lastRun = runs[0] ?? null;
-  const lastStatus = lastRun ? lastRunStatus(lastRun.meta) : null;
-  const started = metaString(lastRun?.meta ?? null, "started_at");
-  const finished = metaString(lastRun?.meta ?? null, "finished_at");
-  const recent = runs.slice(0, 8);
+  const lastKind = lastRun ? executionStatusKind(lastRun.status) : null;
+  const headerKind = liveActive
+    ? liveKind
+    : lastKind === "fail"
+      ? "fail"
+      : "ok";
+  const headerLabel = liveActive
+    ? executionStatusLabel(liveKind)
+    : lastKind === "fail"
+      ? "Failed"
+      : "Ready";
   const title = cluster?.display_name || clusterId;
-  const heroKind = overviewHeroKind({ running, lastStatus });
-  const heroMeta = [
-    lastRun
-      ? (formatAge(started ?? lastRun.stamp) ?? lastRun.stamp)
-      : "No runs yet",
-    plan?.execution,
-    plan?.workspace_id,
-  ].filter((item): item is string => Boolean(item));
+  const runPhases = useMemo(
+    () =>
+      liveRow?.runParams?.phases && liveRow.runParams.phases.length > 0
+        ? liveRow.runParams.phases
+        : phases.map((row) => row.alias),
+    [liveRow, phases],
+  );
+
+  async function cancelLive() {
+    if (!projectId || !executionId) {
+      return;
+    }
+    try {
+      await cancelOrStopExecution(
+        projectId,
+        executionId,
+        liveStatus ?? undefined,
+      );
+      toast.success(
+        liveStatus === "QUEUED" ? "Cancel requested" : "Stop requested",
+      );
+      setExecutionStatus(liveStatus === "QUEUED" ? "CANCELED" : "CANCELING");
+      await loadRuns();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   return (
     <div className="flex min-h-0 flex-col gap-8">
-      <PageHeader kicker="Cluster" title={title} />
-
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
-        <div className="xl:col-span-8">
-          <OverviewHero
-            kind={heroKind}
-            title={title}
-            clusterId={clusterId}
-            meta={heroMeta}
-            onRun={() => openRun()}
-            onInspect={openInspect}
-          />
-        </div>
-        <div className="flex flex-col gap-4 xl:col-span-4">
-          <Link
-            href={clusterHref(clusterId, "/hosts")}
-            className="block rounded-xl outline-none ring-offset-2 ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <MetricCard
-              tone="info"
-              label="Hosts"
-              icon={<Server />}
-              value={hostCount === null ? "—" : hostCount}
-              hint="inventory --limit keys"
-              className="transition-colors hover:bg-white/5"
-            />
-          </Link>
-          <MetricCard
-            tone="primary"
-            label="Phases"
-            icon={<Layers />}
-            value={planLoading ? "…" : (plan?.phases?.length ?? 0)}
-            hint="from plan --json"
-          />
-          <MetricCard
-            tone="warning"
-            label="Duration"
-            icon={<Timer />}
-            value={formatDuration(started, finished) ?? "—"}
-            hint="started_at → finished_at"
-          />
-        </div>
-      </div>
-
-      <div>
-        <SectionHeader title="Pipeline" />
-        {planLoading ? (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Skeleton className="h-28 rounded-xl" />
-            <Skeleton className="h-28 rounded-xl" />
-            <Skeleton className="h-28 rounded-xl" />
-            <Skeleton className="h-28 rounded-xl" />
+      <header className="flex flex-col gap-4 border-b border-border pb-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1.5">
+          <p className="font-mono text-xs text-muted-foreground">{clusterId}</p>
+          <h1 className="font-display text-2xl font-medium tracking-tight">
+            {title}
+          </h1>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <StatusBadge status={headerKind}>{headerLabel}</StatusBadge>
+            <span className="text-muted-foreground">
+              {workersTotal == null
+                ? "Workers …"
+                : `${workersTotal} workers · ${workersOnline ?? 0} online`}
+            </span>
           </div>
-        ) : planError ? (
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <Button type="button" onClick={() => openRun()}>
+            <Play />
+            Run
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => openInspect("validate")}
+          >
+            <CheckCircle2 />
+            Validate
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="More actions"
+              className={buttonVariants({ variant: "outline", size: "icon" })}
+            >
+              <MoreHorizontal />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => openInspect("plan")}>
+                Plan
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openInspect("smoke")}>
+                Smoke
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </header>
+
+      <OverviewReadiness clusterId={clusterId} projectId={projectId} />
+
+      {clusterError || hostsError || workersError ? (
+        <p className="text-sm text-destructive" role="alert">
+          {[clusterError, hostsError, workersError].filter(Boolean).join(" · ")}
+        </p>
+      ) : null}
+
+      {projectId ? (
+        <AtlasMetricsGrid
+          projectId={projectId}
+          hostsTotal={hostsTotal}
+          hostsOnline={hostsOnline}
+          sourceCount={sourceCount}
+          phaseCount={phases.length}
+          executions={dashboardExecutions}
+          workersOnline={workersOnline ?? 0}
+          workersTotal={workersTotal ?? 0}
+        />
+      ) : null}
+
+      {projectId ? (
+        <ExecutionCharts
+          executions={dashboardExecutions}
+          error={executionsError}
+        />
+      ) : null}
+
+      <div id="cluster-pipeline">
+        <SectionHeader title="Pipeline" icon={<ListOrdered />} />
+        {phasesLoading ? (
+          <div className="flex gap-3 overflow-hidden">
+            <Skeleton className="h-28 w-44 shrink-0 rounded-xl" />
+            <Skeleton className="h-28 w-44 shrink-0 rounded-xl" />
+            <Skeleton className="h-28 w-44 shrink-0 rounded-xl" />
+          </div>
+        ) : phasesError ? (
           <Panel className="p-4">
             <p className="font-mono text-xs whitespace-pre-wrap text-destructive">
-              {planError}
+              {phasesError}
             </p>
           </Panel>
         ) : (
           <OverviewPipeline
-            phases={plan?.phases ?? []}
-            skipped={skipped}
-            log={sessionForCluster ? log : ""}
-            exitCode={sessionForCluster ? (job?.exitCode ?? null) : null}
-            running={running}
-            onSelect={(phase) => openRun({ phases: phase })}
+            phases={phases}
+            liveAliases={liveRow?.runParams?.phases}
+            liveStatus={liveActive ? liveStatus : null}
+            onSelect={(alias) => openRun({ phases: alias })}
           />
         )}
-        {running && job ? (
-          <div className="mt-4">
-            <LogViewer
-              jobId={job.id}
-              text={log}
-              running
-              compact
-              label="live"
+        {projectId && executionId ? (
+          <div className="mt-4 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <StatusBadge status={liveKind}>
+                  {executionStatusLabel(liveKind)}
+                </StatusBadge>
+                <span className="truncate font-mono text-xs text-muted-foreground">
+                  {executionId}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  render={
+                    <Link
+                      href={projectHref(projectId, `/executions/${executionId}`)}
+                    />
+                  }
+                >
+                  Open log
+                </Button>
+                {liveActive && liveStatus !== "CANCELING" ? (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => void cancelLive()}
+                  >
+                    {liveStatus === "QUEUED" ? "Cancel" : "Stop"}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+            <AtlasRunProgressCard
+              status={liveStatus}
+              text={text}
+              phases={runPhases}
+            />
+            <AtlasPackMapLive
+              projectId={projectId}
+              clusterId={clusterId}
+              status={liveStatus}
+              text={text}
+              phases={runPhases}
             />
           </div>
         ) : null}
       </div>
 
-      <ExecutionCharts
-        executions={atlasRunsToDashboardExecutions(runs)}
-        error={null}
-      />
+      {projectId ? (
+        <PlaybookSetupCard
+          projectId={projectId}
+          clusterId={clusterId}
+          variant="summary"
+        />
+      ) : null}
 
-      <div>
-        <SectionHeader
-          title="Activity"
-          actions={
-            <>
-              <span className="tabular-nums text-sm text-muted-foreground">
-                {averageRunDurationLabel(runs)}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                render={<Link href={clusterHref(clusterId, "/logs")} />}
-              >
-                History
-              </Button>
-            </>
+      {projectId ? (
+        <RecentExecutions
+          projectId={projectId}
+          executions={dashboardExecutions}
+          playbookColumnLabel="Phases"
+          fallbackClusterId={clusterId}
+          onQueued={followExecution}
+          onStopped={() => void loadRuns()}
+          emptyMessage="No atlas runs for this cluster yet."
+          emptyAction={
+            <Button size="sm" onClick={() => openRun()}>
+              <Play />
+              Run
+            </Button>
           }
         />
-        {recent.length === 0 ? (
-          <Panel className="px-4 py-8 text-sm text-muted-foreground">
-            No workspace logs yet.
-          </Panel>
-        ) : (
-          <OverviewActivity
-            runs={recent}
-            onOpen={(stamp) =>
-              router.push(
-                clusterHref(clusterId, `/logs/${encodeURIComponent(stamp)}`),
-              )
-            }
+      ) : null}
+
+      {projectId ? (
+        <div>
+          <SectionHeader title="Quick Actions" icon={<Zap />} />
+          <QuickActions
+            hideTitle
+            items={[
+              {
+                label: "Run pipeline",
+                icon: <Play />,
+                onClick: () => openRun(),
+              },
+              {
+                label: "Inventory",
+                icon: <Server />,
+                href: projectHref(projectId, "/hosts"),
+              },
+              {
+                label: "Executions",
+                icon: <FileText />,
+                href: projectHref(projectId, "/executions"),
+              },
+              {
+                label: "Setup",
+                icon: <ListChecks />,
+                href: projectHref(projectId, "/cluster-yaml"),
+              },
+              {
+                label: "Secrets",
+                icon: <KeyRound />,
+                href: projectHref(projectId, "/secrets"),
+              },
+            ]}
           />
-        )}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

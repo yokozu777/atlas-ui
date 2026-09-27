@@ -444,6 +444,9 @@ export const setiEditorTheme = EditorView.theme(
     },
     ".cm-scroller": {
       overflow: "auto",
+      overflowY: "scroll",
+      scrollbarWidth: "thin",
+      scrollbarColor: `${SETI.gutter} #111111`,
       fontFamily:
         "var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace",
     },

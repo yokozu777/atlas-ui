@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { Download, Folder, FolderGit2, GitBranch, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
@@ -10,16 +10,11 @@ import {
   GIT_PULL_INHERIT,
   GitPullSecretSelect,
 } from "@/components/git-pull-secret-select";
+import { Panel } from "@/components/panel";
+import { SectionHeader } from "@/components/section-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { useEnsureClusterctlSshKey } from "@/hooks/use-ensure-clusterctl-ssh";
 import {
   fetchReposStatus,
   queueReposSync,
@@ -27,6 +22,8 @@ import {
   type ClusterPlaybookRepo,
   type ReposStatusPayload,
 } from "@/lib/api";
+import { useCan } from "@/lib/authz";
+import { notify, notifyExecution } from "@/lib/notification-inbox";
 import { loadGitPullSecrets } from "@/lib/git-pull";
 import { formatRelativeTime, shortSha } from "@/lib/project-dashboard";
 import type { SecretOption } from "@/lib/project-sources";
@@ -34,9 +31,45 @@ import type { StargateProject } from "@/lib/project-types";
 import { fetchProject, stargateJson } from "@/lib/stargate";
 
 function entriesLabel(entries?: string[]) {
-  if (!entries?.length) return "—";
+  if (!entries?.length) return "No entries";
   if (entries.length <= 3) return entries.join(", ");
   return `${entries.slice(0, 3).join(", ")} +${entries.length - 3}`;
+}
+
+function stateCopy(state: string, head: string | null, lockSha: string | null) {
+  if (state === "ready" && head && lockSha && head === lockSha) {
+    return {
+      label: "Ready",
+      detail: "Cloned, matches lock",
+      variant: "success" as const,
+    };
+  }
+  if (state === "ready") {
+    return {
+      label: "Ready",
+      detail: lockSha ? "Cloned; lock may differ" : "Cloned on disk",
+      variant: "success" as const,
+    };
+  }
+  if (state === "missing") {
+    return {
+      label: "Missing",
+      detail: "Not on disk yet — sync to clone",
+      variant: "destructive" as const,
+    };
+  }
+  if (state === "error") {
+    return {
+      label: "Error",
+      detail: "Last sync failed",
+      variant: "destructive" as const,
+    };
+  }
+  return {
+    label: state || "Unknown",
+    detail: "Status not loaded yet",
+    variant: "outline" as const,
+  };
 }
 
 export function ClusterYamlReposTab({
@@ -48,6 +81,8 @@ export function ClusterYamlReposTab({
   clusterId: string | null;
   playbooks: ClusterPlaybookRepo[];
 }) {
+  const canSync = useCan()("atlas.execute");
+  const { ensure: ensureSshKey, dialog: sshDialog } = useEnsureClusterctlSshKey();
   const [status, setStatus] = useState<ReposStatusPayload | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -85,9 +120,16 @@ export function ClusterYamlReposTab({
   }, [projectId]);
 
   useEffect(() => {
-    void loadGitPull().catch((err: unknown) =>
-      toast.error(err instanceof Error ? err.message : String(err)),
-    );
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (cancelled) return;
+      void loadGitPull().catch((err: unknown) =>
+        toast.error(err instanceof Error ? err.message : String(err)),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loadGitPull]);
 
   async function saveRepoSecret(repo: string, value: string) {
@@ -115,13 +157,17 @@ export function ClusterYamlReposTab({
   }
 
   useEffect(() => {
-    void loadStatus();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) void loadStatus();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loadStatus]);
 
   const rows = useMemo(() => {
-    const byName = new Map(
-      (status?.repos ?? []).map((row) => [row.name, row]),
-    );
+    const byName = new Map((status?.repos ?? []).map((row) => [row.name, row]));
     const lockRepos = status?.lock?.repos ?? {};
     return playbooks.map((repo) => {
       const live = byName.get(repo.name);
@@ -131,7 +177,6 @@ export function ClusterYamlReposTab({
         source: live?.source || repo.source || "—",
         origin: live?.url || repo.url || live?.path || repo.path || "—",
         ref: live?.ref || repo.ref || "—",
-        sync: live?.sync || repo.sync || "—",
         state: live?.state || "unknown",
         head: live?.head || null,
         lockSha: lock?.resolved_sha || null,
@@ -148,20 +193,46 @@ export function ClusterYamlReposTab({
     if (!clusterId) return;
     setBusy(true);
     try {
+      if (!(await ensureSshKey())) {
+        notify("error", "Add an SSH key in Secrets Manager to clone playbooks", {
+          href: "/secrets",
+        });
+        return;
+      }
       const result = await queueReposSync({
         clusterId,
         projectId,
         repo,
       });
       if (result.executionId) {
-        toast.success("Sync queued on worker");
+        notifyExecution(
+          "success",
+          "Sync queued on worker",
+          projectId,
+          result.executionId,
+        );
         const done = await waitHubExecution(projectId, result.executionId);
         if (done === "SUCCESS") {
-          toast.success("Repo sync finished");
+          notifyExecution(
+            "success",
+            "Repo sync finished",
+            projectId,
+            result.executionId,
+          );
         } else if (done === "TIMEOUT") {
-          toast.error("Repo sync is still running; refresh status later");
+          notifyExecution(
+            "error",
+            "Repo sync is still running; refresh status later",
+            projectId,
+            result.executionId,
+          );
         } else {
-          toast.error(`Repo sync ${done.toLowerCase()}`);
+          notifyExecution(
+            "error",
+            `Repo sync ${done.toLowerCase()}`,
+            projectId,
+            result.executionId,
+          );
         }
       } else if (result.exitCode) {
         toast.error("Repo sync failed");
@@ -178,133 +249,110 @@ export function ClusterYamlReposTab({
 
   if (!clusterId) {
     return (
-      <EmptyState
-        title="No cluster selected"
-        description="Choose a cluster in the header."
-      />
+      <>
+        {sshDialog}
+        <EmptyState
+          title="No cluster selected"
+          description="Choose a cluster in the header."
+        />
+      </>
     );
   }
 
   if (!playbooks.length) {
     return (
-      <EmptyState
-        title="No playbook repos"
-        description="cluster.yaml has no playbooks: entries for this cluster."
-      />
+      <>
+        {sshDialog}
+        <EmptyState
+          title="No playbook sources"
+          description="Add Git or local playbooks on the Setup tab, then sync them here."
+        />
+      </>
     );
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">
-          Last sync:{" "}
-          <span className="text-foreground">
-            {lastSync ? formatRelativeTime(lastSync) : "never"}
-          </span>
-          {lastSync ? (
-            <span className="ml-2 font-mono text-xs">{lastSync}</span>
-          ) : null}
-        </p>
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void loadStatus()}
-            disabled={loading || busy}
-          >
-            <RefreshCw />
-            Refresh
-          </Button>
-          <Button
-            size="sm"
-            disabled={busy}
-            onClick={() =>
-              setConfirm({
-                title: "Sync all repos?",
-                description: `./cluster repos sync — ${clusterId}`,
-              })
-            }
-          >
-            Sync all
-          </Button>
-        </div>
-      </div>
+      <SectionHeader
+        title="Playbook sync"
+        icon={<FolderGit2 />}
+        actions={
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void loadStatus()}
+              disabled={loading || busy}
+            >
+              <RefreshCw />
+              Refresh
+            </Button>
+            {canSync ? (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() =>
+                  setConfirm({
+                    title: "Sync all playbooks?",
+                    description: `Clone or update every Git source for ${clusterId}.`,
+                  })
+                }
+              >
+                <Download />
+                Sync all
+              </Button>
+            ) : null}
+          </div>
+        }
+      />
+      <p className="text-sm text-muted-foreground">
+        Last sync:{" "}
+        <span className="text-foreground" title={lastSync || undefined}>
+          {lastSync ? formatRelativeTime(lastSync) : "never"}
+        </span>
+      </p>
       {statusError ? (
         <p className="text-sm text-destructive">{statusError}</p>
       ) : null}
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Repo</TableHead>
-            <TableHead>Source</TableHead>
-            <TableHead>Origin</TableHead>
-            <TableHead>Ref</TableHead>
-            <TableHead>Sync</TableHead>
-            <TableHead>State</TableHead>
-            <TableHead>HEAD</TableHead>
-            <TableHead>Lock SHA</TableHead>
-            <TableHead>Entries</TableHead>
-            <TableHead>Git pull key</TableHead>
-            <TableHead />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.name}>
-              <TableCell className="font-medium">{row.name}</TableCell>
-              <TableCell>
-                <Badge variant="outline">{row.source}</Badge>
-              </TableCell>
-              <TableCell className="max-w-[14rem] truncate font-mono text-xs">
-                {row.origin}
-              </TableCell>
-              <TableCell className="font-mono text-xs">{row.ref}</TableCell>
-              <TableCell className="font-mono text-xs">{row.sync}</TableCell>
-              <TableCell>
-                <Badge
-                  variant={
-                    row.state === "ready"
-                      ? "success"
-                      : row.state === "missing"
-                        ? "destructive"
-                        : "outline"
-                  }
-                >
-                  {row.state}
-                </Badge>
-              </TableCell>
-              <TableCell className="font-mono text-xs whitespace-nowrap">
-                {shortSha(row.head)}
-              </TableCell>
-              <TableCell>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className="font-mono text-xs whitespace-nowrap"
-                    title={row.lockSha || undefined}
-                  >
-                    {shortSha(row.lockSha)}
-                  </span>
-                  {row.lockSha && row.syncAction ? (
-                    <Badge variant="outline" className="font-sans font-normal">
-                      {row.syncAction}
-                    </Badge>
-                  ) : null}
+      <div className="grid gap-3">
+        {rows.map((row) => {
+          const copy = stateCopy(row.state, row.head, row.lockSha);
+          return (
+            <Panel key={row.name} className="space-y-3 p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <p className="flex items-center gap-1.5 text-sm font-medium">
+                    {row.git ? (
+                      <GitBranch className="size-4 shrink-0 text-muted-foreground" />
+                    ) : (
+                      <Folder className="size-4 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className="truncate">{row.name}</span>
+                  </p>
+                  <p className="break-all font-mono text-xs text-muted-foreground">
+                    {row.origin}
+                    {row.ref && row.ref !== "—" ? ` · ${row.ref}` : ""}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {copy.detail}
+                    {row.head ? ` · ${shortSha(row.head)}` : ""}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {entriesLabel(row.entries)}
+                  </p>
                 </div>
-              </TableCell>
-              <TableCell className="max-w-[10rem] truncate text-xs text-muted-foreground">
-                {entriesLabel(row.entries)}
-              </TableCell>
-              <TableCell className="min-w-[12rem]">
+                <Badge variant={copy.variant}>{copy.label}</Badge>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 {row.git ? (
                   <GitPullSecretSelect
                     id={`git-pull-${row.name}`}
-                    label=""
-                    compact
+                    label="Git pull key"
+                    compact={false}
                     inheritLabel={
                       defaultSecretId
                         ? "Project default"
-                        : "Project default (machine SSH_KEY)"
+                        : "Project default (clusterctl SSH key)"
                     }
                     value={repoSecretIds[row.name] || GIT_PULL_INHERIT}
                     secrets={secrets}
@@ -312,31 +360,30 @@ export function ClusterYamlReposTab({
                     disabled={busy}
                   />
                 ) : (
-                  <span className="text-xs text-muted-foreground">—</span>
+                  <p className="text-xs text-muted-foreground">Local source</p>
                 )}
-              </TableCell>
-              <TableCell>
-                {row.git ? (
+                {row.git && canSync ? (
                   <Button
-                    size="xs"
-                    variant="ghost"
+                    size="sm"
+                    variant="outline"
                     disabled={busy}
                     onClick={() =>
                       setConfirm({
                         title: `Sync ${row.name}?`,
-                        description: `./cluster repos sync --repo ${row.name}`,
+                        description: `Clone or update this playbook source.`,
                         repo: row.name,
                       })
                     }
                   >
+                    <Download />
                     Sync
                   </Button>
                 ) : null}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+              </div>
+            </Panel>
+          );
+        })}
+      </div>
       <ConfirmAction
         open={Boolean(confirm)}
         onOpenChange={(open) => {
@@ -349,6 +396,7 @@ export function ClusterYamlReposTab({
           if (confirm) void runSync(confirm.repo);
         }}
       />
+      {sshDialog}
     </div>
   );
 }

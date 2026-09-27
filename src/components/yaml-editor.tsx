@@ -15,23 +15,33 @@ export function YamlEditor({
   onChange,
   readOnly,
   className,
+  bounded = true,
 }: {
   value: string;
   onChange: (value: string) => void;
   readOnly?: boolean;
   className?: string;
+  bounded?: boolean;
 }) {
   const extensions = useMemo(() => ansibleYamlExtensions(), []);
 
   return (
     <div
-      className={cn("min-h-[28rem] flex-1 overflow-hidden", className)}
+      data-slot="yaml-editor"
+      className={cn(
+        bounded
+          ? "flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-hidden"
+          : "min-h-[12rem] overflow-y-auto",
+        className,
+      )}
       style={{ backgroundColor: SETI.bg }}
     >
       <CodeMirror
         value={value}
-        minHeight="28rem"
-        height="100%"
+        className="h-full min-h-0 flex-1"
+        minHeight={bounded ? "100%" : "12rem"}
+        maxHeight={bounded ? "100%" : undefined}
+        height={bounded ? "100%" : undefined}
         theme={setiEditorTheme}
         editable={!readOnly}
         readOnly={readOnly}

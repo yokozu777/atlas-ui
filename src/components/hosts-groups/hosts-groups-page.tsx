@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FolderTree, Server } from "lucide-react";
+import { Folder, FolderTree, LayoutGrid, Server } from "lucide-react";
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
@@ -24,7 +24,11 @@ import {
   reconcileSelectedInventoryFiles,
   writeStoredInventoryFiles,
 } from "@/components/hosts-groups/helpers";
+import { HostFactsDialog } from "@/components/hosts-groups/host-facts-dialog";
+import { FleetTab } from "@/components/hosts-groups/fleet-tab";
 import { HostsTab, buildHostRows, type HostTableRow } from "@/components/hosts-groups/hosts-tab";
+import { InventoryTab } from "@/components/hosts-groups/inventory-tab";
+import { VarsTab } from "@/components/hosts-groups/vars-tab";
 import type {
   CfgFile,
   GroupInfo,
@@ -35,10 +39,11 @@ import type {
 } from "@/components/hosts-groups/types";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useExecutionStream } from "@/hooks/use-execution-stream";
+import { fetchClusterctlSsh, type ClusterctlSshInfo } from "@/lib/clusterctl-ssh";
+import { notifyExecution } from "@/lib/notification-inbox";
 import { projectHref } from "@/lib/project-href";
 import { fetchProject, stargateJson } from "@/lib/stargate";
-import type { StargateProject } from "@/lib/project-types";
+import type { ProjectKind, StargateProject } from "@/lib/project-types";
 
 const LEGACY_TABS: Record<string, string> = {
   vars: "/vars",
@@ -47,17 +52,31 @@ const LEGACY_TABS: Record<string, string> = {
 };
 
 function parseTab(value: string | null): HostsGroupsTab {
-  return value === "groups" ? "groups" : "hosts";
+  if (value === "fleet") return "fleet";
+  if (value === "groups") return "groups";
+  if (value === "files" || value === "inventory") return "files";
+  if (value === "vars") return "vars";
+  return "hosts";
 }
 
-export function HostsGroupsPage({ projectId }: { projectId: string }) {
+export function HostsGroupsPage({
+  projectId,
+  kind: kindProp,
+}: {
+  projectId: string;
+  kind?: ProjectKind;
+}) {
   const { clusterId } = useAtlasClusterSelection();
   const q = projectApiQuery(projectId, clusterId);
   const router = useRouter();
   const searchParams = useSearchParams();
-  const legacyDest = LEGACY_TABS[searchParams.get("tab") ?? ""];
-  const tab = parseTab(searchParams.get("tab"));
+  const rawTab = searchParams.get("tab");
   const [project, setProject] = useState<StargateProject | null>(null);
+  const kind = project?.kind ?? kindProp;
+  const ansible = kind === "ansible";
+  const atlas = kind === "atlas";
+  const legacyDest = ansible ? LEGACY_TABS[rawTab ?? ""] : undefined;
+  const tab = parseTab(rawTab);
   const [files, setFiles] = useState<InvFile[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>(() =>
     readStoredInventoryFiles(projectId),
@@ -82,8 +101,15 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
   const [deleteGroup, setDeleteGroup] = useState<string | null>(null);
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [checkingHost, setCheckingHost] = useState<string | null>(null);
-  const [logHost, setLogHost] = useState<string | null>(null);
-  const { text, running } = useExecutionStream(projectId, executionId);
+  const [atlasSsh, setAtlasSsh] = useState<ClusterctlSshInfo | null>(null);
+  const probeRef = useRef<{
+    host: string;
+    kind: "check";
+    executionId: string;
+  } | null>(null);
+  const running = Boolean(checkingHost);
+  const [factsHost, setFactsHost] = useState<string | null>(null);
+  const [fleetReload, setFleetReload] = useState(0);
 
   const fileParam = selectedFiles[0] || inventoryKey(files[0] ?? {}) || "inventory.yml";
   const extra = inventoryFilesQuery(selectedFiles);
@@ -93,42 +119,49 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
     router.replace(projectHref(projectId, legacyDest));
   }, [legacyDest, projectId, router]);
 
+  useEffect(() => {
+    if (!atlas || rawTab !== "ansible_config") return;
+    router.replace(projectHref(projectId, "/ansible-config"));
+  }, [atlas, rawTab, projectId, router]);
+
   const loadLists = useCallback(async () => {
-    const [fileData, secretData, cfg] = await Promise.all([
-      stargateJson<{ files?: InvFile[] }>(`/inventory/list?${q}`).catch(() => ({
-        files: [] as InvFile[],
-      })),
-      stargateJson<{ secrets?: SecretRow[] }>(`/secrets?${q}`).catch(() => ({
-        secrets: [] as SecretRow[],
-      })),
+    const [fileData, secretData, cfg, ssh] = await Promise.all([
+      stargateJson<{ files?: InvFile[] }>(`/inventory/list?${q}`),
+      stargateJson<{ secrets?: SecretRow[] }>(`/secrets?${q}`),
       stargateJson<{ selected_config?: string; files?: CfgFile[] }>(
         `/ansible_config/list?${q}`,
-      ).catch(() => ({
-        selected_config: "ansible-config/ansible.cfg",
-        files: [] as CfgFile[],
-      })),
+      ),
+      atlas ? fetchClusterctlSsh() : Promise.resolve(null),
     ]);
     const listed = fileData.files ?? [];
     setFiles(listed);
     setSecrets((secretData.secrets ?? []).filter((row) => row.name));
+    setAtlasSsh(ssh);
     if (cfg.selected_config) setAnsibleConfig(cfg.selected_config);
     setSelectedFiles((current) =>
       reconcileSelectedInventoryFiles(listed, current, projectId),
     );
-  }, [projectId, q]);
+  }, [projectId, q, atlas]);
+
+  const loadHostStatuses = useCallback(async () => {
+    const statusData = await stargateJson<{ hosts?: Record<string, HostStatus> }>(
+      `/inventory/host-status?${q}`,
+    );
+    const hostsMap = statusData.hosts ?? {};
+    setStatuses(hostsMap);
+    return hostsMap;
+  }, [q]);
 
   const loadInventory = useCallback(async () => {
     const [hostData, groupData, preview, statusData] = await Promise.all([
       stargateJson<{ hosts?: string[] }>(`/inventory/hosts?${q}${extra}`),
       stargateJson<{ groups?: Record<string, GroupInfo> }>(
         `/inventory/groups?${q}${extra}`,
-      ).catch(() => ({ groups: {} })),
-      stargateJson<{ host_vars?: Record<string, string> }>(`/inventory/preview?${q}`).catch(
-        () => ({ host_vars: {} }),
       ),
+      stargateJson<{ host_vars?: Record<string, string> }>(`/inventory/preview?${q}`),
       stargateJson<{ hosts?: Record<string, HostStatus> }>(
         `/inventory/host-status?${q}`,
-      ).catch(() => ({ hosts: {} })),
+      ),
     ]);
     const names = (hostData.hosts ?? []).map((host) =>
       typeof host === "string" ? host : String(host),
@@ -163,6 +196,64 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
     writeStoredInventoryFiles(projectId, selectedFiles);
   }, [projectId, selectedFiles]);
 
+  useEffect(() => {
+    if (!executionId) return;
+    let cancelled = false;
+    void (async () => {
+      for (let i = 0; i < 90; i += 1) {
+        if (cancelled) return;
+        const data = await stargateJson<{ execution?: { status?: string } }>(
+          `/executions/${encodeURIComponent(executionId)}?project_id=${encodeURIComponent(projectId)}`,
+        ).catch(() => ({ execution: undefined }));
+        const status = String(data.execution?.status || "").toUpperCase();
+        if (
+          status &&
+          !["QUEUED", "RUNNING", "CANCELING", "CANCELLING"].includes(status)
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      if (cancelled) return;
+      let hostsMap: Record<string, HostStatus> = {};
+      for (const delay of [0, 400, 1000, 2000]) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        if (cancelled) return;
+        try {
+          hostsMap = await loadHostStatuses();
+        } catch (err: unknown) {
+          toast.error(err instanceof Error ? err.message : String(err));
+          break;
+        }
+        const probe = probeRef.current;
+        const hostStatus = (probe?.host ? hostsMap[probe.host]?.status : "") || "";
+        if (
+          probe?.kind !== "check" ||
+          (hostStatus && hostStatus !== "unknown" && hostStatus !== "checking")
+        ) {
+          break;
+        }
+      }
+      if (cancelled) return;
+      const probe = probeRef.current;
+      if (probe?.kind === "check" && probe.host) {
+        const status = (hostsMap[probe.host]?.status || "unknown").toLowerCase();
+        if (status === "online" || status === "ok") {
+          toast.success(`${probe.host} is online`);
+        } else if (status === "offline" || status === "fail" || status === "failed") {
+          toast.error(`${probe.host} is offline`);
+        }
+      }
+      if (probeRef.current?.executionId === executionId) {
+        probeRef.current = null;
+        setCheckingHost(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [executionId, projectId, loadHostStatuses]);
+
   const groupNames = useMemo(() => {
     const names = Object.keys(groups);
     return names.includes("all") ? names : ["all", ...names];
@@ -185,13 +276,19 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
     const href =
       parsed === "hosts"
         ? projectHref(projectId, "/hosts")
-        : projectHref(projectId, "/hosts?tab=groups");
+        : projectHref(projectId, `/hosts?tab=${parsed}`);
     router.replace(href, { scroll: false });
   }
 
   async function queueHost(path: string, host: string, body: Record<string, unknown>) {
     setCheckingHost(host);
-    setLogHost(host);
+    setStatuses((current) => ({
+      ...current,
+      [host]: {
+        status: "checking",
+        last_checked_at: current[host]?.last_checked_at,
+      },
+    }));
     try {
       const data = await stargateJson<{ executionId?: string }>(path, {
         method: "POST",
@@ -205,20 +302,19 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
         }),
       });
       if (!data.executionId) throw new Error("Did not return executionId");
+      probeRef.current = { host, kind: "check", executionId: data.executionId };
       setExecutionId(data.executionId);
+      notifyExecution("info", `Checking ${host}`, projectId, data.executionId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
+      probeRef.current = null;
       setCheckingHost(null);
+      await loadHostStatuses().catch(() => undefined);
     }
   }
 
   async function checkHost(host: string) {
     await queueHost("/check_host", host, {});
-  }
-
-  async function factsHost(host: string) {
-    await queueHost(`/hosts/${encodeURIComponent(host)}/facts`, host, {});
   }
 
   async function checkAll() {
@@ -247,7 +343,7 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
     await loadInventory();
   }
 
-  if (legacyDest) {
+  if (legacyDest || (atlas && rawTab === "ansible_config")) {
     return <EmptyState title="Redirecting" />;
   }
 
@@ -255,14 +351,20 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
     return <EmptyState title="Hosts unavailable" description={error} />;
   }
 
+  const extras = atlas;
+
   return (
     <div>
       <PageHeader
-        kicker="Infrastructure"
-        title="Hosts & Groups"
+        kicker={extras ? "Project" : "Infrastructure"}
+        title={extras ? "Inventory" : "Hosts & Groups"}
         description={
           <div className="space-y-3">
-            <p>Inventory management: hosts, groups and their attributes</p>
+            <p>
+              {extras
+                ? "Hosts, groups, inventory files, and variables for this cluster"
+                : "Inventory management: hosts, groups and their attributes"}
+            </p>
             {project ? (
               <Badge variant="success">Project: {project.name}</Badge>
             ) : null}
@@ -275,10 +377,25 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
             <Server />
             Hosts
           </TabsTrigger>
+          <TabsTrigger value="fleet">
+            <LayoutGrid />
+            Fleet
+          </TabsTrigger>
           <TabsTrigger value="groups">
             <FolderTree />
             Groups
           </TabsTrigger>
+          {extras ? (
+            <TabsTrigger value="files">
+              <Folder />
+              Files
+            </TabsTrigger>
+          ) : null}
+          {extras ? (
+            <TabsTrigger value="vars">
+              Vars
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         <TabsContent value="hosts" className="mt-6">
           <HostsTab
@@ -290,16 +407,29 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
             onAddHost={() => setAddHostOpen(true)}
             onCheckAll={() => void checkAll()}
             onCheck={(host) => void checkHost(host)}
-            onFacts={(host) => void factsHost(host)}
+            onFacts={setFactsHost}
             onAssign={setAssignHost}
             onConnection={setConnectionHost}
             busy={busy}
             running={running}
             checkingHost={checkingHost}
-            executionId={executionId}
-            logText={text}
-            logRunning={running}
-            logHost={logHost}
+            atlasSsh={atlas ? atlasSsh : null}
+          />
+        </TabsContent>
+        <TabsContent value="fleet" className="mt-6">
+          <FleetTab
+            projectId={projectId}
+            clusterId={clusterId}
+            rows={hostRows}
+            onFacts={setFactsHost}
+            onCheck={(host) => void checkHost(host)}
+            busy={busy}
+            running={running}
+            checkingHost={checkingHost}
+            atlasSsh={atlas ? atlasSsh : null}
+            ansibleConfig={ansibleConfig}
+            inventoryFiles={selectedFiles.length ? selectedFiles : [fileParam]}
+            reloadToken={fleetReload}
           />
         </TabsContent>
         <TabsContent value="groups" className="mt-6">
@@ -313,8 +443,26 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
             onAddGroup={() => setAddGroupOpen(true)}
             onEditHosts={setEditGroup}
             onDelete={setDeleteGroup}
+            atlasSsh={atlas ? atlasSsh : null}
           />
         </TabsContent>
+        {extras ? (
+          <TabsContent value="files" className="mt-6">
+            <InventoryTab
+              projectId={projectId}
+              files={files}
+              selected={selectedFiles}
+              onSelectedChange={setSelectedFiles}
+              busy={busy}
+              onRefresh={() => void loadLists()}
+            />
+          </TabsContent>
+        ) : null}
+        {extras ? (
+          <TabsContent value="vars" className="mt-6">
+            <VarsTab projectId={projectId} />
+          </TabsContent>
+        ) : null}
       </Tabs>
       <AddHostDialog
         projectId={projectId}
@@ -356,7 +504,23 @@ export function HostsGroupsPage({ projectId }: { projectId: string }) {
         initialSecret={connectionHost?.connectionSecret}
         initialUser={connectionHost?.ansibleUser}
         initialPort={connectionHost?.ansiblePort}
+        atlasSshName={atlas ? atlasSsh?.name : null}
         onSaved={loadInventory}
+        onSecretsChange={loadLists}
+      />
+      <HostFactsDialog
+        projectId={projectId}
+        host={factsHost || ""}
+        open={Boolean(factsHost)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFactsHost(null);
+            setFleetReload((value) => value + 1);
+          }
+        }}
+        ansibleConfig={ansibleConfig}
+        inventoryFiles={selectedFiles.length ? selectedFiles : [fileParam]}
+        clusterId={clusterId}
       />
       <EditHostsDialog
         projectId={projectId}

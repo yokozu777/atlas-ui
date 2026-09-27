@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { parseJobJson } from "@/lib/job-output";
+import { requireHubApiSession } from "@/server/hub-api-session";
 import { listRunLogs, readRunLog } from "@/server/logs";
 import { readJobLog, startJob, waitForJob } from "@/server/jobs";
 
@@ -15,6 +16,10 @@ async function workspaceJson(clusterId: string) {
 }
 
 export async function GET(request: Request) {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   const url = new URL(request.url);
   const clusterId = url.searchParams.get("clusterId") ?? "";
   const stamp = url.searchParams.get("stamp");

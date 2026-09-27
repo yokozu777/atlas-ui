@@ -1,8 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import {
+  CheckCircle2,
+  History,
+  List,
+  LoaderCircle,
+  XCircle,
+} from "lucide-react";
 
+import { ExecutionRowActions } from "@/components/execution-row-actions";
 import { Panel } from "@/components/panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -40,9 +48,21 @@ function matchesFilter(row: DashboardExecution, filter: ExecFilter): boolean {
 export function RecentExecutions({
   projectId,
   executions,
+  playbookColumnLabel = "Playbook",
+  emptyMessage = "No executions yet.",
+  emptyAction,
+  fallbackClusterId,
+  onQueued,
+  onStopped,
 }: {
   projectId: string;
   executions: DashboardExecution[];
+  playbookColumnLabel?: string;
+  emptyMessage?: string;
+  emptyAction?: ReactNode;
+  fallbackClusterId?: string;
+  onQueued?: (executionId: string) => void;
+  onStopped?: () => void;
 }) {
   const [filter, setFilter] = useState<ExecFilter>("all");
   const rows = useMemo(
@@ -56,7 +76,10 @@ export function RecentExecutions({
   return (
     <Panel className="flex min-h-0 flex-col">
       <div className="flex items-center justify-between gap-3 border-b border-foreground/10 px-4 py-3">
-        <h2 className="text-sm font-medium">Recent Executions</h2>
+        <h2 className="flex items-center gap-2 text-sm font-medium">
+          <History className="size-4 text-muted-foreground" />
+          Recent Executions
+        </h2>
         <Button
           size="sm"
           variant="outline"
@@ -72,28 +95,48 @@ export function RecentExecutions({
       >
         <div className="border-b border-foreground/10 px-4 py-2">
           <TabsList variant="line" className="h-8">
-            <TabsTrigger value="all">All</TabsTrigger>
-            <TabsTrigger value="success">Success</TabsTrigger>
-            <TabsTrigger value="failed">Failed</TabsTrigger>
-            <TabsTrigger value="running">Running</TabsTrigger>
+            <TabsTrigger value="all">
+              <List />
+              All
+            </TabsTrigger>
+            <TabsTrigger value="success">
+              <CheckCircle2 />
+              Success
+            </TabsTrigger>
+            <TabsTrigger value="failed">
+              <XCircle />
+              Failed
+            </TabsTrigger>
+            <TabsTrigger value="running">
+              <LoaderCircle />
+              Running
+            </TabsTrigger>
           </TabsList>
         </div>
       </Tabs>
       {rows.length === 0 ? (
-        <p className="px-4 py-6 text-[13px] text-muted-foreground">
-          No executions yet.
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-6">
+          <p className="text-[13px] text-muted-foreground">
+            {executions.length === 0
+              ? emptyMessage
+              : "No executions in this filter."}
+          </p>
+          {executions.length === 0 ? emptyAction : null}
+        </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full caption-bottom text-sm">
             <TableHeader>
               <TableRow>
                 <TableHead>Status</TableHead>
-                <TableHead>Playbook</TableHead>
+                <TableHead>{playbookColumnLabel}</TableHead>
                 <TableHead>Target</TableHead>
                 <TableHead>Duration</TableHead>
                 <TableHead>When</TableHead>
                 <TableHead>Initiator</TableHead>
+                <TableHead className="w-16">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -123,6 +166,23 @@ export function RecentExecutions({
                   </TableCell>
                   <TableCell className="max-w-[8rem] truncate text-[13px] text-muted-foreground">
                     {row.workerName}
+                  </TableCell>
+                  <TableCell className="w-16">
+                    <ExecutionRowActions
+                      projectId={projectId}
+                      fallbackClusterId={fallbackClusterId}
+                      execution={{
+                        id: row.id,
+                        kind: row.kind ?? undefined,
+                        status: row.rawStatus || row.status,
+                        rawStatus: row.rawStatus,
+                        playbookId: row.playbookId ?? undefined,
+                        playbookName: row.playbookName,
+                        runParams: row.runParams,
+                      }}
+                      onQueued={onQueued}
+                      onStopped={onStopped}
+                    />
                   </TableCell>
                 </TableRow>
               ))}

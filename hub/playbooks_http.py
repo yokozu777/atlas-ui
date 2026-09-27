@@ -1,7 +1,6 @@
 """Playbook CRUD, queue run, check_host, atlas/run helpers (no Flask)."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import uuid
@@ -11,16 +10,35 @@ from typing import Any, Optional
 
 import yaml
 
-from atlas_inspect import InspectError, normalize_inventory_cluster_id, resolve_inspect_cluster_id
+from atlas_cluster_fs import is_atlas_project
+from atlas_inspect import (
+    InspectError,
+    inspect_atlas,
+    normalize_inventory_cluster_id,
+    resolve_inspect_cluster_id,
+)
+from atlas_operator_ssh import (
+    AtlasOperatorSshError,
+    hub_data_dir,
+    materialize_operator_private_key,
+)
 from atlas_rbac import atlas_run_error
 from clusterctl_config import inspect_run_params_from_project
+from docker_images import docker_image_present
 from executions_create import create_execution_record
 from executions_store import get_project_dir
+from projects_store import (
+    add_atlas_owned_cluster,
+    default_projects_config_file,
+    get_project,
+)
 from inventory_http import list_groups, require_project_id, resolve_host_vars_file, secrets_dir
 from playbook_generator import PlaybookGenerator
 from playbook_parser import PlaybookParseError, PlaybookParser
 from playbook_storage import PlaybookStorage
 from playbook_validator import PlaybookValidator
+from project_secret_crypto import ProjectSecretError, read_project_secret
+from ssh_key_material import SshKeyMaterialError, decrypt_openssh_private
 
 logger = logging.getLogger(__name__)
 
@@ -318,15 +336,52 @@ def _materialize_ssh_key(project_id: str, secret_name: str, dest: Path) -> Optio
     secret_file = ssh_keys if ssh_keys.exists() else secrets_dir(project_id) / f"{secret_name}.json"
     if not secret_file.exists():
         return None
-    secret_data = json.loads(secret_file.read_text(encoding="utf-8"))
+    try:
+        secret_data = read_project_secret(secret_file)
+    except ProjectSecretError as exc:
+        raise PlaybookHttpError(400, str(exc)) from exc
     if secret_data.get("type") != "ssh_key":
         return None
     private_key = secret_data.get("privateKey") or ""
     if not private_key:
         return None
-    dest.write_text(private_key if private_key.endswith("\n") else private_key + "\n", encoding="utf-8")
+    try:
+        content = decrypt_openssh_private(
+            str(private_key),
+            passphrase=str(secret_data.get("passphrase") or ""),
+        )
+    except SshKeyMaterialError as exc:
+        raise PlaybookHttpError(400, str(exc)) from exc
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
     os.chmod(dest, 0o600)
     return str(dest.resolve())
+
+
+def resolve_host_ssh_key_file(
+    project_id: str,
+    host_vars: dict[str, Any],
+    dest: Path,
+    *,
+    data_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Private key for Check/Facts: host override, else Atlas operator key."""
+    connection_secret = host_vars.get("connectionSecret")
+    if connection_secret:
+        return _materialize_ssh_key(project_id, str(connection_secret), dest)
+    key_file = host_vars.get("ansible_ssh_private_key_file")
+    if key_file:
+        return str(key_file)
+    data = hub_data_dir(data_dir)
+    project = get_project(data / "projects.json", project_id)
+    if project and is_atlas_project(project_id, project=project):
+        try:
+            return materialize_operator_private_key(data, dest)
+        except AtlasOperatorSshError as exc:
+            if getattr(exc, "silent", False):
+                return None
+            raise PlaybookHttpError(exc.status_code, exc.message) from exc
+    return None
 
 
 def queue_host_check(project_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -366,16 +421,12 @@ def _queue_host_probe(
     execution_id = str(uuid.uuid4())
     generated_dir = generated_playbook_path(project_id, execution_id).parent
     temp_key_files: list[str] = []
-    key_file = host_vars.get("ansible_ssh_private_key_file")
-    connection_secret = host_vars.get("connectionSecret")
-    if connection_secret:
-        pem = generated_dir / f"key_{execution_id}.pem"
-        materialized = _materialize_ssh_key(project_id, str(connection_secret), pem)
-        if materialized:
-            entry["ansible_ssh_private_key_file"] = materialized
+    pem = generated_dir / f"key_{execution_id}.pem"
+    materialized = resolve_host_ssh_key_file(project_id, host_vars, pem)
+    if materialized:
+        entry["ansible_ssh_private_key_file"] = materialized
+        if Path(materialized).resolve() == pem.resolve():
             temp_key_files.append(materialized)
-    elif key_file:
-        entry["ansible_ssh_private_key_file"] = key_file
     has_conn = bool(
         entry.get("ansible_ssh_private_key_file")
         or entry.get("ansible_password")
@@ -681,6 +732,165 @@ def queue_atlas_repos_sync(
     }
 
 
+def _inspect_json(
+    argv: list[str],
+    cluster_id: str,
+    run_params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    try:
+        result = inspect_atlas(argv, cluster_id, run_params)
+    except InspectError as exc:
+        raise PlaybookHttpError(400, str(exc)) from exc
+    if result.get("return_code"):
+        log = str(result.get("log") or "").strip()
+        raise PlaybookHttpError(400, log or "inspect failed")
+    payload = result.get("json")
+    if not isinstance(payload, dict):
+        raise PlaybookHttpError(400, "inspect did not return JSON")
+    return payload
+
+
+def _resolve_project_cluster_id(
+    project: dict[str, Any],
+    *,
+    requested: Any,
+) -> str:
+    fallback = project.get("cluster_id")
+    try:
+        cluster_id = resolve_inspect_cluster_id(
+            requested=str(requested).strip() if requested else None,
+            fallback=str(fallback).strip() if fallback else None,
+            run_params=inspect_run_params_from_project(project),
+        )
+    except InspectError as exc:
+        raise PlaybookHttpError(400, str(exc)) from exc
+    if not cluster_id:
+        raise PlaybookHttpError(400, "cluster_id missing on atlas project")
+    return cluster_id
+
+
+def inspect_atlas_bootstrap(
+    project: dict[str, Any],
+    *,
+    cluster_id: str | None,
+) -> dict[str, Any]:
+    if project.get("kind") != "atlas":
+        raise PlaybookHttpError(400, "Not an atlas project")
+    resolved = _resolve_project_cluster_id(project, requested=cluster_id)
+    run_params = inspect_run_params_from_project(project)
+    status = _inspect_json(["repos", "status", "--json"], resolved, run_params)
+    workspace_root = status.get("workspace_root")
+    missing: list[dict[str, Any]] = []
+    ws_path = Path(str(workspace_root)) if workspace_root else None
+    if not ws_path or not ws_path.is_dir():
+        missing.append(
+            {
+                "kind": "workspace",
+                "name": "workspace",
+                "path": workspace_root,
+                "label": "Workspace directory is not created yet",
+            }
+        )
+    if status.get("lock") is None:
+        missing.append(
+            {
+                "kind": "lock",
+                "name": "playbooks.lock",
+                "path": str(ws_path / "playbooks.lock") if ws_path else None,
+                "label": "playbooks.lock is missing",
+            }
+        )
+    for repo in status.get("repos") or []:
+        if not isinstance(repo, dict):
+            continue
+        if str(repo.get("state") or "") == "ready":
+            continue
+        name = str(repo.get("name") or "").strip()
+        missing.append(
+            {
+                "kind": "git_repo",
+                "name": name,
+                "path": repo.get("layout_dir") or repo.get("path"),
+                "url": repo.get("url"),
+                "label": f"Git repo {name or '(unnamed)'} is not synced",
+            }
+        )
+    docker_image = None
+    try:
+        cfg = _inspect_json(["config", "effective", "--json"], resolved, run_params)
+        effective = cfg.get("effective")
+        execution = effective.get("execution") if isinstance(effective, dict) else None
+        if isinstance(execution, dict) and str(execution.get("mode") or "").lower() == "docker":
+            image = str(execution.get("image") or "").strip()
+            tag = str(execution.get("tag") or "").strip()
+            if image and tag:
+                docker_image = f"{image}:{tag}"
+            elif cfg.get("docker_image"):
+                docker_image = str(cfg["docker_image"])
+    except PlaybookHttpError:
+        docker_image = None
+    return {
+        "success": True,
+        "cluster_id": resolved,
+        "workspace_root": workspace_root,
+        "missing": missing,
+        "docker_image": docker_image,
+        "docker_image_present": bool(
+            docker_image and docker_image_present(docker_image)
+        ),
+    }
+
+
+def queue_atlas_execution_pull(
+    project: dict[str, Any],
+    project_id: str,
+    body: dict[str, Any],
+    *,
+    can_execute: bool,
+) -> dict[str, Any]:
+    if project.get("kind") != "atlas":
+        raise PlaybookHttpError(400, "Not an atlas project")
+    rbac_err = atlas_run_error(
+        can_execute=can_execute, can_root_ssh=True, root_ssh=False
+    )
+    if rbac_err:
+        raise PlaybookHttpError(403, rbac_err)
+    payload = body or {}
+    requested = payload.get("cluster_id") or payload.get("clusterId")
+    cluster_id = _resolve_project_cluster_id(project, requested=requested)
+    execution_id = str(uuid.uuid4())
+    created = create_execution_record(
+        {
+            "kind": "atlas",
+            "playbookName": "docker pull",
+            "mode": "ATLAS",
+            "status": "QUEUED",
+            "runParams": {
+                "executor": "clusterctl",
+                "cluster_id": cluster_id,
+                "clusterctl_root": payload.get("clusterctl_root")
+                or project.get("clusterctlRoot"),
+                "clusters_root": payload.get("clusters_root")
+                or project.get("clustersRoot"),
+                "workspace_root": payload.get("workspace_root")
+                or project.get("workspaceRoot"),
+                "argv": ["docker", "pull"],
+                "project_dir": str(get_project_dir(project_id)),
+            },
+        },
+        project_id=project_id,
+        execution_id=execution_id,
+    )
+    if not created:
+        raise PlaybookHttpError(500, "Failed to queue docker pull")
+    return {
+        "success": True,
+        "status": "queued",
+        "executionId": execution_id,
+        "kind": "atlas",
+    }
+
+
 INIT_TEMPLATES = frozenset(
     {
         "k8s_full",
@@ -751,6 +961,7 @@ def queue_atlas_init(
     body: dict[str, Any],
     *,
     can_execute: bool,
+    config_file: Optional[Path] = None,
 ) -> dict[str, Any]:
     if project.get("kind") != "atlas":
         raise PlaybookHttpError(400, "Not an atlas project")
@@ -786,6 +997,9 @@ def queue_atlas_init(
     )
     if not created:
         raise PlaybookHttpError(500, "Failed to queue atlas init")
+    add_atlas_owned_cluster(
+        config_file or default_projects_config_file(), project_id, cluster_id
+    )
     return {
         "success": True,
         "status": "queued",

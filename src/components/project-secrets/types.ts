@@ -7,6 +7,8 @@ export type SecretRow = {
   description?: string;
   createdAt?: string;
   updatedAt?: string;
+  publicKey?: string;
+  fingerprint?: string;
 };
 
 export type SecretMaterial = {

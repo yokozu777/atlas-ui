@@ -1,10 +1,11 @@
 "use client";
 
 import { Check, Circle, MoreHorizontal, Square, X } from "lucide-react";
-import { toast } from "sonner";
+import { useRouter } from "next/navigation";
 
+import { ExecutionRowActions } from "@/components/execution-row-actions";
 import { StatusBadge } from "@/components/status-badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,13 +26,17 @@ import {
   toMs,
   type RawExecution,
 } from "@/lib/project-dashboard";
-import { stargateJson } from "@/lib/stargate";
+import { projectHref } from "@/lib/project-href";
 import { cn } from "@/lib/utils";
 
 function inventoryLabel(record: RawExecution | null): string {
   const files = record?.runParams?.inventory_files;
   if (files && files.length > 0) {
     return files.join(", ");
+  }
+  const clusterId = record?.runParams?.cluster_id?.trim();
+  if (clusterId) {
+    return clusterId;
   }
   return "—";
 }
@@ -57,6 +62,7 @@ export function ExecutionHeader({
   onCopyVisible: () => void;
   onDownload: () => void;
 }) {
+  const router = useRouter();
   const status = liveStatus || record?.status || "UNKNOWN";
   const kind = executionStatusKind(status);
   const label = executionStatusLabel(kind);
@@ -71,27 +77,6 @@ export function ExecutionHeader({
     startedMs != null
       ? (finishedMs ?? (active ? now : startedMs)) - startedMs
       : null;
-  const canStop = status === "QUEUED" || status === "RUNNING";
-
-  async function stop() {
-    try {
-      if (status === "QUEUED") {
-        await stargateJson(
-          `/projects/${projectId}/executions/${executionId}/cancel`,
-          { method: "POST", body: JSON.stringify({}) },
-        );
-        toast.success("Cancel requested");
-      } else {
-        await stargateJson(
-          `/projects/${projectId}/executions/${executionId}/stop`,
-          { method: "POST", body: JSON.stringify({}) },
-        );
-        toast.success("Stop requested");
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
-  }
 
   if (loading && !record) {
     return (
@@ -139,16 +124,24 @@ export function ExecutionHeader({
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        {canStop ? (
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            onClick={() => void stop()}
-          >
-            {status === "QUEUED" ? "Cancel" : "Stop"}
-          </Button>
-        ) : null}
+        <ExecutionRowActions
+          projectId={projectId}
+          size="icon-sm"
+          liveStatus={liveStatus}
+          execution={
+            id
+              ? {
+                  ...(record ?? {}),
+                  id,
+                  status: record?.status || liveStatus || undefined,
+                  rawStatus: record?.status || liveStatus,
+                }
+              : null
+          }
+          onQueued={(nextId) =>
+            router.push(projectHref(projectId, `/executions/${nextId}`))
+          }
+        />
         <DropdownMenu>
           <DropdownMenuTrigger
             aria-label="Execution actions"

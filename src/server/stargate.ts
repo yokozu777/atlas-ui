@@ -19,7 +19,7 @@ export function cookieSecure(request?: Request): boolean {
   return false;
 }
 
-export function sessionCookieOptions(request?: Request, maxAge = 60 * 60 * 24) {
+export function sessionCookieOptions(request?: Request, maxAge = 60 * 60) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,

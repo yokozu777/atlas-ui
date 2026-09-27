@@ -6,7 +6,7 @@ This guide explains how to run atlas-ui using Docker Compose on Linux, macOS, an
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
 - Git (Settings → Clone, or a local `git clone`)
-- Host paths for inventory/workspace and an SSH private key file
+- Host path to the atlas-inventory repo (`ATLAS_INVENTORY`). SSH for clusterctl belongs in **System / Secrets Manager** (paste or generate). Do not set `SSH_KEY` in `.env`.
 - Docker Desktop: enable file sharing for those host folders (typically `C:\Users` / `/Users`)
 
 atlas-ui is three containers:
@@ -17,44 +17,41 @@ atlas-ui is three containers:
 | Hub API | `yokozu/atlas-ui-hub` | http://localhost:8000 |
 | Worker | `yokozu/atlas-ui-worker` | compose network; talks to hub at `http://hub:8000` |
 
+The console image is Distroless Node (no shell, apt, or git). `docker exec` into `atlas-ui` is not useful — use `docker compose logs ui`, or rebuild the runner `FROM gcr.io/distroless/nodejs22-debian13:debug`. Hub and worker stay on Debian slim because they need git, ansible, ssh, and bash.
+
 ---
 
 ## Environment file
 
-Copy the example and set **host** paths (Linux `/home/…`, macOS `/Users/…`, Windows `C:\Users\…`). Compose bind-mounts them at POSIX targets inside hub and worker:
+Copy the example and set **one** host path: the atlas-inventory repo (Linux `/home/…`, macOS `/Users/…`, Windows `C:\Users\…`). Compose derives clusters and workspace from it:
 
-| `.env` (host source) | Inside containers |
-|----------------------|-------------------|
-| `ATLAS_CLUSTER_ROOT` | `/atlas/clusterctl` |
-| `ATLAS_CLUSTERS_ROOT` | `/atlas/clusters` |
-| `ATLAS_WORKSPACE_ROOT` | `/atlas/workspace` |
-| `SSH_KEY` | `/atlas/ssh/id_rsa` |
+| Host (from `.env`) | Inside hub / worker |
+|--------------------|---------------------|
+| `$ATLAS_INVENTORY/clusters` | `/atlas/clusters` |
+| `$ATLAS_INVENTORY/workspace` | `/atlas/workspace` |
+| `$ATLAS_CLUSTER_ROOT` (optional) | `/atlas/clusterctl` |
 
-The worker mounts `/var/run/docker.sock`. clusterctl with `execution.mode: docker` starts krang on the **host** daemon and remaps `/atlas/…` to the daemon bind Source (container inspect, or `ATLAS_*_ROOT_HOST`). You do not need 1:1 `hostPath:hostPath` mounts.
+The worker mounts `/var/run/docker.sock`. clusterctl with `execution.mode: docker` starts krang on the **host** daemon and remaps `/atlas/…` to the daemon bind Source (`ATLAS_*_ROOT_HOST`). You do not need 1:1 `hostPath:hostPath` mounts.
 
-Leave **Project Settings** inventory/workspace empty when using Compose so hub uses `/atlas/…`. Stale host paths saved from an older Linux 1:1 setup are ignored when those directories do not exist inside the container.
+Leave **Project Settings** inventory and workspace **empty** when using Compose. Hub then uses `/atlas/…`. A leftover host path (`/home/…/atlas-inventory/clusters`) does not exist inside the container, so every cluster shows as **missing**.
 
 ```bash
 cp .env.example .env
 ```
 
-Required variables:
+Required:
 
 | Variable | Meaning |
 |----------|---------|
-| `ATLAS_CLUSTERS_ROOT` | Host path to the inventory clusters tree (for example `…/atlas-inventory/clusters`) |
-| `ATLAS_WORKSPACE_ROOT` | Host path to the workspace tree (for example `…/atlas-inventory/workspace`) |
-| `SSH_KEY` | Host path to an SSH private key, mounted read-only on the worker at `/atlas/ssh/id_rsa` |
+| `ATLAS_INVENTORY` | Absolute host path to the atlas-inventory repo. Compose fails if this is unset (empty bind is not silent). |
 
 Optional:
 
 | Variable | Meaning |
 |----------|---------|
-| `ATLAS_CLUSTERCTL_GIT_URL` | Public atlas-clusterctl remote (default `https://github.com/yokozu777/atlas-clusterctl.git`) |
-| `ATLAS_CLUSTER_ROOT` | Host checkout directory. Unset = `<compose project dir>/atlas-clusterctl` (Docker creates the folder on first `up`). Do not put a Git URL here — it is a bind-mount **source**. |
-| `ATLAS_ADMIN_PASSWORD` | Skip the one-time password file (see [02-first-login-admin.md](02-first-login-admin.md)) |
-| `ATLAS_UI_IMAGE_TAG` | Pin Hub images (`latest` by default) |
-| `WORKER_SERVER_URL` | Worker → hub URL (default `http://hub:8000`). Do not use `host.docker.internal` or `127.0.0.1` unless you also set worker `network_mode: host`. |
+| `ATLAS_CLUSTER_ROOT` | Host checkout of atlas-clusterctl. Unset = `<compose project dir>/atlas-clusterctl`. Do not put a Git URL here — it is a bind-mount **source**. |
+| `ATLAS_UI_IMAGE_TAG` | Pin published images (`latest` by default) |
+| `ATLAS_ADMIN_PASSWORD` | Optional override for the first admin password (CI). Unset = `admin` / `admin` with a forced password change (see [02-first-login-admin.md](02-first-login-admin.md)) |
 | `JWT_SECRET_KEY` / `GLOBAL_SECRETS_ENCRYPTION_KEY` | Persist across hosts; otherwise hub writes files under `data/auth/` |
 
 After the stack is up, open **Settings → Local / clusterctl** and use **Clone** (or `git clone` into the host folder mounted at `/atlas/clusterctl`). The Clone dest inside Docker is `/atlas/clusterctl`. **Pull** fast-forwards an existing checkout.
@@ -74,7 +71,7 @@ Fastest way to run atlas-ui — pull images from Docker Hub.
 ```bash
 git clone git@github.com:yokozu777/atlas-ui.git
 cd atlas-ui
-cp .env.example .env   # inventory, workspace, SSH_KEY; clusterctl defaults to ./atlas-clusterctl
+cp .env.example .env   # ATLAS_INVENTORY; SSH key via Secrets Manager
 ```
 
 ### 2. Start the stack
@@ -110,7 +107,7 @@ docker compose up -d --build
 
 Access is the same: UI on **:3000**, API on **:8000**.
 
-If the UI container exits with `Cannot find module 'next'` (`/app/server.js`), the image is a stale Hub `standalone` build. Use **Option 2** (`docker compose up -d --build`) so the runner image contains a hoisted `node_modules/next`. Do not use `docker compose -f docker-compose.hub.yml` until that tag is republished.
+If the UI container exits with `Cannot find module 'next'`, the image is a stale Hub build from before webpack standalone. Use **Option 2** (`docker compose up -d --build`) so the runner contains a traced `server.js` plus `next`. Do not use `docker compose -f docker-compose.hub.yml` until that tag is republished.
 
 ---
 
@@ -132,7 +129,6 @@ Persistent hub data is stored in `./data` on the host:
 - Projects, inventory copies, playbooks, executions
 - Worker registration token
 - JWT and encryption keys under `data/auth/`
-- One-time admin password file `data/auth/admin-initial.txt` (mode 0600) when `ATLAS_ADMIN_PASSWORD` is unset
 
 Keep `data/` and `.env` off git. They are gitignored.
 
@@ -145,4 +141,4 @@ Keep `data/` and `.env` off git. They are gitignored.
 | Compose `worker` | ansible inside the worker image | docker CLI + `/var/run/docker.sock`; krang bind sources are host paths |
 | Host `./scripts/hub-worker.sh` | ansible on the host | `docker run` on the host (1:1 paths) |
 
-Inside Compose, clusterctl sees `/atlas/clusterctl`, `/atlas/clusters`, `/atlas/workspace`, and `SSH_KEY=/atlas/ssh/id_rsa`. The host daemon receives the `.env` paths (or Docker Desktop `/run/desktop/mnt/host/…`) as `-v` sources.
+Inside Compose, clusterctl sees `/atlas/clusterctl`, `/atlas/clusters`, and `/atlas/workspace`. Atlas-ui injects the Secrets Manager clusterctl SSH key as `SSH_KEY` at run time. The host daemon receives `$ATLAS_INVENTORY/{clusters,workspace}` (or Docker Desktop `/run/desktop/mnt/host/…`) as `-v` sources. Add the key in the UI under **System / Secrets Manager** (or when Apply asks after init).

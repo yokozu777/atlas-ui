@@ -12,5 +12,5 @@ export default async function ProjectConfigPage({
   if (project.kind === "ansible") {
     redirect(projectHref(project.id, "/settings"));
   }
-  redirect(projectHref(project.id, "/cluster-yaml?tab=config"));
+  redirect(projectHref(project.id, "/cluster-yaml?tab=health"));
 }

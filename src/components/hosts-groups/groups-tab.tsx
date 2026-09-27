@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/table";
 import { groupBadgeVariant } from "@/components/hosts-groups/helpers";
 import type { GroupInfo } from "@/components/hosts-groups/types";
+import { useCan } from "@/lib/authz";
 
 export function GroupsTab({
   groups,
@@ -28,6 +29,7 @@ export function GroupsTab({
   onAddGroup,
   onEditHosts,
   onDelete,
+  atlasSsh,
 }: {
   groups: Record<string, GroupInfo>;
   inventoryFile: string;
@@ -38,7 +40,9 @@ export function GroupsTab({
   onAddGroup: () => void;
   onEditHosts: (group: string) => void;
   onDelete: (group: string) => void;
+  atlasSsh?: { name: string | null } | null;
 }) {
+  const can = useCan();
   const rows = Object.entries(groups)
     .map(([name, info]) => ({
       name,
@@ -73,10 +77,12 @@ export function GroupsTab({
           Groups
         </p>
         <div className="flex flex-wrap items-center gap-2">
+          {can("inventory.create") ? (
           <Button size="sm" onClick={onAddGroup}>
             <Plus />
             Add Group
           </Button>
+          ) : null}
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -129,7 +135,16 @@ export function GroupsTab({
                     ? "—"
                     : `${row.hosts.join(" ")} (${row.hosts.length})`}
                 </TableCell>
-                <TableCell className="text-muted-foreground">—</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {atlasSsh?.name ? (
+                    <span className="flex items-center gap-2">
+                      <span className="font-mono text-xs">{atlasSsh.name}</span>
+                      <Badge variant="outline">Atlas</Badge>
+                    </span>
+                  ) : (
+                    "—"
+                  )}
+                </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
                     {row.children.length === 0 ? (
@@ -148,6 +163,7 @@ export function GroupsTab({
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
+                    {can("inventory.update") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -156,6 +172,8 @@ export function GroupsTab({
                       <Pencil />
                       Edit Hosts
                     </Button>
+                    ) : null}
+                    {can("inventory.delete") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -165,6 +183,7 @@ export function GroupsTab({
                       <Trash2 />
                       Delete
                     </Button>
+                    ) : null}
                   </div>
                 </TableCell>
               </TableRow>

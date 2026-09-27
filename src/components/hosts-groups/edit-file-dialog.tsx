@@ -51,17 +51,18 @@ export function EditFileDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] min-h-0 w-full flex-col overflow-hidden sm:max-w-3xl">
+        <DialogHeader className="shrink-0 pr-8">
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
         <YamlEditor
           value={text}
           onChange={setText}
-          className="min-h-[16rem] rounded-lg"
+          bounded={false}
+          className="h-[min(36rem,calc(100vh-14rem))] rounded-lg"
         />
-        <DialogFooter>
+        <DialogFooter className="shrink-0">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>

@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { RefreshCw } from "lucide-react";
+import { Activity, RefreshCw } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { JsonBlock } from "@/components/json-block";
 import { Panel } from "@/components/panel";
+import { SectionHeader } from "@/components/section-header";
 import { StackList, StackListRow } from "@/components/stack-list";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,18 +35,33 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Mono({ children }: { children: ReactNode }) {
-  return <span className="font-mono text-xs">{children ?? "—"}</span>;
+function cascadeLayer(path: string): { title: string; hint: string } {
+  const rel = path.includes("/clusters/")
+    ? (path.split("/clusters/").pop() ?? path)
+    : path;
+  const id = rel.replace(/\/cluster\.ya?ml$/i, "");
+  const [env, name] = id.split("/");
+  if (env === "default" && name === "default") {
+    return { title: "Organization defaults", hint: id };
+  }
+  if (name === "default") {
+    return { title: `${env} environment defaults`, hint: id };
+  }
+  return { title: id || path, hint: "This cluster" };
 }
 
-function yesNo(value: boolean | undefined) {
-  if (value === undefined) return "—";
-  return value ? "yes" : "no";
-}
-
-function lineList(values?: string[] | null) {
-  if (!values?.length) return null;
-  return <JsonBlock value={values.join("\n")} mask={false} framed={false} />;
+function executionCopy(show: ConfigShowReport | null): string {
+  if (!show) return "—";
+  const effective = show.execution_effective || "";
+  if (effective.startsWith("docker") || show.execution_configured === "docker") {
+    return show.docker_image
+      ? `Runs in Docker (${show.docker_image})`
+      : "Runs in Docker";
+  }
+  if (effective.includes("local") || show.execution_configured === "local") {
+    return "Runs Ansible on this machine (local)";
+  }
+  return effective || show.execution_configured || "—";
 }
 
 export function ClusterYamlConfigTab({
@@ -58,7 +74,10 @@ export function ClusterYamlConfigTab({
   ready: boolean;
 }) {
   const lastAlias = phases.at(-1)?.alias ?? "";
-  const [phaseOverride, setPhaseOverride] = useState<string | null>(null);
+  const [phaseState, setPhaseState] = useState<{
+    clusterId: string;
+    alias: string | null;
+  }>({ clusterId: "", alias: null });
   const [show, setShow] = useState<ConfigShowReport | null>(null);
   const [effective, setEffective] = useState<ConfigEffectivePayload | null>(
     null,
@@ -67,12 +86,14 @@ export function ClusterYamlConfigTab({
   const [effectiveError, setEffectiveError] = useState<string | null>(null);
   const [loadingShow, setLoadingShow] = useState(false);
   const [loadingEffective, setLoadingEffective] = useState(false);
+  const [techOpen, setTechOpen] = useState(false);
 
-  const phase = phaseOverride ?? lastAlias;
-
-  useEffect(() => {
-    setPhaseOverride(null);
-  }, [clusterId, lastAlias]);
+  const phaseOverride =
+    clusterId && phaseState.clusterId === clusterId ? phaseState.alias : null;
+  const phase =
+    phaseOverride && phases.some((row) => row.alias === phaseOverride)
+      ? phaseOverride
+      : lastAlias;
 
   const loadShow = useCallback(async () => {
     if (!clusterId) return;
@@ -104,12 +125,24 @@ export function ClusterYamlConfigTab({
 
   useEffect(() => {
     if (!ready || !clusterId) return;
-    void loadShow();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) void loadShow();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [ready, clusterId, loadShow]);
 
   useEffect(() => {
     if (!ready || !clusterId) return;
-    void loadEffective();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) void loadEffective();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [ready, clusterId, loadEffective]);
 
   function refresh() {
@@ -127,11 +160,10 @@ export function ClusterYamlConfigTab({
   }
 
   if (!ready) {
-    return <EmptyState title="Loading config" />;
+    return <EmptyState title="Loading runtime" />;
   }
 
-  const ansibleLines =
-    show?.ansible?.lines ?? show?.ansible_lines ?? [];
+  const ansibleLines = show?.ansible?.lines ?? show?.ansible_lines ?? [];
   const runtimeLines =
     show?.ansible?.runtime_lines ?? show?.ansible_runtime_lines ?? [];
   const boundary = show?.ansible?.boundary ?? show?.boundary ?? phase;
@@ -142,20 +174,37 @@ export function ClusterYamlConfigTab({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <SectionHeader
+        title="What's actually running"
+        icon={<Activity />}
+        actions={
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={refresh}
+            disabled={loadingShow || loadingEffective}
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+        }
+      />
+      <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-2">
-          <Label htmlFor="config-phase">Phase</Label>
+          <Label htmlFor="config-phase">Resolved for phase</Label>
           {phases.length ? (
             <Select
               value={phase || undefined}
               onValueChange={(value) => {
-                if (value) setPhaseOverride(value);
+                if (value && clusterId) {
+                  setPhaseState({ clusterId, alias: value });
+                }
               }}
             >
               <SelectTrigger
                 id="config-phase"
                 size="sm"
-                className="min-w-56 font-mono"
+                className="min-w-56"
               >
                 <SelectValue placeholder="Phase" />
               </SelectTrigger>
@@ -170,7 +219,7 @@ export function ClusterYamlConfigTab({
                   <SelectItem
                     key={row.alias}
                     value={row.alias}
-                    className="font-mono whitespace-nowrap"
+                    className="whitespace-nowrap"
                   >
                     {row.ref ? `${row.alias} · ${row.ref}` : row.alias}
                   </SelectItem>
@@ -183,133 +232,122 @@ export function ClusterYamlConfigTab({
             </p>
           )}
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={refresh}
-          disabled={loadingShow || loadingEffective}
-        >
-          <RefreshCw />
-          Refresh
-        </Button>
       </div>
 
       {showError ? (
         <p className="text-sm text-destructive">{showError}</p>
       ) : null}
 
-      <Panel className="p-4">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Field label="Cluster">
-            <Mono>{show?.cluster_id || clusterId}</Mono>
-          </Field>
-          <Field label="Display name">
-            {show?.display_name || "—"}
-          </Field>
-          <Field label="Schema">
-            {show?.schema_version != null ? `v${show.schema_version}` : "—"}
-          </Field>
-          <Field label="Deployable">
+      <Panel className="p-5">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Runnable">
             <Badge variant={show?.deployable ? "success" : "outline"}>
-              {yesNo(show?.deployable)}
+              {show?.deployable ? "Yes" : "Policy stub — not runnable"}
             </Badge>
           </Field>
-          <Field label="Execution effective">
-            <Mono>{show?.execution_effective || (loadingShow ? "…" : "—")}</Mono>
-          </Field>
-          <Field label="Execution configured">
-            <Mono>{show?.execution_configured || "—"}</Mono>
-          </Field>
-          <Field label="Resolved via">
-            <Mono>{show?.execution_source || "—"}</Mono>
-          </Field>
-          <Field label="Docker image">
-            <Mono>{show?.docker_image || "—"}</Mono>
-          </Field>
-          <Field label="Docker CLI">
-            {yesNo(show?.docker_available)}
+          <Field label="Executor">
+            {loadingShow && !show ? "…" : executionCopy(show)}
           </Field>
           <Field label="SSH key">
-            <Mono>
-              {show?.ssh_key || "—"}{" "}
-              {show ? `(${show.ssh_key_ok ? "ok" : "missing"})` : ""}
-            </Mono>
+            {show ? (
+              show.ssh_key_ok ? (
+                <span title={show.ssh_key}>Ready</span>
+              ) : (
+                <span className="text-warning">
+                  Missing
+                  {show.ssh_key ? ` · ${show.ssh_key}` : ""}
+                </span>
+              )
+            ) : (
+              "—"
+            )}
           </Field>
+          <Field label="Inventory">{show?.inventory || "—"}</Field>
           <Field label="Workspace">
-            <div className="font-mono text-xs">
-              <div>{show?.workspace_id || "—"}</div>
-              {show?.workspace_root ? <div>{show.workspace_root}</div> : null}
-            </div>
+            {show?.workspace_id || show?.workspace_root || "—"}
           </Field>
-          <Field label="Inventory">
-            <Mono>{show?.inventory || "—"}</Mono>
-          </Field>
+          <Field label="Display name">{show?.display_name || "—"}</Field>
         </div>
         {executionMismatch ? (
           <p className="mt-4 text-xs text-warning">
-            Effective execution differs from cluster.yaml (override active).
+            Runtime executor differs from cluster.yaml (an override is active).
           </p>
         ) : null}
         {show?.cascade_paths?.length ? (
           <div className="mt-4 space-y-2">
-            <p className="text-xs text-muted-foreground">
-              Cascade ({show.cascade_paths.length})
-            </p>
+            <p className="text-xs text-muted-foreground">Inherited from</p>
             <StackList>
-              {show.cascade_paths.map((path) => (
-                <StackListRow
-                  key={path}
-                  className="px-0 py-1"
-                  title={
-                    <span className="font-mono text-xs font-normal break-all">
-                      {path}
-                    </span>
-                  }
-                />
-              ))}
+              {show.cascade_paths.map((path) => {
+                const layer = cascadeLayer(path);
+                return (
+                  <StackListRow
+                    key={path}
+                    className="px-0 py-1"
+                    title={layer.title}
+                    description={
+                      <span title={path}>
+                        {layer.hint}
+                      </span>
+                    }
+                  />
+                );
+              })}
             </StackList>
           </div>
         ) : null}
       </Panel>
 
-      <Panel className="space-y-3 p-4">
-        <p className="text-sm font-medium">
-          Ansible runtime
-          {show?.workspace_root ? (
-            <span className="ml-2 font-mono text-xs font-normal text-muted-foreground">
-              {show.workspace_root}
-            </span>
-          ) : null}
-        </p>
-        {lineList(runtimeLines) || (
-          <p className="text-sm text-muted-foreground">
-            {loadingShow ? "Loading…" : "No runtime lines."}
-          </p>
-        )}
-      </Panel>
-
-      <Panel className="space-y-3 p-4">
-        <p className="text-sm font-medium">
-          Ansible{" "}
-          <span className="font-mono text-xs font-normal text-muted-foreground">
-            {boundary}
-            {phaseRef ? ` → ${phaseRef}` : ""}
-          </span>
-        </p>
-        {lineList(ansibleLines) || (
-          <p className="text-sm text-muted-foreground">
-            {loadingShow ? "Loading…" : "No ansible lines."}
-          </p>
-        )}
-      </Panel>
-
-      {effectiveError ? (
-        <p className="text-sm text-destructive">{effectiveError}</p>
-      ) : null}
-      <JsonBlock
-        value={effective?.effective ?? (loadingEffective ? "Loading…" : {})}
-        label="config effective"
-      />
+      <div>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="px-0"
+          onClick={() => setTechOpen((open) => !open)}
+        >
+          {techOpen ? "Hide technical details" : "Technical details"}
+        </Button>
+        {techOpen ? (
+          <div className="mt-3 space-y-4">
+            <Panel className="space-y-3 p-4">
+              <p className="text-sm font-medium">Ansible runtime</p>
+              {runtimeLines.length ? (
+                <pre className="overflow-x-auto font-mono text-xs text-muted-foreground">
+                  {runtimeLines.join("\n")}
+                </pre>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {loadingShow ? "Loading…" : "No runtime lines."}
+                </p>
+              )}
+            </Panel>
+            <Panel className="space-y-3 p-4">
+              <p className="text-sm font-medium">
+                Ansible{" "}
+                <span className="font-mono text-xs font-normal text-muted-foreground">
+                  {boundary}
+                  {phaseRef ? ` → ${phaseRef}` : ""}
+                </span>
+              </p>
+              {ansibleLines.length ? (
+                <pre className="overflow-x-auto font-mono text-xs text-muted-foreground">
+                  {ansibleLines.join("\n")}
+                </pre>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {loadingShow ? "Loading…" : "No ansible lines."}
+                </p>
+              )}
+            </Panel>
+            {effectiveError ? (
+              <p className="text-sm text-destructive">{effectiveError}</p>
+            ) : null}
+            <JsonBlock
+              value={effective?.effective ?? (loadingEffective ? "Loading…" : {})}
+              label="config effective"
+            />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

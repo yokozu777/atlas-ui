@@ -237,12 +237,14 @@ class WorkerHTTPClient:
             logger.error(f"Error finishing execution: {e}")
             return False
     
-    def heartbeat(self, current_execution_id: Optional[str] = None) -> bool:
+    def heartbeat(self, current_execution_id: Optional[str] = None,
+                  max_concurrency: Optional[int] = None) -> bool:
         """
         Отправляет heartbeat
         
         Args:
             current_execution_id: ID текущего execution (опционально)
+            max_concurrency: Worker CLI --max-concurrency (stored on hub)
         
         Returns:
             True если успешно, False если ошибка (включая 401)
@@ -259,6 +261,8 @@ class WorkerHTTPClient:
         # Добавляем currentExecutionId если указан
         if current_execution_id:
             data['currentExecutionId'] = current_execution_id
+        if max_concurrency is not None:
+            data['maxConcurrency'] = max_concurrency
         
         try:
             response = requests.post(url, json=data, headers=self._get_headers(), timeout=5)

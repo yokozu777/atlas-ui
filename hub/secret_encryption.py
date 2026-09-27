@@ -189,9 +189,16 @@ def generate_and_save_encryption_key(data_dir: Optional[Path] = None) -> str:
 def get_encryption(data_dir: Optional[Path] = None) -> SecretEncryption:
     global _encryption_instance
     if _encryption_instance is None:
+        env_key = os.environ.get("GLOBAL_SECRETS_ENCRYPTION_KEY", "").strip()
+        if env_key:
+            _encryption_instance = SecretEncryption(env_key)
+            return _encryption_instance
         if data_dir is None:
             data_dir = Path(os.environ.get("DATA_DIR", os.getcwd()))
-        server_key = load_encryption_key(data_dir)
+        try:
+            server_key = load_encryption_key(data_dir)
+        except ImportError:
+            server_key = None
         if not server_key:
             raise RuntimeError(
                 "GLOBAL_SECRETS_ENCRYPTION_KEY is not set and no encryption key file was found. "

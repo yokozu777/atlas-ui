@@ -5,17 +5,17 @@ Material (private keys) stays in global/project secret storage until claim.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-import shlex
 import shutil
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Optional
 
+from clusterctl_ssh import load_clusterctl_ssh_secret_id
 from executions_store import get_project_dir
 from global_secrets_manager import GlobalSecretError, GlobalSecretsManager
+from project_secret_crypto import ProjectSecretError, read_project_secret
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,9 @@ def is_atlas_git_env_key(key: str) -> bool:
 
 
 def resolve_git_ssh_command(ssh_key: str) -> str:
-    return (
-        f"ssh -i {shlex.quote(ssh_key)} -o IdentitiesOnly=yes "
-        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-    )
+    from ssh_temp import build_git_ssh_command
+
+    return build_git_ssh_command(ssh_key)
 
 
 def public_git_pull(project: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -127,8 +126,8 @@ def _load_project_secret(project_id: str, secret_id: str) -> Optional[dict[str, 
     if path is None:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        return read_project_secret(path)
+    except ProjectSecretError as exc:
         raise GitPullError(400, f"Failed to read project secret {secret_id}") from exc
 
 
@@ -170,10 +169,10 @@ def resolve_git_pull_secret(
     return project_secret
 
 
-def _write_key_file(path: Path, private_key: str) -> Path:
-    content = private_key.strip()
-    if not content.endswith("\n"):
-        content += "\n"
+def _write_key_file(path: Path, private_key: str, *, passphrase: str = "") -> Path:
+    from ssh_key_material import decrypt_openssh_private
+
+    content = decrypt_openssh_private(private_key, passphrase=passphrase)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     os.chmod(path.parent, 0o700)
@@ -266,36 +265,47 @@ def materialize_git_pull_env(
     pull = public_git_pull(project)
     default_id = pull.get("defaultSecretId")
     repo_ids = pull.get("repoSecretIds") or {}
-    if not default_id and not repo_ids:
+    git_secret_id = default_id
+    ssh_secret_id = load_clusterctl_ssh_secret_id(data_dir)
+    if not git_secret_id and not ssh_secret_id and not repo_ids:
         return {}
 
     tmp = git_ssh_material_dir(project_id, execution_id, data_dir=data_dir)
     tmp.mkdir(parents=True, exist_ok=True)
     os.chmod(tmp, 0o700)
     env: dict[str, str] = {}
+    written: dict[str, Path] = {}
+
+    def write_secret(secret_id: str, filename: str) -> Path:
+        existing = written.get(secret_id)
+        if existing is not None:
+            return existing
+        secret = resolve_git_pull_secret(
+            secret_id,
+            project_id=project_id,
+            data_dir=data_dir,
+            include_material=True,
+        )
+        key_path = tmp / filename
+        _write_key_file(
+            key_path,
+            str(secret.get("privateKey") or ""),
+            passphrase=str(secret.get("passphrase") or ""),
+        )
+        written[secret_id] = key_path
+        return key_path
 
     try:
-        if default_id:
-            secret = resolve_git_pull_secret(
-                str(default_id),
-                project_id=project_id,
-                data_dir=data_dir,
-                include_material=True,
-            )
-            key_path = tmp / "default"
-            _write_key_file(key_path, str(secret.get("privateKey") or ""))
+        if git_secret_id:
+            key_path = write_secret(str(git_secret_id), "default")
             env["GIT_SSH_COMMAND"] = resolve_git_ssh_command(str(key_path))
-
+        if ssh_secret_id:
+            name = "default" if ssh_secret_id == git_secret_id else "clusterctl"
+            key_path = write_secret(str(ssh_secret_id), name)
+            env["SSH_KEY"] = str(key_path)
         for repo_name, secret_id in repo_ids.items():
             _validate_repo_name(repo_name)
-            secret = resolve_git_pull_secret(
-                secret_id,
-                project_id=project_id,
-                data_dir=data_dir,
-                include_material=True,
-            )
-            key_path = tmp / repo_name
-            _write_key_file(key_path, str(secret.get("privateKey") or ""))
+            key_path = write_secret(str(secret_id), repo_name)
             env[playbooks_ssh_key_env_name(repo_name)] = str(key_path)
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)

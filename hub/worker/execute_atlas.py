@@ -220,6 +220,16 @@ def is_atlas_git_env_key(key: str) -> bool:
     return key == "GIT_SSH_COMMAND" or bool(_PLAYBOOKS_SSH_KEY_RE.fullmatch(key))
 
 
+def is_materialized_ssh_key_path(raw: str) -> bool:
+    data = Path(os.environ.get("DATA_DIR") or "/app/data").resolve()
+    try:
+        path = Path(raw).expanduser().resolve()
+        rel = path.relative_to(data / "projects")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return len(rel.parts) >= 3 and rel.parts[1] == "tmp"
+
+
 def git_ssh_material_dir(project_id: str, execution_id: str) -> Path:
     data = Path(os.environ.get("DATA_DIR") or "/app/data")
     return data / "projects" / str(project_id) / "tmp" / "git-ssh" / str(execution_id)
@@ -230,15 +240,21 @@ def cleanup_git_ssh_material(project_id: str, execution_id: str) -> None:
 
 
 def merge_atlas_git_env(env: dict[str, str], extra: Any) -> dict[str, str]:
-    """Copy GIT_SSH_COMMAND / PLAYBOOKS_*_SSH_KEY from runParams.env. Never SSH_KEY."""
+    """Copy GIT_SSH_COMMAND / PLAYBOOKS_*_SSH_KEY from runParams.env.
+
+    SSH_KEY is copied only when the path is under DATA_DIR/projects/*/tmp/.
+    """
     if not isinstance(extra, dict):
         return env
     for raw_key, raw_value in extra.items():
         key = str(raw_key)
-        if not is_atlas_git_env_key(key):
-            continue
         value = str(raw_value or "").strip()
-        if value:
+        if not value:
+            continue
+        if is_atlas_git_env_key(key):
+            env[key] = value
+            continue
+        if key == "SSH_KEY" and is_materialized_ssh_key_path(value):
             env[key] = value
     return env
 
@@ -331,18 +347,6 @@ def execute_atlas_run(
         executor_mode,
         project_id,
     )
-    try:
-        http_client.send_log(
-            execution_id,
-            (
-                f"atlas: clusterctl={root} clusters={spec['clusters_root']} "
-                f"workspace={spec['workspace_root']} leaf={spec['leaf']}\n"
-                f"atlas: executor={executor_mode} "
-                f"({ENV_FORCE_LOCAL} unset on worker child env)\n"
-            ),
-        )
-    except Exception as send_exc:
-        log.warning("[execute_atlas_run] send_log failed: %s", send_exc)
     heartbeat_stop = threading.Event()
 
     def heartbeat_loop():

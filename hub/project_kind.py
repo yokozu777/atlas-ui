@@ -106,6 +106,50 @@ def atlas_cluster_id(project: Mapping[str, Any]) -> Optional[str]:
     return value or None
 
 
+def normalize_cluster_id_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item or "").strip().replace("\\", "/")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def has_explicit_owned_cluster_ids(project: Mapping[str, Any]) -> bool:
+    return "clusterIds" in project or "cluster_ids" in project
+
+
+def atlas_owned_cluster_ids(project: Mapping[str, Any]) -> list[str]:
+    """Clusters this Atlas project may show. Missing key → only optional cluster_id."""
+    if "clusterIds" in project:
+        return normalize_cluster_id_list(project.get("clusterIds"))
+    if "cluster_ids" in project:
+        return normalize_cluster_id_list(project.get("cluster_ids"))
+    cid = atlas_cluster_id(project)
+    return [cid] if cid else []
+
+
+def atlas_archived_cluster_ids(project: Mapping[str, Any]) -> list[str]:
+    if "archivedClusterIds" in project:
+        return normalize_cluster_id_list(project.get("archivedClusterIds"))
+    if "archived_cluster_ids" in project:
+        return normalize_cluster_id_list(project.get("archived_cluster_ids"))
+    return []
+
+
+def with_owned_cluster_id(project: Mapping[str, Any], cluster_id: str) -> list[str]:
+    cid = str(cluster_id or "").strip().replace("\\", "/")
+    ids = list(atlas_owned_cluster_ids(project))
+    if cid and cid not in ids:
+        ids.append(cid)
+    return ids
+
+
 def materialize_created_project(project_dir: Path, project: Mapping[str, Any]) -> None:
     """Write on-disk layout + project.json after create. Atlas keeps sources empty."""
     kind = normalize_kind(project.get("kind"), required=True)
@@ -113,10 +157,13 @@ def materialize_created_project(project_dir: Path, project: Mapping[str, Any]) -
     if kind == "atlas":
         config: dict[str, Any] = {
             "kind": "atlas",
-            "cluster_id": atlas_cluster_id(project),
             "clusterctlRoot": project.get("clusterctlRoot") or project.get("clusterctl_root"),
             "sources": {},
         }
+        cluster_id = atlas_cluster_id(project)
+        if cluster_id:
+            config["cluster_id"] = cluster_id
+        config["clusterIds"] = list(atlas_owned_cluster_ids(project))
     else:
         config = {
             "kind": "ansible",
@@ -143,9 +190,14 @@ def apply_create_fields(payload: MutableMapping[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {"kind": kind}
     if kind == "atlas":
         cluster_id = atlas_cluster_id(payload)
-        if not cluster_id:
-            raise ProjectKindError("atlas projects require cluster_id")
-        extra["cluster_id"] = cluster_id
+        ids = normalize_cluster_id_list(
+            payload.get("clusterIds") if "clusterIds" in payload else payload.get("cluster_ids")
+        )
+        if cluster_id:
+            extra["cluster_id"] = cluster_id
+            if cluster_id not in ids:
+                ids = [cluster_id, *ids]
+        extra["clusterIds"] = ids
         root = payload.get("clusterctlRoot") or payload.get("clusterctl_root")
         if root:
             extra["clusterctlRoot"] = str(root).strip()

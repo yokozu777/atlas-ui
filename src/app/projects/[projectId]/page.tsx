@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-import AnsibleDashboardPage from "@/app/projects/[projectId]/dashboard/page";
+import { AnsibleDashboardPage } from "@/components/project-dashboard/ansible-dashboard-page";
 import { AtlasProjectHome } from "@/components/atlas-project-home";
 import { projectHref } from "@/lib/project-href";
 import { resolveProjectPage } from "@/server/project-page";
@@ -22,7 +22,5 @@ export default async function ProjectHomePage({
     }
     return <AtlasProjectHome />;
   }
-  return (
-    <AnsibleDashboardPage params={Promise.resolve({ projectId: project.id })} />
-  );
+  return <AnsibleDashboardPage projectId={project.id} />;
 }

@@ -65,6 +65,7 @@ class User:
     updated_at: Optional[str] = None
     last_login: Optional[str] = None
     must_change_password: bool = False
+    token_version: int = 0
     
     def __post_init__(self):
         """Инициализация после создания объекта"""
@@ -89,6 +90,11 @@ class User:
         if 'roles' not in data or data['roles'] is None:
             data['roles'] = []
         data.setdefault('must_change_password', False)
+        data.setdefault('token_version', 0)
+        try:
+            data['token_version'] = int(data.get('token_version') or 0)
+        except (TypeError, ValueError):
+            data['token_version'] = 0
         return cls(**data)
     
     def has_role(self, role_id: str) -> bool:

@@ -46,8 +46,10 @@ export function StatusBadge({
       ? "success"
       : status === "fail"
         ? "destructive"
-        : status === "running" || status === "canceling" || status === "canceled"
+        : status === "running" || status === "canceling"
           ? "warning"
+          : status === "canceled"
+            ? "muted"
           : status === "unknown"
             ? "info"
             : "outline";

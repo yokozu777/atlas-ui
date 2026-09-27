@@ -1,12 +1,21 @@
 import { NextResponse } from "next/server";
 
+import { requireHubApiSession } from "@/server/hub-api-session";
 import { listJobs, readJobLog, snapshotOf, startJob, waitForJob } from "@/server/jobs";
 
 export async function GET() {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   return NextResponse.json({ jobs: listJobs() });
 }
 
 export async function POST(request: Request) {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   const body = (await request.json()) as {
     argv?: string[];
     clusterId?: string;

@@ -96,3 +96,32 @@ class LabSecretsTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def test_ensure_and_resolve_persist_env_encryption_key(self):
+        saved = {
+            key: os.environ.get(key)
+            for key in ("JWT_SECRET_KEY", "GLOBAL_SECRETS_ENCRYPTION_KEY")
+        }
+        try:
+            os.environ.pop("JWT_SECRET_KEY", None)
+            os.environ["GLOBAL_SECRETS_ENCRYPTION_KEY"] = "env-only-encryption-key"
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                ensure_lab_secrets(root)
+                enc_path = root / "auth" / "encryption_key"
+                self.assertTrue(enc_path.is_file())
+                self.assertEqual(
+                    enc_path.read_text(encoding="utf-8").strip(),
+                    "env-only-encryption-key",
+                )
+                os.environ.pop("GLOBAL_SECRETS_ENCRYPTION_KEY", None)
+                self.assertEqual(
+                    resolve_encryption_key(root),
+                    "env-only-encryption-key",
+                )
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value

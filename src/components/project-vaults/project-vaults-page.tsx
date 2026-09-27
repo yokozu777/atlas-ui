@@ -26,18 +26,32 @@ function parseTab(value: string | null): VaultTabId {
   return "keys";
 }
 
-export function ProjectVaultsPage({ projectId }: { projectId: string }) {
+export function ProjectVaultsPage({
+  projectId,
+  hideHeader = false,
+}: {
+  projectId: string;
+  hideHeader?: boolean;
+}) {
   return (
     <Suspense fallback={<EmptyState title="Loading vaults" />}>
-      <ProjectVaultsPageInner projectId={projectId} />
+      <ProjectVaultsPageInner projectId={projectId} hideHeader={hideHeader} />
     </Suspense>
   );
 }
 
-function ProjectVaultsPageInner({ projectId }: { projectId: string }) {
+function ProjectVaultsPageInner({
+  projectId,
+  hideHeader = false,
+}: {
+  projectId: string;
+  hideHeader?: boolean;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const tab = parseTab(searchParams.get("tab"));
+  const urlTab = parseTab(searchParams.get("tab"));
+  const [localTab, setLocalTab] = useState<VaultTabId>("keys");
+  const tab = hideHeader ? localTab : urlTab;
   const [project, setProject] = useState<StargateProject | null>(null);
   const [keys, setKeys] = useState<VaultKeyRow[]>([]);
   const [vaults, setVaults] = useState<VaultRow[]>([]);
@@ -78,6 +92,10 @@ function ProjectVaultsPageInner({ projectId }: { projectId: string }) {
 
   function setTab(next: string) {
     const parsed = parseTab(next);
+    if (hideHeader) {
+      setLocalTab(parsed);
+      return;
+    }
     const href =
       parsed === "keys"
         ? `/projects/${encodeURIComponent(projectId)}/vault`
@@ -91,18 +109,20 @@ function ProjectVaultsPageInner({ projectId }: { projectId: string }) {
 
   return (
     <div>
-      <PageHeader
-        kicker="Infrastructure"
-        title="Vaults"
-        description={
-          <div className="space-y-3">
-            <p>Ansible vault keys and identities for this project</p>
-            {project ? (
-              <Badge variant="success">Project: {project.name}</Badge>
-            ) : null}
-          </div>
-        }
-      />
+      {hideHeader ? null : (
+        <PageHeader
+          kicker="Infrastructure"
+          title="Vaults"
+          description={
+            <div className="space-y-3">
+              <p>Ansible vault keys and identities for this project</p>
+              {project ? (
+                <Badge variant="success">Project: {project.name}</Badge>
+              ) : null}
+            </div>
+          }
+        />
+      )}
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList variant="line">
           <TabsTrigger value="keys">

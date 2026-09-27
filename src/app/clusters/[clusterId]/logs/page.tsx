@@ -35,7 +35,13 @@ export default function LogsPage({
   return <ClusterLogsView key={clusterId} clusterId={clusterId} />;
 }
 
-export function ClusterLogsView({ clusterId }: { clusterId: string }) {
+export function ClusterLogsView({
+  clusterId,
+  hideHeader = false,
+}: {
+  clusterId: string;
+  hideHeader?: boolean;
+}) {
   const router = useRouter();
   const [runs, setRuns] = useState<RunLogRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -136,11 +142,13 @@ export function ClusterLogsView({ clusterId }: { clusterId: string }) {
 
   return (
     <div className="flex flex-col gap-8">
-      <PageHeader
-        kicker="Cluster"
-        title="Run history"
-        description="Click a row to open the full log. Other files under workspace logs are below."
-      />
+      {hideHeader ? null : (
+        <PageHeader
+          kicker="Cluster"
+          title="Run history"
+          description="Click a row to open the full log. Other files under workspace logs are below."
+        />
+      )}
       {body}
       <div>
         <SectionHeader title="Log files" />

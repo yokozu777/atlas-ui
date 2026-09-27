@@ -73,7 +73,7 @@ export function OverviewHero({
   const visual = HERO[kind];
   const projectId = projectIdFromPath(usePathname());
   const varsHref = projectId
-    ? projectHref(projectId, "/vars")
+    ? projectHref(projectId, "/hosts?tab=vars")
     : clusterHref(clusterId, "/vars");
   return (
     <Panel className={cn("flex min-h-[16rem]", visual.tint)}>

@@ -146,15 +146,20 @@ export function useExecutionLog(
         }
       }
 
-      if (payload.isComplete) {
-        completeRef.current = true;
-        flushRest();
-        setRunning(false);
-        source.close();
-      } else if (
-        payload.status &&
-        !ACTIVE_EXECUTION_STATUSES.has(payload.status)
-      ) {
+      const fileSize =
+        typeof payload.fileSize === "number" ? payload.fileSize : null;
+      const readOffset =
+        typeof payload.nextOffset === "number"
+          ? payload.nextOffset
+          : typeof payload.offset === "number"
+            ? payload.offset
+            : null;
+      const caughtUp =
+        fileSize == null || readOffset == null || readOffset >= fileSize;
+      const terminal =
+        Boolean(payload.status) &&
+        !ACTIVE_EXECUTION_STATUSES.has(payload.status ?? "");
+      if (caughtUp && (payload.isComplete || terminal)) {
         completeRef.current = true;
         flushRest();
         setRunning(false);

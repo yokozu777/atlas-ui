@@ -21,7 +21,7 @@ SECRET_TYPES = {
     'git_ssh_key': {
         'required_fields': ['privateKey'],
         'optional_fields': ['passphrase', 'username', 'publicKey', 'fingerprint'],
-        'metadata_fields': ['username', 'keyType', 'keySize', 'comment', 'fingerprint']
+        'metadata_fields': ['username', 'keyType', 'keySize', 'comment', 'fingerprint', 'publicKey']
     },
     'git_token': {
         'required_fields': ['token'],
@@ -30,7 +30,7 @@ SECRET_TYPES = {
     },
     'basic_auth': {
         'required_fields': ['username', 'password'],
-        'optional_fields': [],
+        'optional_fields': ['username'],
         'metadata_fields': ['username', 'registry']
     },
     'registry_token': {
@@ -165,16 +165,13 @@ class GlobalSecretsManager:
         if secret_type == 'git_ssh_key':
             private_key = data.get('privateKey', '').strip()
             if private_key:
-                # Import validation function from app.py
-                try:
-                    from .app import validate_ssh_private_key
-                    is_valid, error_msg = validate_ssh_private_key(private_key)
-                    if not is_valid:
-                        return False, f"Invalid SSH private key format: {error_msg}"
-                except ImportError:
-                    # Fallback validation if app.py not available
-                    if not private_key.startswith('-----BEGIN') or not private_key.endswith('-----'):
-                        return False, "Invalid SSH private key format"
+                from ssh_key_material import validate_ssh_private_key
+                is_valid, error_msg = validate_ssh_private_key(
+                    private_key,
+                    passphrase=str(data.get("passphrase") or ""),
+                )
+                if not is_valid:
+                    return False, f"Invalid SSH private key format: {error_msg}"
         
         return True, None
     
@@ -509,9 +506,12 @@ class GlobalSecretsManager:
             if not is_valid:
                 raise GlobalSecretError(error_msg)
             
-            # Update secret material fields
+            type_config = SECRET_TYPES.get(secret_type, {})
+            type_fields = list(type_config.get('required_fields', [])) + list(
+                type_config.get('optional_fields', [])
+            )
             for field, value in secret_material.items():
-                if field in SECRET_MATERIAL_FIELDS or field in SECRET_TYPES.get(secret_type, {}).get('optional_fields', []):
+                if field in SECRET_MATERIAL_FIELDS or field in type_fields:
                     secret_data[field] = value
         
         # Update timestamp

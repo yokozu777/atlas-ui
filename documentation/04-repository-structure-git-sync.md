@@ -53,10 +53,10 @@ Encrypted files (for example `group_vars/all/vault.yml`) can live in Git. Vault 
 
 Playbook repositories are declared in **cluster.yaml**, not as a single project-level Git source.
 
-1. Open **Cluster definition → YAML** to edit `playbooks:` entries (url, ref, entries).
+1. Open **Definition → YAML** to edit `playbooks:` entries (url, ref, entries).
 2. Open **Repos** to see origin, ref, sync policy, HEAD, and **lock SHA** (only for repos present in `playbooks.lock`).
-3. **Git pull key** — project default and optional per-repo key. Keys come from **Secrets** (`ssh_key` / `git_ssh_key`). Worker env injects `GIT_SSH_COMMAND` / `PLAYBOOKS_*_SSH_KEY` for sync and run.
-4. **Sync** one repo or **Sync all**. That clones under `{workspace}/{cluster_id}/repos/<name>` (clusterctl layout). Role Settings and the playbook editor read those clones.
+3. **Git pull key** — project default and optional per-repo key. Keys come from **Secrets Manager** (`ssh_key` / `git_ssh_key`). Worker env injects `GIT_SSH_COMMAND` / `PLAYBOOKS_*_SSH_KEY` for sync and run. The system clusterctl SSH secret (Settings, or the prompt after init) is injected as `SSH_KEY` for Ansible / docker-executor.
+4. **Sync** one repo or **Sync all**. That clones under `{workspace}/{cluster_id}/repos/<name>` (clusterctl layout). **Roles** reads those clones.
 
 Example `playbooks:` shape (names vary per cluster):
 
@@ -70,7 +70,7 @@ playbooks:
       - cluster
 ```
 
-After sync, **Roles** lists roles from those clones; **Role Settings** in the sidebar edits defaults for a selected role. That is YAML in the UI, not a separate visual role designer.
+After sync, **Roles** lists roles from those clones and edits YAML defaults in the UI. **Handbook** is a tab on the same page. That is not a separate visual role designer.
 
 ---
 
@@ -82,4 +82,4 @@ After sync, **Roles** lists roles from those clones; **Role Settings** in the si
 | Encrypted vault files | Vault passwords / encryption keys |
 | `cluster.yaml` / lock files (inventory repo) | JWT, hub encryption key, worker tokens |
 
-Never commit `.env`, `data/`, or `admin-initial.txt`.
+Never commit `.env` or `data/`.

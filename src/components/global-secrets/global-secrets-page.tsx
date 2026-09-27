@@ -11,9 +11,11 @@ import { GlobalSecretFormDialog } from "@/components/global-secrets/global-secre
 import {
   formatSecretDate,
   globalSecretTypeLabel,
+  isSshSecretType,
   type GlobalSecretRow,
 } from "@/components/global-secrets/types";
 import { PageHeader } from "@/components/page-header";
+import { SecretKeyDownloadMenu } from "@/components/secret-key-download";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -27,9 +29,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { stargateJson } from "@/lib/stargate";
+import { useAuthz, useCan } from "@/lib/authz";
 
 export function GlobalSecretsPage() {
+  const can = useCan();
+  const { ready } = useAuthz();
   const [secrets, setSecrets] = useState<GlobalSecretRow[]>([]);
+  const [clusterctlSecretId, setClusterctlSecretId] = useState<string | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -39,17 +47,26 @@ export function GlobalSecretsPage() {
   const [deleteSecret, setDeleteSecret] = useState<GlobalSecretRow | null>(null);
 
   async function load() {
-    const data = await stargateJson<{ secrets?: GlobalSecretRow[] }>(
-      "/global/secrets",
-    );
+    const [data, clusterctl] = await Promise.all([
+      stargateJson<{ secrets?: GlobalSecretRow[] }>("/global/secrets"),
+      stargateJson<{ sshSecretId?: string | null }>("/global/clusterctl-ssh").catch(
+        () => ({ sshSecretId: null as string | null }),
+      ),
+    ]);
     setSecrets(data.secrets ?? []);
+    setClusterctlSecretId(clusterctl.sshSecretId ?? null);
   }
 
   useEffect(() => {
+    if (!ready) return;
+    if (!can("global_secrets.read")) {
+      setError("global_secrets.read required");
+      return;
+    }
     void load().catch((err: unknown) =>
       setError(err instanceof Error ? err.message : String(err)),
     );
-  }, []);
+  }, [ready]);
 
   const filtered = useMemo(() => {
     const qtext = search.trim().toLowerCase();
@@ -95,8 +112,16 @@ export function GlobalSecretsPage() {
     }
   }
 
+  if (!ready) {
+    return <EmptyState title="Loading secrets" />;
+  }
   if (error) {
-    return <EmptyState title="Secrets unavailable" description={error} />;
+    return (
+      <EmptyState
+        title={error.includes("required") ? "Forbidden" : "Secrets unavailable"}
+        description={error}
+      />
+    );
   }
 
   return (
@@ -106,7 +131,9 @@ export function GlobalSecretsPage() {
         title="Secrets Manager"
         description={
           <div className="space-y-3">
-            <p>Organization credentials for integrations (Git, registries, etc.)</p>
+            <p>
+              Organization credentials for Git, clusterctl SSH, and basic auth
+            </p>
             <Badge variant="info">Global scope</Badge>
           </div>
         }
@@ -121,10 +148,12 @@ export function GlobalSecretsPage() {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <Plus />
-          Add Secret
-        </Button>
+        {can("global_secrets.create") ? (
+          <Button size="sm" onClick={() => setAddOpen(true)}>
+            <Plus />
+            Add Secret
+          </Button>
+        ) : null}
       </div>
       {filtered.length === 0 ? (
         <EmptyState
@@ -174,10 +203,15 @@ export function GlobalSecretsPage() {
                   {row.description || "—"}
                 </TableCell>
                 <TableCell>
-                  <Badge variant="info">
-                    <KeyRound />
-                    {globalSecretTypeLabel(row.type)}
-                  </Badge>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <Badge variant="info">
+                      <KeyRound />
+                      {globalSecretTypeLabel(row.type)}
+                    </Badge>
+                    {clusterctlSecretId === row.id ? (
+                      <Badge variant="warning">clusterctl</Badge>
+                    ) : null}
+                  </div>
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {formatSecretDate(row.createdAt)}
@@ -188,6 +222,13 @@ export function GlobalSecretsPage() {
                 <TableCell className="text-muted-foreground">Never</TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
+                    {isSshSecretType(row.type) && can("global_secrets.read") ? (
+                      <SecretKeyDownloadMenu
+                        kind="global"
+                        name={row.name || row.id}
+                        secretId={row.id}
+                      />
+                    ) : null}
                     <Button
                       size="xs"
                       variant="ghost"
@@ -196,6 +237,7 @@ export function GlobalSecretsPage() {
                       <Eye />
                       View
                     </Button>
+                    {can("global_secrets.update") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -204,6 +246,8 @@ export function GlobalSecretsPage() {
                       <Pencil />
                       Edit
                     </Button>
+                    ) : null}
+                    {can("global_secrets.delete") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -213,6 +257,7 @@ export function GlobalSecretsPage() {
                       <Trash2 />
                       Delete
                     </Button>
+                    ) : null}
                   </div>
                 </TableCell>
               </TableRow>
@@ -225,6 +270,7 @@ export function GlobalSecretsPage() {
         onOpenChange={setAddOpen}
         mode="create"
         onSaved={load}
+        clusterctlSecretId={clusterctlSecretId}
       />
       <GlobalSecretFormDialog
         open={Boolean(editSecret)}
@@ -234,6 +280,7 @@ export function GlobalSecretsPage() {
         mode="edit"
         secret={editSecret}
         onSaved={load}
+        clusterctlSecretId={clusterctlSecretId}
       />
       <GlobalSecretDetailsDialog
         open={Boolean(viewId)}
@@ -241,6 +288,7 @@ export function GlobalSecretsPage() {
           if (!open) setViewId(null);
         }}
         secretId={viewId}
+        clusterctlSecretId={clusterctlSecretId}
       />
       <ConfirmAction
         open={Boolean(deleteSecret)}

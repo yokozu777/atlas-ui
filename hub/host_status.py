@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from executions_store import get_project_dir
 
@@ -33,22 +33,6 @@ def _status_file(project_id: str) -> Path:
     return path
 
 
-def _parse_expires_at(value: Any) -> Optional[float]:
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
-        return datetime.fromisoformat(text).timestamp()
-    except ValueError:
-        return None
-
-
 def get_host_statuses(project_id: str) -> dict[str, dict[str, Any]]:
     if not project_id:
         return {}
@@ -62,17 +46,12 @@ def get_host_statuses(project_id: str) -> dict[str, dict[str, Any]]:
     hosts_map = existing.get("hosts") or {}
     if not isinstance(hosts_map, dict):
         return {}
-    now_ts = time.time()
     out: dict[str, dict[str, Any]] = {}
     for name, row in hosts_map.items():
         if not name or not isinstance(row, dict):
             continue
-        expires = _parse_expires_at(row.get("status_expires_at"))
-        status = str(row.get("status") or "unknown")
-        if expires is not None and expires < now_ts:
-            status = "unknown"
         out[str(name)] = {
-            "status": status,
+            "status": str(row.get("status") or "unknown"),
             "last_checked_at": row.get("last_checked_at"),
         }
     return out

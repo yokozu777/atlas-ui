@@ -9,7 +9,62 @@ export type ClusterRow = {
   active: boolean;
   kind: string;
   error?: string;
+  archived?: boolean;
+  leafExists?: boolean;
+  workspaceExists?: boolean;
+  env?: string | null;
+  name?: string;
+  hostCount?: number;
+  cpu?: number;
+  memoryMb?: number;
+  diskGb?: number;
 };
+
+function asInt(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : fallback;
+}
+
+function asClusterRow(row: {
+  id?: string;
+  display_name?: string | null;
+  displayName?: string | null;
+  active?: boolean;
+  kind?: string;
+  archived?: boolean;
+  leafExists?: boolean;
+  workspaceExists?: boolean;
+  env?: string | null;
+  name?: string;
+  hostCount?: number;
+  cpu?: number;
+  memoryMb?: number;
+  diskGb?: number;
+}): ClusterRow | null {
+  const id = String(row.id ?? "").trim();
+  if (!id) return null;
+  const slash = id.indexOf("/");
+  const env =
+    row.env ?? (slash > 0 ? id.slice(0, slash) : null);
+  const name =
+    row.name || (slash > 0 ? id.slice(slash + 1) : id);
+  return {
+    id,
+    display_name:
+      String(row.display_name ?? row.displayName ?? "").trim() || null,
+    active: Boolean(row.active),
+    kind: String(row.kind || "deployable"),
+    archived: Boolean(row.archived),
+    leafExists: typeof row.leafExists === "boolean" ? row.leafExists : true,
+    workspaceExists: Boolean(row.workspaceExists),
+    env,
+    name,
+    hostCount: asInt(row.hostCount),
+    cpu: asInt(row.cpu),
+    memoryMb: asInt(row.memoryMb),
+    diskGb: asInt(row.diskGb),
+  };
+}
 
 export type RunLogRow = {
   stamp: string;
@@ -72,7 +127,12 @@ function inspectToSnapshot(
 
 function shouldHubInspect(argv: string[]): boolean {
   const command = argv[0];
-  if (command === "run" || command === "init" || command === "use") {
+  if (
+    command === "run" ||
+    command === "init" ||
+    command === "use" ||
+    command === "docker"
+  ) {
     return false;
   }
   if (command === "workspace" && argv[1] === "reset") {
@@ -117,12 +177,13 @@ export type ClusterctlGitStatus = {
   isRepo?: boolean;
   configured?: boolean;
   version?: string;
+  fetchedAt?: string | null;
   ok?: boolean;
   error?: string | null;
 };
 
 export const DEFAULT_CLUSTERCTL_GIT_URL =
-  "https://github.com/yokozu777/atlas-clusterctl.git";
+  "https://gitea.mxhash.com/root/atlas-clusterctl.git";
 
 function hubUnavailable(message: string): boolean {
   return (
@@ -220,6 +281,90 @@ export async function pullClusterctlGit(input: {
   }
 }
 
+export type ClusterctlRefs = {
+  success?: boolean;
+  gitUrl?: string;
+  refs?: string[];
+  error?: string;
+};
+
+export async function listClusterctlRefs(input?: {
+  url?: string;
+}): Promise<ClusterctlRefs> {
+  const params = new URLSearchParams();
+  if (input?.url) {
+    params.set("url", input.url);
+  }
+  const q = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await stargateJson<ClusterctlRefs>(`/atlas/clusterctl/refs${q}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson<ClusterctlRefs>("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "refs", url: input?.url }),
+    });
+  }
+}
+
+export async function installClusterctlGit(input: {
+  url?: string;
+  dest?: string;
+  ref: string;
+}): Promise<ClusterctlGitStatus> {
+  try {
+    return await stargateJson<ClusterctlGitStatus>("/atlas/clusterctl/install", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson<ClusterctlGitStatus>("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "install",
+        url: input.url,
+        dest: input.dest,
+        ref: input.ref,
+      }),
+    });
+  }
+}
+
+export async function ensureClusterctlGit(input?: {
+  url?: string;
+  dest?: string;
+}): Promise<ClusterctlGitStatus> {
+  try {
+    return await stargateJson<ClusterctlGitStatus>("/atlas/clusterctl/ensure", {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson<ClusterctlGitStatus>("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "ensure",
+        url: input?.url,
+        dest: input?.dest,
+      }),
+    });
+  }
+}
+
 export async function saveSetup(path: string) {
   try {
     const params = new URLSearchParams();
@@ -256,25 +401,23 @@ export async function saveSetup(path: string) {
   return data;
 }
 
-export async function fetchAtlasProjectClusters(): Promise<{
+export async function fetchAtlasProjectClusters(
+  projectId?: string | null,
+  opts?: { includeArchived?: boolean },
+): Promise<{
   clustersRoot: string;
   clusters: ClusterRow[];
 }> {
-  const projectId = await hubProjectId();
-  if (projectId) {
+  const id = projectId?.trim() || (await hubProjectId());
+  if (id) {
     const data = await stargateJson<{
       clustersRoot?: string;
-      clusters?: { id?: string; kind?: string }[];
-    }>(`/projects/${encodeURIComponent(projectId)}/atlas/clusters`);
+      clusters?: Parameters<typeof asClusterRow>[0][];
+    }>(`/projects/${encodeURIComponent(id)}/atlas/clusters`);
     const clusters = (data.clusters ?? [])
-      .map((row) => String(row.id ?? "").trim())
-      .filter(Boolean)
-      .map((id) => ({
-        id,
-        display_name: null,
-        active: false,
-        kind: "deployable",
-      }));
+      .map((row) => asClusterRow(row))
+      .filter((row): row is ClusterRow => Boolean(row))
+      .filter((row) => opts?.includeArchived || !row.archived);
     return { clustersRoot: data.clustersRoot ?? "", clusters };
   }
   const res = await fetch("/api/clusters", { cache: "no-store" });
@@ -282,11 +425,84 @@ export async function fetchAtlasProjectClusters(): Promise<{
   if (!res.ok) {
     throw new Error(data.error || "list failed");
   }
-  return { clustersRoot: "", clusters: data.clusters ?? [] };
+  const clusters = (data.clusters ?? []).filter(
+    (row) => opts?.includeArchived || !row.archived,
+  );
+  return { clustersRoot: "", clusters };
 }
 
-export async function fetchClusters() {
-  const listed = await fetchAtlasProjectClusters();
+export async function archiveAtlasCluster(
+  projectId: string,
+  clusterId: string,
+): Promise<ClusterRow[]> {
+  const data = await stargateJson<{ clusters?: Parameters<typeof asClusterRow>[0][] }>(
+    `/projects/${encodeURIComponent(projectId)}/atlas/clusters/archive`,
+    {
+      method: "POST",
+      body: JSON.stringify({ cluster_id: clusterId }),
+    },
+  );
+  return (data.clusters ?? [])
+    .map((row) => asClusterRow(row))
+    .filter((row): row is ClusterRow => Boolean(row));
+}
+
+export async function restoreAtlasCluster(
+  projectId: string,
+  clusterId: string,
+): Promise<ClusterRow[]> {
+  const data = await stargateJson<{ clusters?: Parameters<typeof asClusterRow>[0][] }>(
+    `/projects/${encodeURIComponent(projectId)}/atlas/clusters/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({ cluster_id: clusterId }),
+    },
+  );
+  return (data.clusters ?? [])
+    .map((row) => asClusterRow(row))
+    .filter((row): row is ClusterRow => Boolean(row));
+}
+
+export async function patchAtlasClusterDisplayName(
+  projectId: string,
+  clusterId: string,
+  displayName: string,
+): Promise<ClusterRow> {
+  const data = await stargateJson<{
+    cluster?: Parameters<typeof asClusterRow>[0];
+  }>(`/projects/${encodeURIComponent(projectId)}/atlas/clusters`, {
+    method: "PATCH",
+    body: JSON.stringify({ cluster_id: clusterId, displayName }),
+  });
+  const row = asClusterRow(data.cluster ?? { id: clusterId, display_name: displayName });
+  if (!row) {
+    throw new Error("cluster update failed");
+  }
+  return row;
+}
+
+export async function deleteAtlasCluster(
+  projectId: string,
+  clusterId: string,
+  opts?: { purge?: boolean },
+): Promise<ClusterRow[]> {
+  const data = await stargateJson<{ clusters?: Parameters<typeof asClusterRow>[0][] }>(
+    `/projects/${encodeURIComponent(projectId)}/atlas/clusters`,
+    {
+      method: "DELETE",
+      body: JSON.stringify({
+        cluster_id: clusterId,
+        purge: Boolean(opts?.purge),
+      }),
+    },
+  );
+  return (data.clusters ?? [])
+    .map((row) => asClusterRow(row))
+    .filter((row): row is ClusterRow => Boolean(row));
+}
+
+export async function fetchClusters(projectId?: string | null) {
+  const listed = await fetchAtlasProjectClusters(projectId);
   return listed.clusters;
 }
 
@@ -451,10 +667,6 @@ export async function queueAtlasInit(input: {
   executionId?: string;
   clusterId?: string;
 }> {
-  const remote = await isHubRemote();
-  if (!remote) {
-    throw new Error("atlas init on hub requires a remote project");
-  }
   const pid = input.projectId || (await hubProjectId());
   if (!pid) {
     throw new Error("init requires a project on hub");
@@ -553,19 +765,45 @@ export async function waitHubExecution(
   projectId: string,
   executionId: string,
   timeoutMs = 180_000,
+  onStatus?: (status: string) => void,
 ): Promise<string> {
   const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
+  const limit = timeoutMs ?? 180_000;
+  let last = "";
+  while (Date.now() - started < limit) {
     const data = await stargateJson<{ execution?: { status?: string } }>(
       `/executions/${encodeURIComponent(executionId)}?project_id=${encodeURIComponent(projectId)}`,
     );
     const status = String(data.execution?.status || "");
+    if (status && status !== last) {
+      last = status;
+      onStatus?.(status);
+    }
     if (HUB_EXECUTION_DONE.has(status)) {
       return status;
     }
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
+  onStatus?.("TIMEOUT");
   return "TIMEOUT";
+}
+
+export async function fetchExecutionLogExcerpt(
+  projectId: string,
+  executionId: string,
+  tail = 8192,
+): Promise<string> {
+  const data = await stargateJson<{ text?: string }>(
+    `/executions/${encodeURIComponent(executionId)}/log?project_id=${encodeURIComponent(projectId)}&tail=${tail}`,
+  );
+  return data.text ?? "";
+}
+
+export function formatLogExcerpt(text: string, maxLines = 20): string {
+  const lines = text.split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
+  const fails = lines.filter((line) => /FAIL\s*\[|\bERROR\b/i.test(line));
+  const picked = (fails.length ? fails : lines).slice(-maxLines);
+  return picked.join("\n");
 }
 
 export type WorkspaceFsEntry = {
@@ -668,6 +906,83 @@ export async function fetchReposStatus(
     throw new Error(result.log?.trim() || result.error || "repos status failed");
   }
   return parseJobJson<ReposStatusPayload>(result.log ?? "");
+}
+
+export type BootstrapMissingItem = {
+  kind: string;
+  name?: string;
+  path?: string | null;
+  url?: string;
+  label?: string;
+};
+
+export type BootstrapStatus = {
+  success?: boolean;
+  cluster_id?: string;
+  workspace_root?: string;
+  missing: BootstrapMissingItem[];
+  docker_image?: string | null;
+  docker_image_present?: boolean;
+};
+
+export async function fetchBootstrapStatus(
+  clusterId: string,
+  projectId?: string,
+): Promise<BootstrapStatus> {
+  const pid = projectId || (await hubProjectId());
+  if (!pid) {
+    throw new Error("bootstrap status requires a project on hub");
+  }
+  const params = new URLSearchParams();
+  if (clusterId.trim()) {
+    params.set("cluster_id", clusterId.trim());
+  }
+  const q = params.toString();
+  const data = await stargateJson<BootstrapStatus>(
+    `/projects/${encodeURIComponent(pid)}/atlas/bootstrap${q ? `?${q}` : ""}`,
+  );
+  return {
+    success: data.success,
+    cluster_id: data.cluster_id,
+    workspace_root: data.workspace_root,
+    missing: data.missing ?? [],
+    docker_image: data.docker_image ?? null,
+    docker_image_present: Boolean(data.docker_image_present),
+  };
+}
+
+export async function queueDockerPull(input: {
+  clusterId: string;
+  projectId?: string;
+}): Promise<{
+  executionId?: string;
+  log?: string;
+  exitCode?: number | null;
+}> {
+  const remote = await isHubRemote();
+  const pid = input.projectId || (remote ? await hubProjectId() : null);
+  if (remote) {
+    if (!pid) {
+      throw new Error("docker pull requires a project on hub");
+    }
+    const data = await stargateJson<{ executionId?: string }>(
+      `/projects/${encodeURIComponent(pid)}/atlas/execution/pull`,
+      {
+        method: "POST",
+        body: JSON.stringify({ cluster_id: input.clusterId }),
+      },
+    );
+    if (!data.executionId) {
+      throw new Error("No execution id");
+    }
+    return { executionId: data.executionId };
+  }
+  const result = await runClusterctl({
+    argv: ["docker", "pull"],
+    clusterId: input.clusterId,
+    wait: true,
+  });
+  return { log: result.log ?? "", exitCode: result.exitCode };
 }
 
 function configShowArgv(phase?: string): string[] {

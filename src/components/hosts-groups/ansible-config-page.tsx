@@ -10,7 +10,13 @@ import { projectApiQuery } from "@/components/hosts-groups/helpers";
 import type { CfgFile } from "@/components/hosts-groups/types";
 import { stargateJson } from "@/lib/stargate";
 
-export function AnsibleConfigPage({ projectId }: { projectId: string }) {
+export function AnsibleConfigPage({
+  projectId,
+  hideHeader = false,
+}: {
+  projectId: string;
+  hideHeader?: boolean;
+}) {
   const { clusterId } = useAtlasClusterSelection();
   const q = projectApiQuery(projectId, clusterId);
   const [files, setFiles] = useState<CfgFile[]>([]);
@@ -43,11 +49,13 @@ export function AnsibleConfigPage({ projectId }: { projectId: string }) {
 
   return (
     <div>
-      <PageHeader
-        kicker="Infrastructure"
-        title="Ansible Config"
-        description="ansible.cfg files for this project"
-      />
+      {hideHeader ? null : (
+        <PageHeader
+          kicker="Infrastructure"
+          title="Ansible Config"
+          description="ansible.cfg files for this project"
+        />
+      )}
       <AnsibleConfigTab
         projectId={projectId}
         files={files}

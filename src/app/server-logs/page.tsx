@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { stargateJson } from "@/lib/stargate";
+import { useAuthz } from "@/lib/authz";
 
 type LogEntry = ServerLogEntry;
 
@@ -51,6 +52,7 @@ function csvEscape(value: string) {
 }
 
 export default function ServerLogsPage() {
+  const { ready, can } = useAuthz();
   const [service, setService] = useState("all");
   const [level, setLevel] = useState("all");
   const [search, setSearch] = useState("");
@@ -83,6 +85,7 @@ export default function ServerLogsPage() {
   }, [query]);
 
   useEffect(() => {
+    if (!ready || !can("settings.read")) return;
     let cancelled = false;
     setBusy(true);
     void load()
@@ -97,15 +100,15 @@ export default function ServerLogsPage() {
     return () => {
       cancelled = true;
     };
-  }, [load]);
+  }, [can, load, ready]);
 
   useEffect(() => {
-    if (paused) return;
+    if (paused || !ready || !can("settings.read")) return;
     const id = window.setInterval(() => {
       void load().catch(() => undefined);
     }, 5000);
     return () => window.clearInterval(id);
-  }, [load, paused]);
+  }, [can, load, paused, ready]);
 
   function exportLogs(kind: "json" | "csv" | "txt") {
     const stamp = new Date().toISOString().slice(0, 10);
@@ -138,6 +141,14 @@ export default function ServerLogsPage() {
     );
   }
 
+  if (!ready) {
+    return <EmptyState title="Loading logs" />;
+  }
+  if (!can("settings.read")) {
+    return (
+      <EmptyState title="Forbidden" description="settings.read required" />
+    );
+  }
   if (error) {
     return <EmptyState title="Server logs unavailable" description={error} />;
   }

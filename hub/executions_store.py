@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from json_file_lock import append_text_file, update_json_file
+
 # Do not import worker.config: from backend/ that loads backend/worker.py and
 # shadows the StarGate/worker package used by tests and the worker process.
 _env_data = os.environ.get("DATA_DIR")
@@ -160,75 +162,66 @@ def update_execution_record(execution_id, updates, project_id=None):
     executions_dir = get_project_executions_dir(project_id)
     
     execution_file = executions_dir / f'{execution_id}.json'
+    if not execution_file.exists():
+        logger.warning(f"Execution file not found: {execution_file}")
+        return False
     try:
-        if execution_file.exists():
-            with open(execution_file, 'r', encoding='utf-8') as f:
-                execution = json.load(f)
-            
-            # Валидация перехода статуса
+        def mutator(execution):
+            if not isinstance(execution, dict):
+                raise ValueError(f"Execution file is invalid: {execution_file}")
+
             old_status = execution.get('status', 'QUEUED')
             new_status = updates.get('status')
-            
+
             if new_status and new_status != old_status:
                 validate_status_transition(old_status, new_status)
-            
-            # Автоматически устанавливаем временные метки при переходах
+
             now = time.time()
-            
+            pending = dict(updates)
+
             if new_status and new_status != old_status:
-                # Обновляем statusUpdatedAt при любом изменении статуса
-                updates['statusUpdatedAt'] = now
-                
-                # Устанавливаем специфичные поля для переходов
+                pending['statusUpdatedAt'] = now
+
                 if new_status == 'RUNNING':
-                    if 'startedAt' not in updates:
-                        updates['startedAt'] = now
-                    # Убеждаемся что queuedAt установлен (если был QUEUED)
+                    if 'startedAt' not in pending:
+                        pending['startedAt'] = now
                     if old_status == 'QUEUED' and 'queuedAt' not in execution:
-                        updates['queuedAt'] = execution.get('createdAt', now)
-                
+                        pending['queuedAt'] = execution.get('createdAt', now)
+
                 elif new_status == 'CANCELING':
-                    if 'cancelRequestedAt' not in updates:
-                        updates['cancelRequestedAt'] = now
-                
+                    if 'cancelRequestedAt' not in pending:
+                        pending['cancelRequestedAt'] = now
+
                 elif new_status == 'CANCELED':
-                    if 'canceledAt' not in updates:
-                        updates['canceledAt'] = now
-                    if 'cancelReason' not in updates:
-                        # Определяем причину отмены
+                    if 'canceledAt' not in pending:
+                        pending['canceledAt'] = now
+                    if 'cancelReason' not in pending:
                         if old_status == 'QUEUED':
-                            updates['cancelReason'] = 'user'  # Отменено до начала выполнения
+                            pending['cancelReason'] = 'user'
                         elif old_status == 'CANCELING':
-                            updates['cancelReason'] = 'user'  # Отменено пользователем
+                            pending['cancelReason'] = 'user'
                         else:
-                            updates['cancelReason'] = 'admin'  # Fallback
-                
+                            pending['cancelReason'] = 'admin'
+
                 elif new_status in ('SUCCESS', 'FAILED'):
-                    if 'finishedAt' not in updates:
-                        updates['finishedAt'] = now
-            
-            # Автоматически вычисляем duration если устанавливается finishedAt
-            if 'finishedAt' in updates and 'duration' not in updates:
-                started_at = execution.get('startedAt') or updates.get('startedAt') or execution.get('createdAt')
-                finished_at = updates.get('finishedAt')
+                    if 'finishedAt' not in pending:
+                        pending['finishedAt'] = now
+
+            if 'finishedAt' in pending and 'duration' not in pending:
+                started_at = execution.get('startedAt') or pending.get('startedAt') or execution.get('createdAt')
+                finished_at = pending.get('finishedAt')
                 if started_at and finished_at:
-                    duration = int(finished_at - started_at)
-                    updates['duration'] = duration
-            
-            # Применяем обновления
-            execution.update(updates)
-            
-            # Сохраняем
-            with open(execution_file, 'w', encoding='utf-8') as f:
-                json.dump(execution, f, indent=2, ensure_ascii=False)
-            
-            logger.debug(f"Updated execution {execution_id}: {old_status} → {new_status or old_status}")
+                    pending['duration'] = int(finished_at - started_at)
+
+            execution.update(pending)
+            logger.debug(
+                f"Updated execution {execution_id}: {old_status} → {new_status or old_status}"
+            )
             return True
-        else:
-            logger.warning(f"Execution file not found: {execution_file}")
-            return False
+
+        update_json_file(execution_file, mutator)
+        return True
     except ValueError as e:
-        # Пробрасываем ValueError (валидация переходов) наверх
         logger.error(f"Invalid status transition for execution {execution_id}: {e}")
         raise
     except Exception as e:
@@ -253,10 +246,7 @@ def append_execution_log(execution_id, text, project_id=None):
     
     log_file = logs_dir / f'{execution_id}.log'
     try:
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(text)
-            if not text.endswith('\n'):
-                f.write('\n')
+        append_text_file(log_file, text)
         return True
     except Exception as e:
         logger.error(f"Error writing log for execution {execution_id}: {e}")
@@ -297,10 +287,9 @@ def read_log_chunk(execution_id, offset=0, limit=1024*1024, project_id=None):
         
         # Если offset >= file_size, файл еще не содержит данных после этого offset
         if offset >= file_size:
-            # Проверяем статус execution для определения is_complete
             execution = get_execution(execution_id, project_id=project_id)
-            # FINAL_STATUSES определены в начале модуля
-            is_complete = execution and execution.get('status') in FINAL_STATUSES if execution else False
+            status = execution.get('status') if execution else None
+            is_complete = status in FINAL_STATUSES
             return ('', offset, file_size, is_complete)
         
         # Читаем chunk с offset
@@ -311,12 +300,10 @@ def read_log_chunk(execution_id, offset=0, limit=1024*1024, project_id=None):
             text = chunk.decode('utf-8', errors='ignore')
         
         next_offset = offset + len(chunk)
-        
-        # Проверяем статус execution для определения is_complete
         execution = get_execution(execution_id, project_id=project_id)
-        # FINAL_STATUSES определены в начале модуля
-        is_complete = execution and execution.get('status') in FINAL_STATUSES if execution else False
-        
+        status = execution.get('status') if execution else None
+        # A finished run can still have unread bytes. is_complete means EOF.
+        is_complete = next_offset >= file_size and status in FINAL_STATUSES
         return (text, next_offset, file_size, is_complete)
         
     except Exception as e:

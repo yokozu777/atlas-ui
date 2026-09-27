@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from executions_store import get_project_dir
+from vault_pass import VaultPassError, read_vault_pass_file, write_vault_pass_file
 from vault_utils import (
     ansible_vault_decrypt,
     ansible_vault_encrypt,
@@ -138,11 +139,10 @@ def _key_meta_without_password(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_pass_file(pass_file: Path, password: str) -> None:
-    with open(pass_file, "w", encoding="utf-8") as fh:
-        fh.write(password)
-        if not password.endswith("\n"):
-            fh.write("\n")
-    os.chmod(pass_file, 0o600)
+    try:
+        write_vault_pass_file(pass_file, password)
+    except VaultPassError as exc:
+        raise VaultHttpError(500, str(exc)) from exc
 
 
 def get_key_password_by_key_id(project_id: str, key_id: str) -> Optional[str]:
@@ -152,10 +152,9 @@ def get_key_password_by_key_id(project_id: str, key_id: str) -> Optional[str]:
     if not pass_file.exists():
         return None
     try:
-        with open(pass_file, encoding="utf-8") as fh:
-            return fh.read().rstrip("\n")
-    except OSError:
-        return None
+        return read_vault_pass_file(pass_file)
+    except VaultPassError as exc:
+        raise VaultHttpError(400, str(exc)) from exc
 
 
 def get_key_password_for_vault(project_id: str, vault_uuid: str) -> Optional[str]:

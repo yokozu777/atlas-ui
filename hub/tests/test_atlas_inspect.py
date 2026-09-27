@@ -51,6 +51,7 @@ class InspectAllowlistTests(unittest.TestCase):
             ["init"],
             ["repos", "sync"],
             ["workspace", "reset"],
+            ["docker", "pull"],
         ):
             with self.assertRaises(InspectError):
                 assert_inspect_argv(argv)

@@ -4,10 +4,10 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
-import { AtlasSourcesPanel } from "@/components/atlas-sources-panel";
 import { ConfirmAction } from "@/components/confirm-action";
 import { EmptyState } from "@/components/empty-state";
 import { GitSourcesPanel } from "@/components/git-sources-panel";
+import { ProjectKindBadge } from "@/components/project-kind-badge";
 import { PageHeader } from "@/components/page-header";
 import { Panel } from "@/components/panel";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { projectHref } from "@/lib/project-href";
 import { fetchProject, stargateJson } from "@/lib/stargate";
 import type { StargateProject } from "@/lib/project-types";
 
@@ -23,7 +24,18 @@ export type ProjectSettingsInnerTab = "sources" | "project";
 export function parseProjectSettingsInnerTab(
   value: string | null,
 ): ProjectSettingsInnerTab {
-  return value === "project" ? "project" : "sources";
+  if (value === "project") return value;
+  return "sources";
+}
+
+export function projectSettingsHref(
+  projectId: string,
+  tab: ProjectSettingsInnerTab,
+): string {
+  if (tab === "sources") {
+    return projectHref(projectId, "/settings");
+  }
+  return `${projectHref(projectId, "/settings")}?tab=${tab}`;
 }
 
 export function ProjectSettingsView({
@@ -122,8 +134,6 @@ export function ProjectSettingsView({
   }
 
   const archived = Boolean(project.isArchived);
-  const ansible = project.kind === "ansible";
-  const atlas = project.kind === "atlas";
 
   return (
     <div>
@@ -153,31 +163,17 @@ export function ProjectSettingsView({
           <TabsTrigger value="project">Project</TabsTrigger>
         </TabsList>
         <TabsContent value="sources" className="mt-6">
-          {ansible ? (
-            <GitSourcesPanel projectId={projectId} />
-          ) : atlas ? (
-            <AtlasSourcesPanel
-              projectId={projectId}
-              project={project}
-              onProject={setProject}
-            />
-          ) : null}
+          <GitSourcesPanel projectId={projectId} />
         </TabsContent>
         <TabsContent value="project" className="mt-6">
           <Panel className="max-w-lg space-y-4 p-6">
             <div className="space-y-2">
               <Label>Kind</Label>
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">{project.kind ?? "—"}</Badge>
+                <ProjectKindBadge kind={project.kind} />
                 {archived ? <Badge variant="warning">archived</Badge> : null}
               </div>
             </div>
-            {project.kind === "atlas" ? (
-              <div className="space-y-2">
-                <Label>Cluster id</Label>
-                <Input value={project.cluster_id ?? ""} readOnly />
-              </div>
-            ) : null}
             <div className="space-y-2">
               <Label htmlFor="name">Name</Label>
               <Input

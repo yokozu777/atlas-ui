@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Layers, Settings as SettingsIcon } from "lucide-react";
+import { Folder, Layers, Settings as SettingsIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { BackupSection } from "@/components/settings/backup-section";
@@ -10,7 +10,7 @@ import { DebugLoggingSection } from "@/components/settings/debug-logging-section
 import { EncryptionKeySection } from "@/components/settings/encryption-key-section";
 import { ExecutionHistorySection } from "@/components/settings/execution-history-section";
 import { LocalClusterctlSection } from "@/components/settings/local-clusterctl-section";
-import { UserUiSection } from "@/components/settings/user-ui-section";
+import { ClusterctlSshKeySection } from "@/components/settings/clusterctl-ssh-key-section";
 import { WorkersTab } from "@/components/settings/workers-tab";
 import type { HubSettings, HubStats, SettingsResponse } from "@/components/settings/types";
 import { EmptyState } from "@/components/empty-state";
@@ -18,11 +18,19 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { stargateJson } from "@/lib/stargate";
+import { useAuthz } from "@/lib/authz";
 
-type SettingsTab = "general" | "workers";
+type SettingsTab = "general" | "workers" | "atlas-clusterctl";
 
 function parseTab(value: string | null): SettingsTab {
-  return value === "workers" ? "workers" : "general";
+  if (value === "workers" || value === "atlas-clusterctl") {
+    return value;
+  }
+  return "general";
+}
+
+function tabHref(next: SettingsTab): string {
+  return next === "general" ? "/settings" : `/settings?tab=${next}`;
 }
 
 export function SettingsScreen({
@@ -52,6 +60,7 @@ function SettingsScreenInner({
   const router = useRouter();
   const searchParams = useSearchParams();
   const tab = parseTab(searchParams.get("tab"));
+  const { ready, can } = useAuthz();
   const [settings, setSettings] = useState<HubSettings | null>(null);
   const [stats, setStats] = useState<HubStats>({});
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -63,10 +72,11 @@ function SettingsScreenInner({
   }
 
   useEffect(() => {
+    if (!ready || !can("settings.read")) return;
     void loadHub().catch((err: unknown) =>
       setLoadError(err instanceof Error ? err.message : String(err)),
     );
-  }, []);
+  }, [can, ready]);
 
   async function patchHub(partial: Partial<HubSettings>) {
     const data = await stargateJson<SettingsResponse>("/execution_settings", {
@@ -88,17 +98,28 @@ function SettingsScreenInner({
   }
 
   function setTab(next: string) {
-    const parsed = parseTab(next);
-    router.replace(parsed === "workers" ? "/settings?tab=workers" : "/settings", {
+    router.replace(tabHref(parseTab(next)), {
       scroll: false,
     });
+  }
+
+  if (!ready) {
+    return <EmptyState title="Loading settings" />;
+  }
+  if (!can("settings.read")) {
+    return (
+      <EmptyState
+        title="Forbidden"
+        description="settings.read required"
+      />
+    );
   }
 
   return (
     <div>
       <PageHeader
         kicker="System"
-        title="Settings"
+        title="Console"
         description={
           <div className="space-y-3">
             <p>Application preferences and system options.</p>
@@ -112,6 +133,10 @@ function SettingsScreenInner({
             <SettingsIcon />
             General
           </TabsTrigger>
+          <TabsTrigger value="atlas-clusterctl">
+            <Folder />
+            atlas-clusterctl
+          </TabsTrigger>
           <TabsTrigger value="workers">
             <Layers />
             Workers
@@ -121,8 +146,7 @@ function SettingsScreenInner({
           {loadError ? (
             <EmptyState title="Hub settings unavailable" description={loadError} />
           ) : settings ? (
-            <>
-              <UserUiSection />
+            <div className={can("settings.update") ? undefined : "pointer-events-none opacity-70"}>
               <BackupSection />
               <DebugLoggingSection
                 settings={settings}
@@ -135,17 +159,24 @@ function SettingsScreenInner({
                 onPatch={(partial) => patchHub(partial)}
                 onClear={clearHistory}
               />
-            </>
+            </div>
           ) : (
             <p className="text-sm text-muted-foreground">Loading…</p>
           )}
+        </TabsContent>
+        <TabsContent value="atlas-clusterctl" className="mt-6 space-y-6">
+          <div className={can("settings.update") ? undefined : "pointer-events-none opacity-70"}>
           <LocalClusterctlSection
             defaultPath={defaultPath}
             defaultGitUrl={defaultGitUrl}
           />
+          <ClusterctlSshKeySection />
+          </div>
         </TabsContent>
         <TabsContent value="workers" className="mt-6">
-          <WorkersTab />
+          <div className={can("settings.update") ? undefined : "pointer-events-none opacity-70"}>
+            <WorkersTab />
+          </div>
         </TabsContent>
       </Tabs>
     </div>

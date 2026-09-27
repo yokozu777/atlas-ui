@@ -16,7 +16,8 @@ import type {
 import { UsersTab } from "@/components/users-roles/users-tab";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { fetchMe, stargateJson } from "@/lib/stargate";
+import { useAuthz } from "@/lib/authz";
+import { stargateJson } from "@/lib/stargate";
 
 type UsersTabId = "users" | "roles" | "permissions";
 
@@ -24,11 +25,6 @@ function parseTab(value: string | null): UsersTabId {
   if (value === "roles" || value === "permissions") return value;
   return "users";
 }
-
-type MePayload = {
-  username?: string;
-  user?: { id?: string; username?: string };
-};
 
 export function UsersRolesPage() {
   return (
@@ -42,36 +38,43 @@ function UsersRolesPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tab = parseTab(searchParams.get("tab"));
+  const { me, ready, can } = useAuthz();
   const [users, setUsers] = useState<UserRow[]>([]);
   const [roles, setRoles] = useState<RoleRow[]>([]);
   const [permissions, setPermissions] = useState<PermissionRow[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
-  const [meId, setMeId] = useState<string>();
-  const [meUsername, setMeUsername] = useState<string>();
+  const [loaded, setLoaded] = useState(false);
+  const meId = me?.user?.id;
+  const meUsername = me?.user?.username || me?.username;
 
   async function load() {
     const [u, r, p] = await Promise.all([
-      stargateJson<{ users?: UserRow[] }>("/users"),
-      stargateJson<{ roles?: RoleRow[] }>("/roles"),
-      stargateJson<{ permissions?: PermissionRow[] }>("/permissions"),
+      can("users.read")
+        ? stargateJson<{ users?: UserRow[] }>("/users")
+        : Promise.resolve({ users: [] as UserRow[] }),
+      can("roles.read")
+        ? stargateJson<{ roles?: RoleRow[] }>("/roles")
+        : Promise.resolve({ roles: [] as RoleRow[] }),
+      can("permissions.read")
+        ? stargateJson<{ permissions?: PermissionRow[] }>("/permissions")
+        : Promise.resolve({ permissions: [] as PermissionRow[] }),
     ]);
     setUsers(u.users ?? []);
     setRoles(r.roles ?? []);
     setPermissions(p.permissions ?? []);
-    setReady(true);
+    setLoaded(true);
   }
 
   useEffect(() => {
+    if (!ready) return;
+    if (!can("users.read")) {
+      setError("users.read required");
+      return;
+    }
     void load().catch((err: unknown) =>
       setError(err instanceof Error ? err.message : String(err)),
     );
-    void fetchMe().then((me) => {
-      const payload = me as MePayload | null;
-      setMeId(payload?.user?.id);
-      setMeUsername(payload?.user?.username || payload?.username);
-    });
-  }, []);
+  }, [ready, can]);
 
   function setTab(next: string) {
     const parsed = parseTab(next);
@@ -80,15 +83,23 @@ function UsersRolesPageInner() {
     router.replace(href, { scroll: false });
   }
 
+  if (!ready) {
+    return <EmptyState title="Loading users" />;
+  }
   if (error) {
-    return <EmptyState title="Users unavailable" description={error} />;
+    return (
+      <EmptyState
+        title={error.includes("required") ? "Forbidden" : "Users unavailable"}
+        description={error}
+      />
+    );
   }
 
   return (
     <div>
       <PageHeader
         kicker="System"
-        title="Users & roles"
+        title="Users"
         description={
           <div className="space-y-3">
             <p>Accounts, RBAC roles, and permissions</p>
@@ -112,7 +123,7 @@ function UsersRolesPageInner() {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="users" className="mt-6">
-          {ready ? (
+          {loaded ? (
             <UsersTab
               users={users}
               roles={roles}
@@ -125,14 +136,14 @@ function UsersRolesPageInner() {
           )}
         </TabsContent>
         <TabsContent value="roles" className="mt-6">
-          {ready ? (
+          {loaded ? (
             <RolesTab roles={roles} permissions={permissions} onReload={load} />
           ) : (
             <p className="text-sm text-muted-foreground">Loading…</p>
           )}
         </TabsContent>
         <TabsContent value="permissions" className="mt-6">
-          {ready ? (
+          {loaded ? (
             <PermissionsTab permissions={permissions} onReload={load} />
           ) : (
             <p className="text-sm text-muted-foreground">Loading…</p>

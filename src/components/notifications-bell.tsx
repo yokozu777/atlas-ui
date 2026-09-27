@@ -1,9 +1,12 @@
 "use client";
 
-import { useLayoutEffect, useSyncExternalStore } from "react";
+import { useLayoutEffect, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { useRouter } from "next/navigation";
 import {
   Bell,
+  ChevronRight,
   CircleCheckIcon,
+  Copy,
   InfoIcon,
   OctagonXIcon,
   TriangleAlertIcon,
@@ -100,7 +103,7 @@ export function NotificationsBell() {
       <DropdownMenuContent
         align="end"
         sideOffset={8}
-        className="w-80 min-w-80 bg-background p-0"
+        className="w-96 min-w-80 bg-[var(--color-panel-solid,#1c1c1f)] p-0"
         id="notifications-inbox"
       >
         <div className="flex items-center justify-between gap-2 px-2.5 py-2">
@@ -133,11 +136,42 @@ export function NotificationsBell() {
   );
 }
 
+function notificationText(item: InboxNotification) {
+  return [item.title, item.description].filter(Boolean).join("\n");
+}
+
 function NotificationRow({ item }: { item: InboxNotification }) {
+  const router = useRouter();
+  const [copied, setCopied] = useState(false);
+
+  function onCopy(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const text = notificationText(item);
+    if (!text) {
+      return;
+    }
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => undefined,
+    );
+  }
+
   return (
     <DropdownMenuItem
-      closeOnClick={false}
-      className="items-start gap-2 px-2.5 py-2 whitespace-normal"
+      closeOnClick={Boolean(item.href)}
+      className={cn(
+        "items-start gap-2 px-2.5 py-2 whitespace-normal",
+        item.href && "cursor-pointer",
+      )}
+      onClick={() => {
+        if (item.href) {
+          router.push(item.href);
+        }
+      }}
     >
       <KindIcon kind={item.kind} />
       <div className="min-w-0 flex-1">
@@ -149,6 +183,20 @@ function NotificationRow({ item }: { item: InboxNotification }) {
         ) : null}
         <p className="mt-1 text-[11px] text-muted-foreground">{formatAgo(item.createdAt)}</p>
       </div>
+      {item.href ? (
+        <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      ) : null}
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        className="mt-0.5 shrink-0"
+        aria-label="Copy notification"
+        onClick={onCopy}
+      >
+        <Copy />
+        {copied ? "Copied" : "Copy"}
+      </Button>
     </DropdownMenuItem>
   );
 }

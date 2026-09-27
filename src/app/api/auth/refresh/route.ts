@@ -31,6 +31,7 @@ export async function POST(request: Request) {
     error?: string;
     detail?: string;
     access_token?: string;
+    refresh_token?: string;
   };
   if (!upstream.ok || !data.access_token) {
     return NextResponse.json(
@@ -42,7 +43,14 @@ export async function POST(request: Request) {
   res.cookies.set(
     STARGATE_COOKIE,
     data.access_token,
-    sessionCookieOptions(request, 60 * 60 * 24),
+    sessionCookieOptions(request, 60 * 60),
   );
+  if (data.refresh_token) {
+    res.cookies.set(
+      STARGATE_REFRESH_COOKIE,
+      data.refresh_token,
+      sessionCookieOptions(request, 60 * 60 * 24 * 7),
+    );
+  }
   return res;
 }

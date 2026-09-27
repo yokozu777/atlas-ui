@@ -167,6 +167,46 @@ class AtlasClusterInfraTests(unittest.TestCase):
             self.assertEqual(switched.status_code, 200, switched.text)
             self.assertEqual(switched.json().get("hosts"), ["10.0.0.1"])
 
+    def test_inventory_vars_from_env_default_layer(self):
+        headers = self._login()
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            ctl, clusters, _leaf = self._fixture(tmp)
+            env_default = clusters / "dev" / "default"
+            env_default.mkdir(parents=True)
+            (env_default / "cluster.yaml").write_text(
+                "id: dev/default\n", encoding="utf-8"
+            )
+            env_all = env_default / "group_vars" / "all"
+            env_all.mkdir(parents=True)
+            (env_all / "atlas-compute-provision.yml").write_text(
+                "provision_gateway: 192.168.1.1\n", encoding="utf-8"
+            )
+            project_id = self._atlas_project(
+                headers, ctl, clusters, "atlas-env-default-vars"
+            )
+            q = f"project_id={project_id}&cluster_id=dev/default"
+            vars_res = self.client.get(
+                f"/api/inventory/vars?{q}&kind=group", headers=headers
+            )
+            self.assertEqual(vars_res.status_code, 200, vars_res.text)
+            paths = [row.get("path") for row in vars_res.json().get("files") or []]
+            self.assertIn(
+                "group_vars/all/atlas-compute-provision.yml", paths
+            )
+            leaf_q = f"project_id={project_id}&cluster_id=dev/k8s"
+            leaf_vars = self.client.get(
+                f"/api/inventory/vars?{leaf_q}&kind=group", headers=headers
+            )
+            self.assertEqual(leaf_vars.status_code, 200, leaf_vars.text)
+            leaf_paths = [
+                row.get("path") for row in leaf_vars.json().get("files") or []
+            ]
+            self.assertIn("group_vars/all.yml", leaf_paths)
+            self.assertNotIn(
+                "group_vars/all/atlas-compute-provision.yml", leaf_paths
+            )
+
     def test_roles_and_playbooks_from_cluster_yaml(self):
         headers = self._login()
         with tempfile.TemporaryDirectory() as raw:

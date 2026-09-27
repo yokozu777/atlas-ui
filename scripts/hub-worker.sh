@@ -26,6 +26,9 @@ if [ -z "${ATLAS_CLUSTER_ROOT:-}" ]; then
 fi
 export ATLAS_UI_ROOT="${ATLAS_UI_ROOT:-$ROOT}"
 mkdir -p "$DATA_DIR"
+if [ -z "${GLOBAL_SECRETS_ENCRYPTION_KEY:-}" ] && [ -f "$DATA_DIR/auth/encryption_key" ]; then
+  export GLOBAL_SECRETS_ENCRYPTION_KEY="$(tr -d '\n\r' < "$DATA_DIR/auth/encryption_key")"
+fi
 
 if [ ! -d "$HUB/venv" ]; then
     python3 -m venv "$HUB/venv"

@@ -50,7 +50,7 @@ export async function POST(request: Request) {
   res.cookies.set(
     STARGATE_COOKIE,
     data.access_token,
-    sessionCookieOptions(request, 60 * 60 * 24),
+    sessionCookieOptions(request, 60 * 60),
   );
   if (data.refresh_token) {
     res.cookies.set(

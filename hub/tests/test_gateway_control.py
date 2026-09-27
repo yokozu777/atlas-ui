@@ -3,6 +3,7 @@ from pathlib import Path as _AuthEnvPath
 sys.path.insert(0, str(_AuthEnvPath(__file__).resolve().parent))
 import auth_env  # noqa: F401
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,108 @@ class GatewayControlPlaneTests(unittest.TestCase):
         self.assertTrue(data.get("success"))
         self.assertTrue(data.get("access_token"))
 
+    def test_logout_blacklists_access_token(self):
+        access, refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        me = self.client.get("/api/auth/me", headers=headers)
+        self.assertEqual(me.status_code, 200, me.text)
+        out = self.client.post(
+            "/api/auth/logout",
+            json={"refresh_token": refresh},
+            headers=headers,
+        )
+        self.assertEqual(out.status_code, 200, out.text)
+        denied = self.client.get("/api/auth/me", headers=headers)
+        self.assertEqual(denied.status_code, 401, denied.text)
+        stale = self.client.post("/api/auth/refresh", json={"refresh_token": refresh})
+        self.assertEqual(stale.status_code, 401, stale.text)
+
+    def test_change_password_invalidates_old_access(self):
+        access, _refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        created = self.client.post(
+            "/api/users",
+            json={
+                "username": "tvchg",
+                "password": "oldpass1",
+                "roles": [gateway.role_service.get_role_by_name("user").id],
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        login = self.client.post(
+            "/api/auth/login",
+            json={"username": "tvchg", "password": "oldpass1"},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        old_access = login.json()["access_token"]
+        old_refresh = login.json()["refresh_token"]
+        forced = {"Authorization": f"Bearer {old_access}"}
+        changed = self.client.post(
+            "/api/auth/change-password",
+            json={"old_password": "oldpass1", "new_password": "newpass1"},
+            headers=forced,
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+        denied = self.client.get("/api/auth/me", headers=forced)
+        self.assertEqual(denied.status_code, 401, denied.text)
+        stale = self.client.post(
+            "/api/auth/refresh", json={"refresh_token": old_refresh}
+        )
+        self.assertEqual(stale.status_code, 401, stale.text)
+        new_headers = {
+            "Authorization": f"Bearer {changed.json()['access_token']}",
+        }
+        ok = self.client.get("/api/auth/me", headers=new_headers)
+        self.assertEqual(ok.status_code, 200, ok.text)
+
+    def test_refresh_rotates_refresh_token(self):
+        _access, refresh = self._login()
+        first = self.client.post("/api/auth/refresh", json={"refresh_token": refresh})
+        self.assertEqual(first.status_code, 200, first.text)
+        new_refresh = first.json().get("refresh_token")
+        self.assertTrue(new_refresh)
+        self.assertNotEqual(new_refresh, refresh)
+        reused = self.client.post("/api/auth/refresh", json={"refresh_token": refresh})
+        self.assertEqual(reused.status_code, 401, reused.text)
+        second = self.client.post(
+            "/api/auth/refresh", json={"refresh_token": new_refresh}
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+
+    def test_login_lockout_after_failed_attempts(self):
+        gateway._login_failures.clear()
+        self.addCleanup(gateway._login_failures.clear)
+        access, _refresh = self._login()
+        created = self.client.post(
+            "/api/users",
+            json={
+                "username": "lockout1",
+                "password": "goodpass1",
+                "roles": [gateway.role_service.get_role_by_name("user").id],
+            },
+            headers={"Authorization": f"Bearer {access}"},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        wrong = {"username": "lockout1", "password": "wrongpass"}
+        for _ in range(4):
+            res = self.client.post("/api/auth/login", json=wrong)
+            self.assertEqual(res.status_code, 401, res.text)
+        locked = self.client.post("/api/auth/login", json=wrong)
+        self.assertEqual(locked.status_code, 429, locked.text)
+        self.assertTrue(locked.headers.get("Retry-After"))
+        still = self.client.post(
+            "/api/auth/login",
+            json={"username": "lockout1", "password": "goodpass1"},
+        )
+        self.assertEqual(still.status_code, 429, still.text)
+        gateway._login_failures.clear()
+        ok = self.client.post(
+            "/api/auth/login",
+            json={"username": "lockout1", "password": "goodpass1"},
+        )
+        self.assertEqual(ok.status_code, 200, ok.text)
+
     def test_register_and_claim_empty_queue(self):
         unauth = self.client.post(
             "/api/worker/register",
@@ -75,7 +178,11 @@ class GatewayControlPlaneTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {access}"}
         created = self.client.post(
             "/api/users",
-            json={"username": "mustchg", "password": "oldpass1"},
+            json={
+                "username": "mustchg",
+                "password": "oldpass1",
+                "roles": [gateway.role_service.get_role_by_name("user").id],
+            },
             headers=headers,
         )
         self.assertEqual(created.status_code, 201, created.text)
@@ -108,6 +215,131 @@ class GatewayControlPlaneTests(unittest.TestCase):
         new_headers = {"Authorization": f"Bearer {changed.json()['access_token']}"}
         ok = self.client.get("/api/projects", headers=new_headers)
         self.assertEqual(ok.status_code, 200, ok.text)
+
+    def test_bootstrap_hides_default_credentials_when_password_already_set(self):
+        res = self.client.get("/api/auth/bootstrap")
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertFalse(res.json().get("showDefaultCredentials"))
+
+    def test_bootstrap_shows_then_clears_after_admin_password_change(self):
+        admin = gateway.user_service.get_user_by_username("admin")
+        self.assertIsNotNone(admin)
+        users = gateway.user_service._load_users()
+        users[admin.id].must_change_password = True
+        gateway.user_service._save_users(users)
+        try:
+            shown = self.client.get("/api/auth/bootstrap")
+            self.assertEqual(shown.status_code, 200, shown.text)
+            self.assertTrue(shown.json().get("showDefaultCredentials"))
+            login = self.client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": "admin123"},
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+            self.assertTrue(login.json()["user"]["must_change_password"])
+            changed = self.client.post(
+                "/api/auth/change-password",
+                json={"old_password": "admin123", "new_password": "newpass1"},
+                headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+            )
+            self.assertEqual(changed.status_code, 200, changed.text)
+            hidden = self.client.get("/api/auth/bootstrap")
+            self.assertEqual(hidden.status_code, 200, hidden.text)
+            self.assertFalse(hidden.json().get("showDefaultCredentials"))
+        finally:
+            gateway.user_service.set_password(admin.id, "admin123")
+
+    def test_login_accepts_bootstrap_short_password(self):
+        user = gateway.user_service.create_user(
+            "bootadmin", "admin", must_change_password=True
+        )
+        login = self.client.post(
+            "/api/auth/login",
+            json={"username": "bootadmin", "password": "admin"},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertTrue(login.json()["user"]["must_change_password"])
+        gateway.user_service.delete_user(user.id)
+
+    def test_about_requires_auth_and_returns_versions(self):
+        denied = self.client.get("/api/about")
+        self.assertEqual(denied.status_code, 401, denied.text)
+        access, _refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        res = self.client.get("/api/about", headers=headers)
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertTrue(data.get("success"))
+        self.assertEqual(data.get("version"), gateway.HUB_VERSION)
+        self.assertTrue(data.get("python"))
+        self.assertIn("clusterctl", data)
+        self.assertIn("version", data["clusterctl"])
+        self.assertIn("dest", data["clusterctl"])
+
+    def test_me_includes_email_and_has_avatar(self):
+        access, _refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        me = self.client.get("/api/auth/me", headers=headers)
+        self.assertEqual(me.status_code, 200, me.text)
+        data = me.json()
+        self.assertEqual(data.get("username"), "admin")
+        self.assertIn("email", data)
+        self.assertFalse(data.get("hasAvatar"))
+        self.assertIn("email", data.get("user") or {})
+
+    def test_patch_profile_sets_and_clears_email(self):
+        access, _refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        patched = self.client.patch(
+            "/api/auth/profile",
+            json={"email": "admin@example.com"},
+            headers=headers,
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        self.assertEqual(patched.json().get("email"), "admin@example.com")
+        me = self.client.get("/api/auth/me", headers=headers)
+        self.assertEqual(me.json().get("email"), "admin@example.com")
+        cleared = self.client.patch(
+            "/api/auth/profile",
+            json={"email": ""},
+            headers=headers,
+        )
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertIsNone(cleared.json().get("email"))
+        bad = self.client.patch(
+            "/api/auth/profile",
+            json={"email": "not-an-email"},
+            headers=headers,
+        )
+        self.assertEqual(bad.status_code, 400, bad.text)
+
+    def test_avatar_put_get_delete(self):
+        access, _refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        put = self.client.put("/api/auth/avatar", content=png, headers=headers)
+        self.assertEqual(put.status_code, 200, put.text)
+        self.assertTrue(put.json().get("hasAvatar"))
+        got = self.client.get("/api/auth/avatar", headers=headers)
+        self.assertEqual(got.status_code, 200, got.text)
+        self.assertTrue(got.content.startswith(b"\x89PNG"))
+        me = self.client.get("/api/auth/me", headers=headers)
+        self.assertTrue(me.json().get("hasAvatar"))
+        deleted = self.client.delete("/api/auth/avatar", headers=headers)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        missing = self.client.get("/api/auth/avatar", headers=headers)
+        self.assertEqual(missing.status_code, 404, missing.text)
+        me = self.client.get("/api/auth/me", headers=headers)
+        self.assertFalse(me.json().get("hasAvatar"))
+
+    def test_avatar_rejects_non_image_and_oversize(self):
+        access, _refresh = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        bad = self.client.put("/api/auth/avatar", content=b"hello", headers=headers)
+        self.assertEqual(bad.status_code, 400, bad.text)
+        huge = b"\x89PNG\r\n\x1a\n" + b"\x00" * (512 * 1024)
+        over = self.client.put("/api/auth/avatar", content=huge, headers=headers)
+        self.assertEqual(over.status_code, 400, over.text)
 
     def test_list_executions_empty(self):
         access, _refresh = self._login()
@@ -350,22 +582,20 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
             email=None,
             roles=[],
         )
-        token = self._login("limited", "limited1")
-        headers = self._headers(token)
         created = self.client.post(
             "/api/projects",
             json={"name": "atlas-denied", "kind": "atlas", "cluster_id": "dev/k8s"},
-            headers=headers,
+            headers=self._headers(),
         )
         self.assertEqual(created.status_code, 200, created.text)
         project_id = created.json()["project"]["id"]
         denied = self.client.post(
             f"/api/projects/{project_id}/atlas/run",
             json={"phases": ["k8s"]},
-            headers=headers,
+            headers=self._headers(self._login("limited", "limited1")),
         )
         self.assertEqual(denied.status_code, 403, denied.text)
-        self.assertIn("atlas.execute", denied.json().get("error", ""))
+        self.assertIn("atlas.execute", denied.json().get("error", "") or denied.json().get("detail", ""))
 
     def test_atlas_workspace_reset_queues(self):
         headers = self._headers()
@@ -452,8 +682,6 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
             email=None,
             roles=[],
         )
-        token = self._login("limited-ws", "limited1")
-        headers = self._headers(token)
         created = self.client.post(
             "/api/projects",
             json={
@@ -461,14 +689,14 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
                 "kind": "atlas",
                 "cluster_id": "dev/k8s",
             },
-            headers=headers,
+            headers=self._headers(),
         )
         self.assertEqual(created.status_code, 200, created.text)
         project_id = created.json()["project"]["id"]
         denied = self.client.post(
             f"/api/projects/{project_id}/atlas/workspace/reset",
             json={"cluster_id": "dev/k8s"},
-            headers=headers,
+            headers=self._headers(self._login("limited-ws", "limited1")),
         )
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertIn("atlas.execute", denied.json().get("error", ""))
@@ -547,8 +775,6 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
             email=None,
             roles=[],
         )
-        token = self._login("limited-repos", "limited1")
-        headers = self._headers(token)
         created = self.client.post(
             "/api/projects",
             json={
@@ -556,14 +782,14 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
                 "kind": "atlas",
                 "cluster_id": "dev/k8s",
             },
-            headers=headers,
+            headers=self._headers(),
         )
         self.assertEqual(created.status_code, 200, created.text)
         project_id = created.json()["project"]["id"]
         denied = self.client.post(
             f"/api/projects/{project_id}/atlas/repos/sync",
             json={"cluster_id": "dev/k8s"},
-            headers=headers,
+            headers=self._headers(self._login("limited-repos", "limited1")),
         )
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertIn("atlas.execute", denied.json().get("error", ""))
@@ -575,7 +801,6 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
             json={
                 "name": "atlas-init",
                 "kind": "atlas",
-                "cluster_id": "dev/k8s",
             },
             headers=headers,
         )
@@ -623,6 +848,12 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
             ],
         )
         self.assertEqual(params.get("cluster_id"), "123/etet-template")
+        owned = self.client.get(f"/api/projects/{project_id}", headers=headers)
+        self.assertEqual(owned.status_code, 200, owned.text)
+        self.assertEqual(
+            owned.json()["project"].get("clusterIds"),
+            ["123/etet-template"],
+        )
 
     def test_atlas_init_from_default(self):
         headers = self._headers()
@@ -679,8 +910,6 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
             email=None,
             roles=[],
         )
-        token = self._login("limited-init", "limited1")
-        headers = self._headers(token)
         created = self.client.post(
             "/api/projects",
             json={
@@ -688,17 +917,222 @@ class GatewayInventoryPlaybooksTests(unittest.TestCase):
                 "kind": "atlas",
                 "cluster_id": "dev/k8s",
             },
-            headers=headers,
+            headers=self._headers(),
         )
         self.assertEqual(created.status_code, 200, created.text)
         project_id = created.json()["project"]["id"]
         denied = self.client.post(
             f"/api/projects/{project_id}/atlas/init",
             json={"argv": ["init", "lab/x", "--template", "redis"]},
-            headers=headers,
+            headers=self._headers(self._login("limited-init", "limited1")),
         )
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertIn("atlas.execute", denied.json().get("error", ""))
+
+    def test_atlas_bootstrap_lists_missing(self):
+        headers = self._headers()
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-bootstrap",
+                "kind": "atlas",
+                "cluster_id": "test/template",
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project"]["id"]
+
+        def fake_inspect(argv, cluster_id, run_params=None, timeout=60):
+            del run_params, timeout
+            if argv[:2] == ["repos", "status"]:
+                return {
+                    "success": True,
+                    "return_code": 0,
+                    "json": {
+                        "cluster_id": cluster_id,
+                        "workspace_root": "/tmp/missing-workspace",
+                        "lock": None,
+                        "repos": [
+                            {
+                                "name": "atlas-compute-provision",
+                                "state": "missing",
+                                "layout_dir": (
+                                    "/tmp/missing-workspace/repos/"
+                                    "atlas-compute-provision/roles"
+                                ),
+                                "url": "git@gitea.example.com:atlas-compute-provision.git",
+                            }
+                        ],
+                    },
+                    "log": "{}",
+                }
+            if argv[:2] == ["config", "effective"]:
+                return {
+                    "success": True,
+                    "return_code": 0,
+                    "json": {
+                        "effective": {
+                            "execution": {
+                                "mode": "docker",
+                                "image": "harbor.mxhash.com/library/krang",
+                                "tag": "latest",
+                            }
+                        }
+                    },
+                    "log": "{}",
+                }
+            raise AssertionError(argv)
+
+        with patch(
+            "playbooks_http.resolve_inspect_cluster_id",
+            return_value="test/template",
+        ), patch("playbooks_http.inspect_atlas", side_effect=fake_inspect), patch(
+            "playbooks_http.docker_image_present",
+            return_value=False,
+        ):
+            listed = self.client.get(
+                f"/api/projects/{project_id}/atlas/bootstrap"
+                "?cluster_id=test/template",
+                headers=headers,
+            )
+        self.assertEqual(listed.status_code, 200, listed.text)
+        body = listed.json()
+        self.assertTrue(body.get("success"))
+        self.assertEqual(body.get("cluster_id"), "test/template")
+        self.assertEqual(
+            body.get("docker_image"),
+            "harbor.mxhash.com/library/krang:latest",
+        )
+        self.assertFalse(body.get("docker_image_present"))
+        kinds = {item.get("kind") for item in body.get("missing") or []}
+        names = {item.get("name") for item in body.get("missing") or []}
+        self.assertIn("workspace", kinds)
+        self.assertIn("lock", kinds)
+        self.assertIn("git_repo", kinds)
+        self.assertIn("atlas-compute-provision", names)
+        with patch(
+            "playbooks_http.resolve_inspect_cluster_id",
+            return_value="test/template",
+        ), patch("playbooks_http.inspect_atlas", side_effect=fake_inspect), patch(
+            "playbooks_http.docker_image_present",
+            return_value=True,
+        ):
+            present = self.client.get(
+                f"/api/projects/{project_id}/atlas/bootstrap"
+                "?cluster_id=test/template",
+                headers=headers,
+            )
+        self.assertEqual(present.status_code, 200, present.text)
+        self.assertTrue(present.json().get("docker_image_present"))
+        self.assertEqual(
+            present.json().get("docker_image"),
+            "harbor.mxhash.com/library/krang:latest",
+        )
+
+    def test_atlas_execution_pull_queues(self):
+        headers = self._headers()
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-docker-pull",
+                "kind": "atlas",
+                "cluster_id": "test/template",
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project"]["id"]
+        with patch(
+            "playbooks_http.resolve_inspect_cluster_id",
+            return_value="test/template",
+        ):
+            queued = self.client.post(
+                f"/api/projects/{project_id}/atlas/execution/pull",
+                json={"cluster_id": "test/template"},
+                headers=headers,
+            )
+        self.assertEqual(queued.status_code, 200, queued.text)
+        body = queued.json()
+        self.assertTrue(body.get("success"))
+        execution_id = body.get("executionId")
+        self.assertTrue(execution_id)
+        fetched = self.client.get(
+            f"/api/executions/{execution_id}?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        execution = fetched.json().get("execution") or {}
+        self.assertEqual(execution.get("playbookName"), "docker pull")
+        params = execution.get("runParams") or {}
+        self.assertEqual(params.get("argv"), ["docker", "pull"])
+        self.assertEqual(params.get("cluster_id"), "test/template")
+
+    def test_atlas_execution_pull_forbidden_without_execute(self):
+        gateway.user_service.create_user(
+            username="limited-pull",
+            password="limited1",
+            email=None,
+            roles=[],
+        )
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "name": "atlas-pull-denied",
+                "kind": "atlas",
+                "cluster_id": "dev/k8s",
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        project_id = created.json()["project"]["id"]
+        denied = self.client.post(
+            f"/api/projects/{project_id}/atlas/execution/pull",
+            json={"cluster_id": "dev/k8s"},
+            headers=self._headers(self._login("limited-pull", "limited1")),
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertIn("atlas.execute", denied.json().get("error", ""))
+
+    def test_atlas_inspect_init_queues(self):
+        headers = self._headers()
+        created = self.client.post(
+            "/api/projects",
+            json={"name": "atlas-inspect-init", "kind": "atlas"},
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertFalse(created.json()["project"].get("cluster_id"))
+        project_id = created.json()["project"]["id"]
+        queued = self.client.post(
+            f"/api/projects/{project_id}/atlas/inspect",
+            json={
+                "argv": [
+                    "init",
+                    "test/tmpl",
+                    "--template",
+                    "pve_templates",
+                ]
+            },
+            headers=headers,
+        )
+        self.assertEqual(queued.status_code, 200, queued.text)
+        body = queued.json()
+        self.assertTrue(body.get("success"))
+        self.assertEqual(body.get("status"), "queued")
+        self.assertEqual(body.get("return_code"), 0)
+        self.assertTrue(body.get("executionId"))
+        self.assertEqual(body.get("cluster_id"), "test/tmpl")
+        fetched = self.client.get(
+            f"/api/executions/{body['executionId']}?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        params = (fetched.json().get("execution") or {}).get("runParams") or {}
+        self.assertEqual(
+            params.get("argv"),
+            ["init", "test/tmpl", "--template", "pve_templates"],
+        )
 
 
 class GatewayVaultSecretsTests(unittest.TestCase):
@@ -756,7 +1190,12 @@ class GatewayVaultSecretsTests(unittest.TestCase):
         self.assertTrue(meta_file.exists())
         self.assertTrue(pass_file.exists())
         self.assertEqual(pass_file.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(pass_file.read_text(encoding="utf-8").rstrip("\n"), "s3cret")
+        blob = json.loads(pass_file.read_text(encoding="utf-8"))
+        self.assertTrue(blob.get("encryptedAtRest"))
+        self.assertNotEqual(blob.get("password"), "s3cret")
+        from vault_pass import read_vault_pass_file
+
+        self.assertEqual(read_vault_pass_file(pass_file), "s3cret")
 
     def test_delete_key_in_use_rejected(self):
         project_id, headers = self._ansible_project("vault-bound")
@@ -876,6 +1315,114 @@ class GatewayVaultSecretsTests(unittest.TestCase):
         )
         self.assertEqual(bad.status_code, 400, bad.text)
         self.assertIn("Invalid private key", bad.json().get("error", ""))
+
+        junk = self.client.post(
+            f"/api/secrets?project_id={project_id}",
+            json={
+                "name": "junkkey",
+                "type": "ssh_key",
+                "privateKey": (
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    "not-a-real-key\n"
+                    "-----END OPENSSH PRIVATE KEY-----\n"
+                ),
+                "project_id": project_id,
+            },
+            headers=headers,
+        )
+        self.assertEqual(junk.status_code, 400, junk.text)
+
+    def test_ssh_key_generate_and_export(self):
+        from ssh_key_material import generate_ed25519_openssh
+
+        project_id, headers = self._ansible_project("sec-ssh-gen")
+        generated = self.client.post(
+            f"/api/secrets?project_id={project_id}",
+            json={
+                "name": "host-ed25519",
+                "type": "ssh_key",
+                "generate": True,
+                "comment": "atlas-test",
+                "project_id": project_id,
+            },
+            headers=headers,
+        )
+        self.assertEqual(generated.status_code, 200, generated.text)
+        secret = generated.json().get("secret") or {}
+        self.assertIn("BEGIN OPENSSH PRIVATE KEY", secret.get("privateKey") or "")
+        self.assertTrue(str(secret.get("publicKey") or "").startswith("ssh-ed25519"))
+        self.assertIn("atlas-test", str(secret.get("publicKey") or ""))
+        fetched = self.client.get(
+            f"/api/secrets/host-ed25519?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        fetched_secret = fetched.json().get("secret") or {}
+        self.assertNotIn("privateKey", fetched_secret)
+        self.assertTrue(str(fetched_secret.get("publicKey") or "").startswith("ssh-ed25519"))
+        exported = self.client.get(
+            f"/api/secrets/host-ed25519/export?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
+        payload = exported.json()
+        self.assertEqual(payload.get("privateKey"), secret.get("privateKey"))
+        self.assertTrue(str(payload.get("publicKey") or "").startswith("ssh-ed25519"))
+        from executions_store import get_project_dir
+
+        disk = (
+            get_project_dir(project_id) / "secrets" / "ssh_keys" / "host-ed25519.json"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("BEGIN OPENSSH", disk)
+        self.assertIn("encryptedAtRest", disk)
+        pasted = generate_ed25519_openssh(comment="pasted")
+        created = self.client.post(
+            f"/api/secrets?project_id={project_id}",
+            json={
+                "name": "pasted-key",
+                "type": "ssh_key",
+                "privateKey": pasted["privateKey"],
+                "project_id": project_id,
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        created_secret = created.json().get("secret") or {}
+        self.assertNotIn("privateKey", created_secret)
+        self.assertTrue(str(created_secret.get("publicKey") or "").startswith("ssh-ed25519"))
+        denied = self.client.post(
+            f"/api/secrets?project_id={project_id}",
+            json={
+                "name": "both-generate-and-paste",
+                "type": "ssh_key",
+                "generate": True,
+                "privateKey": pasted["privateKey"],
+                "project_id": project_id,
+            },
+            headers=headers,
+        )
+        self.assertEqual(denied.status_code, 400, denied.text)
+        login_export = self.client.post(
+            f"/api/secrets?project_id={project_id}",
+            json={
+                "name": "login-only",
+                "type": "login_password",
+                "username": "git",
+                "password": "hunter2",
+                "project_id": project_id,
+            },
+            headers=headers,
+        )
+        self.assertEqual(login_export.status_code, 200, login_export.text)
+        login_disk = (
+            get_project_dir(project_id) / "secrets" / "ssh_keys" / "login-only.json"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("hunter2", login_disk)
+        blocked = self.client.get(
+            f"/api/secrets/login-only/export?project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(blocked.status_code, 400, blocked.text)
 
 
 class GatewayGitSourcesTests(unittest.TestCase):
@@ -1102,6 +1649,25 @@ class GatewayRolesUsersTests(unittest.TestCase):
             headers=headers,
         )
         self.assertEqual(traversal.status_code, 400, traversal.text)
+
+        found = self.client.get(
+            f"/api/roles/search?q=changed&project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(found.status_code, 200, found.text)
+        hits = found.json().get("hits") or []
+        self.assertTrue(hits, found.text)
+        self.assertEqual(hits[0].get("pack"), "web")
+        self.assertEqual(hits[0].get("role"), "web")
+        self.assertEqual(hits[0].get("path"), "tasks/main.yml")
+        self.assertIn("changed", (hits[0].get("snippet") or "").lower())
+
+        skipped = self.client.get(
+            f"/api/roles/search?q=x&project_id={project_id}",
+            headers=headers,
+        )
+        self.assertEqual(skipped.status_code, 200, skipped.text)
+        self.assertEqual(skipped.json().get("hits"), [])
 
     def test_role_handbook_ansible_repo(self):
         from executions_store import get_project_dir

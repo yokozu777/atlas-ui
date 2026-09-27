@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _TMP = tempfile.TemporaryDirectory()
 os.environ["DATA_DIR"] = _TMP.name
@@ -27,7 +28,12 @@ from clusterctl_git import (  # noqa: E402
     clone_clusterctl,
     default_dest,
     default_git_url,
+    ensure_clusterctl,
     inspect_checkout,
+    install_clusterctl,
+    latest_ref,
+    list_clusterctl_refs,
+    parse_ls_remote,
     pull_clusterctl,
 )
 
@@ -57,6 +63,16 @@ def _init_clusterctl_repo(root: Path) -> Path:
     return root
 
 
+def _tag_clusterctl_repo(root: Path) -> Path:
+    _git(root, "tag", "0.0.1")
+    cluster = root / "cluster"
+    cluster.write_text("#!/bin/sh\necho clusterctl 0.0.2-test\n", encoding="utf-8")
+    _git(root, "add", "cluster")
+    _git(root, "commit", "-m", "0.0.2")
+    _git(root, "tag", "0.0.2")
+    return root
+
+
 class ClusterctlGitUnitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -83,6 +99,22 @@ class ClusterctlGitUnitTests(unittest.TestCase):
             else:
                 os.environ[key] = value
         self.tmp.cleanup()
+
+    def test_run_git_skips_tls_verify(self):
+        captured: dict[str, object] = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs.get("env") or {}
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch("clusterctl_git.subprocess.run", fake_run):
+            gitmod._run_git(["status"])
+        cmd = captured["cmd"]
+        self.assertEqual(cmd[:3], ["git", "-c", "http.sslVerify=false"])
+        env = captured["env"]
+        self.assertIsInstance(env, dict)
+        self.assertEqual(env.get("GIT_SSL_NO_VERIFY"), "1")
 
     def test_default_url_and_dest(self):
         self.assertEqual(default_git_url(), gitmod.DEFAULT_GIT_URL)
@@ -145,6 +177,78 @@ class ClusterctlGitUnitTests(unittest.TestCase):
         self.assertFalse(payload["isRepo"])
         self.assertFalse(payload["configured"])
         self.assertIsNone(payload["error"])
+
+    def test_parse_ls_remote_orders_main_then_tags(self):
+        stdout = "\n".join(
+            [
+                "aaa\trefs/tags/0.0.1",
+                "bbb\trefs/heads/main",
+                "ccc\trefs/tags/0.0.2",
+                "ddd\trefs/heads/dev",
+                "eee\trefs/tags/0.0.2^{}",
+            ]
+        )
+        self.assertEqual(parse_ls_remote(stdout), ["main", "0.0.2", "0.0.1"])
+
+    def test_list_refs_and_install_switches_tag(self):
+        src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
+        listed = list_clusterctl_refs(url=str(src))
+        self.assertEqual(listed["refs"], ["main", "0.0.2", "0.0.1"])
+
+        dest = self.root / "checkout"
+        dest.mkdir()
+        first = install_clusterctl(url=str(src), dest=str(dest), ref="0.0.1")
+        self.assertTrue(first["ok"])
+        self.assertIn("clusterctl 0.0-test", first["version"])
+
+        second = install_clusterctl(url=str(src), dest=str(dest), ref="0.0.2")
+        self.assertTrue(second["ok"])
+        self.assertIn("clusterctl 0.0.2-test", second["version"])
+
+    def test_install_refuses_foreign_files(self):
+        src = _init_clusterctl_repo(self.root / "src")
+        dest = self.root / "occupied"
+        dest.mkdir()
+        (dest / "noise.txt").write_text("nope\n", encoding="utf-8")
+        with self.assertRaises(ClusterctlGitError) as ctx:
+            install_clusterctl(url=str(src), dest=str(dest), ref="main")
+        self.assertIn("not empty", ctx.exception.message)
+
+    def test_install_rejects_bad_ref(self):
+        with self.assertRaises(ClusterctlGitError) as ctx:
+            install_clusterctl(url="https://example.com/x.git", dest="/tmp/x", ref="../oops")
+        self.assertIn("invalid ref", ctx.exception.message)
+
+    def test_latest_ref_prefers_newest_tag(self):
+        self.assertEqual(latest_ref(["main", "0.0.2", "0.0.1"]), "0.0.2")
+        self.assertEqual(latest_ref(["main"]), "main")
+        with self.assertRaises(ClusterctlGitError):
+            latest_ref([])
+
+    def test_ensure_installs_latest_tag_when_empty(self):
+        src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
+        dest = self.root / "checkout"
+        dest.mkdir()
+        got = ensure_clusterctl(url=str(src), dest=str(dest))
+        self.assertTrue(got["ok"])
+        self.assertIn("clusterctl 0.0.2-test", got["version"])
+        self.assertTrue(got.get("fetchedAt"))
+
+    def test_ensure_skips_existing_checkout(self):
+        src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
+        dest = self.root / "checkout"
+        dest.mkdir()
+        install_clusterctl(url=str(src), dest=str(dest), ref="0.0.1")
+        got = ensure_clusterctl(url=str(src), dest=str(dest))
+        self.assertIn("clusterctl 0.0-test", got["version"])
+
+    def test_ensure_skips_occupied_dir(self):
+        dest = self.root / "occupied"
+        dest.mkdir()
+        (dest / "noise.txt").write_text("nope\n", encoding="utf-8")
+        got = ensure_clusterctl(url=str(self.root / "missing.git"), dest=str(dest))
+        self.assertFalse(got["configured"])
+        self.assertIn("not empty", got["error"] or "")
 
 
 class ClusterctlGitHttpTests(unittest.TestCase):
@@ -231,6 +335,57 @@ class ClusterctlGitHttpTests(unittest.TestCase):
         )
         self.assertEqual(refused.status_code, 400, refused.text)
         self.assertIn("not empty", refused.json()["error"])
+
+    def test_refs_and_install(self):
+        headers = self._login()
+        src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
+        dest = self.root / "from-install"
+        refs = self.client.get(
+            "/api/atlas/clusterctl/refs",
+            headers=headers,
+            params={"url": str(src)},
+        )
+        self.assertEqual(refs.status_code, 200, refs.text)
+        self.assertEqual(refs.json()["refs"], ["main", "0.0.2", "0.0.1"])
+
+        installed = self.client.post(
+            "/api/atlas/clusterctl/install",
+            headers=headers,
+            json={"url": str(src), "dest": str(dest), "ref": "0.0.1"},
+        )
+        self.assertEqual(installed.status_code, 200, installed.text)
+        self.assertIn("clusterctl 0.0-test", installed.json()["version"])
+
+        updated = self.client.post(
+            "/api/atlas/clusterctl/install",
+            headers=headers,
+            json={"url": str(src), "dest": str(dest), "ref": "0.0.2"},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertIn("clusterctl 0.0.2-test", updated.json()["version"])
+
+    def test_ensure_latest_and_fetched_at(self):
+        headers = self._login()
+        src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
+        dest = self.root / "from-ensure"
+        ensured = self.client.post(
+            "/api/atlas/clusterctl/ensure",
+            headers=headers,
+            json={"url": str(src), "dest": str(dest)},
+        )
+        self.assertEqual(ensured.status_code, 200, ensured.text)
+        body = ensured.json()
+        self.assertIn("clusterctl 0.0.2-test", body["version"])
+        self.assertTrue(body.get("fetchedAt"))
+
+        again = self.client.get(
+            "/api/atlas/clusterctl",
+            headers=headers,
+            params={"url": str(src), "dest": str(dest)},
+        )
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertTrue(again.json().get("fetchedAt"))
+        self.assertTrue(again.json().get("ok"))
 
 
 if __name__ == "__main__":

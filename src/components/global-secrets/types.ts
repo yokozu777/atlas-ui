@@ -1,4 +1,4 @@
-export type GlobalSecretType = "git_ssh_key";
+export type GlobalSecretType = "git_ssh_key" | "basic_auth";
 
 export type GlobalSecretRow = {
   id: string;
@@ -6,9 +6,19 @@ export type GlobalSecretRow = {
   type?: string;
   description?: string;
   username?: string;
+  publicKey?: string;
+  privateKey?: string;
+  fingerprint?: string;
   createdAt?: string;
   updatedAt?: string;
-  metadata?: { username?: string };
+  metadata?: {
+    username?: string;
+    registry?: string;
+    comment?: string;
+    publicKey?: string;
+    fingerprint?: string;
+    keyType?: string;
+  };
 };
 
 export function globalSecretTypeLabel(type?: string): string {
@@ -29,4 +39,20 @@ export function formatSecretDate(value?: string): string {
 
 export function isValidSecretName(name: string): boolean {
   return /^[a-zA-Z0-9_-]{3,64}$/.test(name.trim());
+}
+
+export function secretPublicKey(row?: GlobalSecretRow | null): string {
+  return (row?.publicKey || row?.metadata?.publicKey || "").trim();
+}
+
+export function secretFingerprint(row?: GlobalSecretRow | null): string {
+  return (row?.fingerprint || row?.metadata?.fingerprint || "").trim();
+}
+
+export function secretUsername(row?: GlobalSecretRow | null): string {
+  return (row?.metadata?.username || row?.username || "").trim();
+}
+
+export function isSshSecretType(type?: string): boolean {
+  return type === "git_ssh_key" || type === "ssh_key";
 }

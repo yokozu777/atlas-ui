@@ -1,3 +1,54 @@
+export function toMs(value: string | number | null | undefined): number | null {
+  if (value == null || value === "") {
+    return null;
+  }
+  if (typeof value === "number") {
+    return value < 1e12 ? value * 1000 : value;
+  }
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const n = Number(trimmed);
+    return n < 1e12 ? n * 1000 : n;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+export function formatExactTime(value: string | number | null | undefined): string {
+  const ms = toMs(value);
+  if (ms == null) {
+    return "—";
+  }
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) {
+    return "—";
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+export function formatExecutionDuration(exec: {
+  duration?: number | null;
+  startedAt?: string | number | null;
+  createdAt?: string | number | null;
+  finishedAt?: string | number | null;
+  status?: string;
+}): string {
+  if (typeof exec.duration === "number" && Number.isFinite(exec.duration)) {
+    return formatSeconds(exec.duration);
+  }
+  const start = toMs(exec.startedAt) ?? toMs(exec.createdAt);
+  const end = toMs(exec.finishedAt);
+  if (start != null && end != null && end >= start) {
+    return formatSeconds((end - start) / 1000);
+  }
+  const status = (exec.status || "").toLowerCase();
+  if (start != null && (status === "running" || status === "run")) {
+    return `${formatSeconds((Date.now() - start) / 1000)} (running)`;
+  }
+  return "—";
+}
+
 export function formatSeconds(total: number): string {
   const safe = Math.max(0, Math.round(total));
   const seconds = safe % 60;

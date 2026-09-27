@@ -64,9 +64,6 @@ export async function createLocalProject(input: {
   if (!input.name.trim()) {
     throw new Error("Project name is required");
   }
-  if (input.kind === "atlas" && !input.cluster_id?.trim()) {
-    throw new Error("atlas projects require cluster_id");
-  }
   const projects = await readAll();
   if (projects.some((p) => p.name === input.name.trim() && !p.isArchived)) {
     throw new Error("Project with this name already exists");

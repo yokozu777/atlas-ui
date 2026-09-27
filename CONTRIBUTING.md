@@ -19,7 +19,7 @@ cd atlas-ui
 ./scripts/dev-hub.sh         # http://127.0.0.1:3000
 ```
 
-First login: username `admin`. If `ATLAS_ADMIN_PASSWORD` is unset, the one-time password is in `data/auth/admin-initial.txt` (mode 0600) and must be changed after sign-in. JWT and encryption keys are written once under `data/auth/` when `JWT_SECRET_KEY` / `GLOBAL_SECRETS_ENCRYPTION_KEY` are empty.
+First login: username `admin`, password `admin`. You must change this password after sign-in. JWT and encryption keys are written once under `data/auth/` when `JWT_SECRET_KEY` / `GLOBAL_SECRETS_ENCRYPTION_KEY` are empty.
 
 Node is picked up from `~/.local/node/bin` if `pnpm` is not on PATH. Stop hub: `./scripts/hub-down.sh`.
 
@@ -59,7 +59,7 @@ pnpm build
 
 ## Smoke
 
-1. Open `/` — it redirects to **Projects**. Log in if hub is running (`admin` + password from `data/auth/admin-initial.txt` or `ATLAS_ADMIN_PASSWORD`).
+1. Open `/` — it redirects to **Projects**. Log in if hub is running (`admin` / `admin`, then change the password).
 2. **New project** → `ansible`: Open → **Secrets** → **Hosts** (inventory, add host, bind SSH, Import/Export ZIP) → **Settings → Sources** (Test, Sync, autosync) → **Playbooks** (Run, SSE). Optional: **Schedule**, **Vaults**, **Users**.
 3. **New project** → `atlas` with cluster id (e.g. `dev/k8s`): Open → **Overview** → **Hosts / Vars / Logs**. **Run** queues on the worker when hub is up (Advanced: executor local/docker, dry-run, root-ssh).
    - Hub: Overview/Vars/Hosts/Logs use `POST /atlas/inspect` on the API host (`ATLAS_CLUSTER_ROOT` or Settings Clone dest + inventory leaf). Vars save is **read-only on hub**.

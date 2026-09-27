@@ -86,7 +86,7 @@ export function LogPane({
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [atBottom, setAtBottom] = useState(true);
   const follow = atBottom;
-  const [wrap, setWrap] = useState(false);
+  const [wrap, setWrap] = useState(true);
   const [matchCursor, setMatchCursor] = useState(0);
   const [errorCursor, setErrorCursor] = useState(-1);
   const [highlightedId, setHighlightedId] = useState<number | null>(null);

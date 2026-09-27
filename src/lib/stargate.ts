@@ -180,6 +180,25 @@ export async function loginStargate(username: string, password: string) {
   return data;
 }
 
+export type MeResponse = {
+  username?: string;
+  email?: string | null;
+  hasAvatar?: boolean;
+  remote?: boolean;
+  must_change_password?: boolean;
+  isAdmin?: boolean;
+  permissions?: string[];
+  user?: {
+    id?: string;
+    username?: string;
+    email?: string | null;
+    hasAvatar?: boolean;
+    roles?: string[];
+    permissions?: string[];
+    isAdmin?: boolean;
+  };
+};
+
 export async function changePasswordStargate(
   oldPassword: string,
   newPassword: string,
@@ -203,7 +222,7 @@ export async function logoutStargate() {
   await fetch("/api/auth/logout", { method: "POST" });
 }
 
-export async function fetchMe() {
+export async function fetchMe(): Promise<MeResponse | null> {
   const res = await fetch("/api/auth/me", { cache: "no-store" });
   if (res.status === 401) {
     const ok = await refreshStargateSession();
@@ -212,20 +231,47 @@ export async function fetchMe() {
       if (!retry.ok) {
         return null;
       }
-      return retry.json() as Promise<{
-        username?: string;
-        remote?: boolean;
-        must_change_password?: boolean;
-      }>;
+      return retry.json() as Promise<MeResponse>;
     }
     return null;
   }
   if (!res.ok) {
     return null;
   }
-  return res.json() as Promise<{
-    username?: string;
-    remote?: boolean;
-    must_change_password?: boolean;
-  }>;
+  return res.json() as Promise<MeResponse>;
+}
+
+export async function updateProfileStargate(email: string) {
+  const res = await fetch("/api/auth/profile", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const data = (await res.json()) as MeResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || "profile update failed");
+  }
+  return data;
+}
+
+export async function uploadAvatarStargate(blob: Blob) {
+  const res = await fetch("/api/auth/avatar", {
+    method: "PUT",
+    headers: { "Content-Type": blob.type || "image/png" },
+    body: blob,
+  });
+  const data = (await res.json()) as { error?: string; hasAvatar?: boolean };
+  if (!res.ok) {
+    throw new Error(data.error || "avatar upload failed");
+  }
+  return data;
+}
+
+export async function deleteAvatarStargate() {
+  const res = await fetch("/api/auth/avatar", { method: "DELETE" });
+  const data = (await res.json()) as { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || "avatar delete failed");
+  }
+  return data;
 }

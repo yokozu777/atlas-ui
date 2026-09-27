@@ -72,8 +72,9 @@ class HostStatusTests(unittest.TestCase):
         self.assertEqual(
             res.json()["hosts"]["192.168.1.130"]["status"], "online"
         )
+        self.assertTrue(res.json()["hosts"]["192.168.1.130"].get("last_checked_at"))
 
-    def test_expired_status_is_unknown(self):
+    def test_expired_status_keeps_last_check(self):
         project_id, _headers = self._ansible_project("host-status-expired")
         past = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
         past = past.replace("+00:00", "Z")
@@ -94,4 +95,5 @@ class HostStatusTests(unittest.TestCase):
             encoding="utf-8",
         )
         got = get_host_statuses(project_id)
-        self.assertEqual(got["web1"]["status"], "unknown")
+        self.assertEqual(got["web1"]["status"], "online")
+        self.assertEqual(got["web1"]["last_checked_at"], past)

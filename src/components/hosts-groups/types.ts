@@ -5,4 +5,4 @@ export type GroupInfo = { hosts?: string[]; children?: string[] };
 export type HostStatus = { status?: string; last_checked_at?: string };
 export type VarsFile = { name: string; path: string; stem: string };
 
-export type HostsGroupsTab = "hosts" | "groups";
+export type HostsGroupsTab = "hosts" | "fleet" | "groups" | "files" | "vars";

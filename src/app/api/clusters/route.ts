@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { parseJobJson } from "@/lib/job-output";
+import { requireHubApiSession } from "@/server/hub-api-session";
 import { readJobLog, startJob, waitForJob } from "@/server/jobs";
 
 export type ClusterListRow = {
@@ -12,6 +13,10 @@ export type ClusterListRow = {
 };
 
 export async function GET() {
+  const denied = await requireHubApiSession();
+  if (denied) {
+    return denied;
+  }
   try {
     const job = await startJob({ argv: ["list", "--json"] });
     const done = await waitForJob(job);

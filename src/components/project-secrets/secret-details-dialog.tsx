@@ -8,6 +8,7 @@ import {
   secretTypeLabel,
   type SecretDetails,
 } from "@/components/project-secrets/types";
+import { SecretKeyDownloadMenu } from "@/components/secret-key-download";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -81,6 +82,7 @@ export function SecretDetailsDialog({
         ],
       ]
     : [];
+  const publicKey = (details?.publicKey || "").trim();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -88,7 +90,8 @@ export function SecretDetailsDialog({
         <DialogHeader>
           <DialogTitle>Secret details</DialogTitle>
           <DialogDescription>
-            Stored values are never displayed after save.
+            Private key material is hidden here. Download public or private keys
+            from this dialog or the Secrets page.
           </DialogDescription>
         </DialogHeader>
         <dl className="space-y-3 text-sm">
@@ -98,8 +101,23 @@ export function SecretDetailsDialog({
               <dd className="whitespace-pre-wrap font-medium">{value}</dd>
             </div>
           ))}
+          {details?.type === "ssh_key" && publicKey ? (
+            <div>
+              <dt className="text-xs text-muted-foreground">Public key</dt>
+              <dd className="mt-1 max-h-32 overflow-auto rounded-md border bg-black/50 p-2 font-mono text-xs whitespace-pre-wrap break-all">
+                {publicKey}
+              </dd>
+            </div>
+          ) : null}
         </dl>
         <DialogFooter>
+          {details?.type === "ssh_key" && name ? (
+            <SecretKeyDownloadMenu
+              kind="project"
+              projectId={projectId}
+              name={name}
+            />
+          ) : null}
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Close
           </Button>

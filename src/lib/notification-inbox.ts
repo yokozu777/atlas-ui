@@ -3,6 +3,8 @@
 import { isValidElement, type ReactNode } from "react";
 import { toast, type ToastT, type ToastToDismiss } from "sonner";
 
+import { executionLogHref } from "@/lib/project-href";
+
 export type NotificationKind = "error" | "success" | "warning" | "info" | "default";
 
 export type InboxNotification = {
@@ -12,6 +14,7 @@ export type InboxNotification = {
   description: string;
   createdAt: number;
   read: boolean;
+  href?: string;
 };
 
 const MAX_ITEMS = 50;
@@ -20,6 +23,7 @@ const empty: InboxNotification[] = [];
 let items: InboxNotification[] = empty;
 const forgottenIds = new Set<string>();
 const listeners = new Set<() => void>();
+const hrefByToastId = new Map<string, string>();
 
 function emit() {
   for (const listener of listeners) {
@@ -76,6 +80,66 @@ function kindFromType(type: ToastT["type"]): NotificationKind | null {
   return "default";
 }
 
+function hrefFromToast(toastItem: ToastT): string | undefined {
+  const mapped = hrefByToastId.get(String(toastItem.id));
+  if (mapped) {
+    return mapped;
+  }
+  const data = (toastItem as ToastT & { data?: unknown }).data;
+  if (data && typeof data === "object" && "href" in data) {
+    const href = (data as { href?: unknown }).href;
+    if (typeof href === "string" && href.trim()) {
+      return href.trim();
+    }
+  }
+  return undefined;
+}
+
+export function registerNotificationHref(id: string | number, href: string) {
+  const trimmed = href.trim();
+  if (!trimmed) {
+    return;
+  }
+  hrefByToastId.set(String(id), trimmed);
+}
+
+export function getNotificationHref(id: string | number): string | undefined {
+  return hrefByToastId.get(String(id));
+}
+
+export function notify(
+  kind: "success" | "error" | "info" | "warning",
+  message: string,
+  options: { href: string; description?: string },
+) {
+  const href = options.href.trim();
+  const id = crypto.randomUUID();
+  if (href) {
+    registerNotificationHref(id, href);
+  }
+  toast[kind](message, {
+    id,
+    description: options.description,
+    className: href ? "cn-toast cn-toast-link" : "cn-toast",
+    testId: href ? id : undefined,
+  });
+  ingestSonnerHistory();
+  return id;
+}
+
+export function notifyExecution(
+  kind: "success" | "error" | "info" | "warning",
+  message: string,
+  projectId: string,
+  executionId: string,
+  description?: string,
+) {
+  return notify(kind, message, {
+    href: executionLogHref(projectId, executionId),
+    description,
+  });
+}
+
 function ingestToast(raw: ToastT | ToastToDismiss) {
   if ("dismiss" in raw && raw.dismiss && !("title" in raw)) {
     return;
@@ -97,11 +161,13 @@ function ingestToast(raw: ToastT | ToastToDismiss) {
   const existing = items.find((item) => item.id === id);
   const nextTitle = title || description;
   const nextDescription = title ? description : "";
+  const nextHref = hrefFromToast(toastItem);
   if (existing) {
     const changed =
       existing.kind !== kind ||
       existing.title !== nextTitle ||
-      existing.description !== nextDescription;
+      existing.description !== nextDescription ||
+      existing.href !== (nextHref ?? existing.href);
     if (!changed) {
       return;
     }
@@ -112,6 +178,7 @@ function ingestToast(raw: ToastT | ToastToDismiss) {
             kind,
             title: nextTitle,
             description: nextDescription,
+            href: nextHref ?? item.href,
             read: false,
           }
         : item
@@ -127,6 +194,7 @@ function ingestToast(raw: ToastT | ToastToDismiss) {
       description: nextDescription,
       createdAt: Date.now(),
       read: false,
+      href: nextHref,
     },
     ...items,
   ].slice(0, MAX_ITEMS);

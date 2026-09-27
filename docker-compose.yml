@@ -3,10 +3,14 @@
 #
 # .env holds host paths only (Linux /home, macOS /Users, Windows C:\Users\…).
 # Compose bind-mounts them at POSIX targets inside hub/worker:
-#   /atlas/clusterctl  /atlas/clusters  /atlas/workspace  /atlas/ssh/id_rsa
+#   /atlas/clusterctl  /atlas/clusters  /atlas/workspace
+# clusterctl SSH comes from System / Secrets Manager (injected as SSH_KEY at
+# claim). Do not set SSH_KEY in .env.
 # clusterctl docker executor talks to the host daemon via /var/run/docker.sock
 # and remaps those container paths to the daemon Source (inspect or *_HOST).
+# Hub mounts the same socket to check whether the executor image is already local.
 # Unset ATLAS_CLUSTER_ROOT → ${PWD}/atlas-clusterctl on the host.
+# Empty dest: hub clones the latest clusterctl tag on first start.
 #
 # Do not set CLUSTER_EXECUTOR_FORCE_LOCAL on hub or worker — that flag is only
 # for the krang/executor container clusterctl starts.
@@ -51,12 +55,25 @@ services:
       - *atlas-clusterctl-bind
       - *atlas-clusters-bind
       - *atlas-workspace-bind
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       TZ: Europe/Berlin
       DATA_DIR: /app/data
       PORT: 8000
-      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
+      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://gitea.mxhash.com/root/atlas-clusterctl.git}
       <<: *atlas-path-env
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
     restart: unless-stopped
 
   ui:
@@ -70,10 +87,11 @@ services:
     environment:
       TZ: Europe/Berlin
       HUB_API_URL: http://hub:8000
-      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
+      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://gitea.mxhash.com/root/atlas-clusterctl.git}
       ATLAS_CLUSTER_ROOT: /atlas/clusterctl
     depends_on:
-      - hub
+      hub:
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -88,19 +106,15 @@ services:
       - *atlas-clusters-bind
       - *atlas-workspace-bind
       - /var/run/docker.sock:/var/run/docker.sock
-      - type: bind
-        source: ${SSH_KEY}
-        target: /atlas/ssh/id_rsa
-        read_only: true
     environment:
       TZ: Europe/Berlin
       WORKER_SERVER_URL: ${WORKER_SERVER_URL:-http://hub:8000}
       DATA_DIR: /app/data
       WORKER_TOKEN_FILE: /app/data/worker.token
       ATLAS_WORKER_RUNTIME: docker
-      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
-      SSH_KEY: /atlas/ssh/id_rsa
+      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://gitea.mxhash.com/root/atlas-clusterctl.git}
       <<: *atlas-path-env
     depends_on:
-      - hub
+      hub:
+        condition: service_healthy
     restart: unless-stopped

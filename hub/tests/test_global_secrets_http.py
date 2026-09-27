@@ -26,6 +26,9 @@ class GlobalSecretsHttpTests(unittest.TestCase):
 
     def setUp(self):
         secret_encryption._encryption_instance = None
+        from clusterctl_ssh import save_clusterctl_ssh_secret_id
+
+        save_clusterctl_ssh_secret_id(Path(os.environ["DATA_DIR"]), None)
 
     def _login(self):
         res = self.client.post(
@@ -155,6 +158,140 @@ class GlobalSecretsHttpTests(unittest.TestCase):
         vault_id = vault.json()["secret"]["id"]
         self.client.delete(f"/api/global/secrets/{git_id}", headers=headers)
         self.client.delete(f"/api/global/secrets/{vault_id}", headers=headers)
+
+    def test_create_basic_auth(self):
+        headers = self._login()
+        created = self.client.post(
+            "/api/global/secrets",
+            headers=headers,
+            json={
+                "name": "registry-bot-auth",
+                "type": "basic_auth",
+                "username": "bot",
+                "password": "s3cret-pass",
+                "metadata": {"registry": "registry.example.com"},
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        secret = created.json()["secret"]
+        self.assertNotIn("password", secret)
+        self.assertEqual(secret["type"], "basic_auth")
+        self.assertEqual((secret.get("metadata") or {}).get("username"), "bot")
+        listed = self.client.get("/api/global/secrets", headers=headers)
+        names = [row["name"] for row in listed.json().get("secrets") or []]
+        self.assertIn("registry-bot-auth", names)
+        self.client.delete(f"/api/global/secrets/{secret['id']}", headers=headers)
+
+    def test_generate_ssh_key(self):
+        headers = self._login()
+        created = self.client.post(
+            "/api/global/secrets",
+            headers=headers,
+            json={
+                "name": "generated-ed25519",
+                "type": "git_ssh_key",
+                "generate": True,
+                "metadata": {"username": "git", "comment": "atlas-test"},
+                "useAsClusterctlSsh": True,
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        secret = created.json()["secret"]
+        self.assertIn("BEGIN OPENSSH PRIVATE KEY", secret.get("privateKey") or "")
+        public = secret.get("publicKey") or (secret.get("metadata") or {}).get(
+            "publicKey"
+        )
+        self.assertTrue(str(public).startswith("ssh-ed25519"), public)
+        self.assertIn("atlas-test", str(public))
+        from global_secrets_manager import GlobalSecretsManager
+
+        full = GlobalSecretsManager(gateway.DATA_DIR).get_secret(
+            secret["id"], include_material=True
+        )
+        self.assertEqual(secret["privateKey"], full["privateKey"])
+        fetched = self.client.get(
+            f"/api/global/secrets/{secret['id']}", headers=headers
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertNotIn("privateKey", fetched.json().get("secret") or {})
+        listed = self.client.get("/api/global/secrets", headers=headers)
+        listed_row = next(
+            (
+                row
+                for row in listed.json().get("secrets") or []
+                if row.get("id") == secret["id"]
+            ),
+            {},
+        )
+        self.assertNotIn("privateKey", listed_row)
+        rotated = self.client.put(
+            f"/api/global/secrets/{secret['id']}",
+            headers=headers,
+            json={"generate": True},
+        )
+        self.assertEqual(rotated.status_code, 200, rotated.text)
+        rotated_secret = rotated.json()["secret"]
+        self.assertIn(
+            "BEGIN OPENSSH PRIVATE KEY", rotated_secret.get("privateKey") or ""
+        )
+        self.assertNotEqual(rotated_secret["privateKey"], secret["privateKey"])
+        got = self.client.get("/api/global/clusterctl-ssh", headers=headers)
+        self.assertEqual(got.json().get("sshSecretId"), secret["id"])
+        denied = self.client.post(
+            "/api/global/secrets",
+            headers=headers,
+            json={
+                "name": "generated-with-paste",
+                "type": "git_ssh_key",
+                "generate": True,
+                "privateKey": (
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    "x\n"
+                    "-----END OPENSSH PRIVATE KEY-----"
+                ),
+            },
+        )
+        self.assertEqual(denied.status_code, 400, denied.text)
+        self.client.delete(f"/api/global/secrets/{secret['id']}", headers=headers)
+        cleared = self.client.get("/api/global/clusterctl-ssh", headers=headers)
+        self.assertIsNone(cleared.json().get("sshSecretId"))
+
+    def test_export_ssh_key(self):
+        headers = self._login()
+        created = self.client.post(
+            "/api/global/secrets",
+            headers=headers,
+            json={
+                "name": "export-ed25519",
+                "type": "git_ssh_key",
+                "generate": True,
+                "metadata": {"username": "git", "comment": "export-test"},
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        secret = created.json()["secret"]
+        exported = self.client.get(
+            f"/api/global/secrets/{secret['id']}/export",
+            headers=headers,
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
+        payload = exported.json()
+        self.assertEqual(payload.get("privateKey"), secret.get("privateKey"))
+        self.assertTrue(str(payload.get("publicKey") or "").startswith("ssh-ed25519"))
+        fetched = self.client.get(
+            f"/api/global/secrets/{secret['id']}", headers=headers
+        )
+        self.assertNotIn("privateKey", fetched.json().get("secret") or {})
+        self.client.delete(f"/api/global/secrets/{secret['id']}", headers=headers)
+
+    def test_generate_ed25519_roundtrip(self):
+        from ssh_key_material import derive_openssh_public, generate_ed25519_openssh
+
+        generated = generate_ed25519_openssh(comment="roundtrip")
+        self.assertIn("BEGIN OPENSSH PRIVATE KEY", generated["privateKey"])
+        derived = derive_openssh_public(generated["privateKey"])
+        self.assertTrue(derived["publicKey"].startswith("ssh-ed25519"))
+        self.assertEqual(derived["fingerprint"], generated["fingerprint"])
 
 
 if __name__ == "__main__":

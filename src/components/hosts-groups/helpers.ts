@@ -38,10 +38,19 @@ export function invertHostGroups(
 
 export function hostStatusKind(status?: string): StatusKind {
   const value = (status || "unknown").toLowerCase();
-  if (["ok", "success", "reachable", "pong"].includes(value)) return "ok";
-  if (["fail", "failed", "unreachable", "error"].includes(value)) return "fail";
-  if (value === "running") return "running";
+  if (["ok", "success", "reachable", "pong", "online"].includes(value)) {
+    return "ok";
+  }
+  if (["fail", "failed", "unreachable", "error", "offline"].includes(value)) {
+    return "fail";
+  }
+  if (value === "running" || value === "checking") return "running";
   return "unknown";
+}
+
+export function hostStatusLabel(status?: string): string {
+  const value = (status || "unknown").trim();
+  return (value || "unknown").toUpperCase();
 }
 
 export function downloadText(filename: string, content: string) {

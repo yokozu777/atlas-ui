@@ -60,6 +60,44 @@ def _normalize_role_ids(roles: Any, role_service: Any, *, coerce_objects: bool) 
     return role_ids
 
 
+def _admin_role_id(role_service: Any) -> Optional[str]:
+    role = role_service.get_role_by_name("admin") if role_service else None
+    return role.id if role else None
+
+
+def _admin_user_ids(user_service: Any, admin_role_id: str) -> list[str]:
+    return [
+        user.id
+        for user in user_service.get_all_users()
+        if admin_role_id in (user.roles or [])
+    ]
+
+
+def _ensure_not_last_admin(
+    user_service: Any,
+    role_service: Any,
+    user_id: str,
+    *,
+    new_role_ids: Optional[list[str]] = None,
+    deleting: bool = False,
+) -> None:
+    admin_role_id = _admin_role_id(role_service)
+    if not admin_role_id:
+        return
+    user = user_service.get_user_by_id(user_id)
+    if not user or admin_role_id not in (user.roles or []):
+        return
+    others = [
+        uid for uid in _admin_user_ids(user_service, admin_role_id) if uid != user_id
+    ]
+    if others:
+        return
+    if deleting:
+        raise UsersHttpError(400, "Cannot delete the last admin user")
+    if new_role_ids is not None and admin_role_id not in new_role_ids:
+        raise UsersHttpError(400, "Cannot remove the last admin role")
+
+
 def list_users(user_service: Any, role_service: Any) -> dict[str, Any]:
     users_data = [_user_payload(user, role_service) for user in user_service.get_all_users()]
     return {"success": True, "users": users_data}
@@ -139,7 +177,10 @@ def update_user(
         if not ok:
             raise UsersHttpError(400, err or "Invalid email")
     if roles is not None:
-        _normalize_role_ids(roles, role_service, coerce_objects=False)
+        role_ids = _normalize_role_ids(roles, role_service, coerce_objects=False)
+        _ensure_not_last_admin(
+            user_service, role_service, user_id, new_role_ids=role_ids
+        )
 
     try:
         user = user_service.update_user(
@@ -156,9 +197,17 @@ def update_user(
     return {"success": True, "user": _user_payload(user, role_service)}
 
 
-def delete_user(user_service: Any, user_id: str, current_user_id: Optional[str]) -> dict[str, Any]:
+def delete_user(
+    user_service: Any,
+    user_id: str,
+    current_user_id: Optional[str],
+    role_service: Any = None,
+) -> dict[str, Any]:
     if user_id == current_user_id:
         raise UsersHttpError(400, "You cannot delete your own account")
+    _ensure_not_last_admin(
+        user_service, role_service, user_id, deleting=True
+    )
     if not user_service.delete_user(user_id):
         raise UsersHttpError(404, "User not found")
     return {"success": True, "message": "User deleted successfully"}

@@ -16,6 +16,7 @@ import yaml
 
 from executions_store import get_project_dir
 from project_kind import ensure_ansible_infra_layout
+from project_secret_crypto import ProjectSecretError, read_project_secret
 
 logger = logging.getLogger(__name__)
 
@@ -897,7 +898,10 @@ def set_host_connection_secret(
         secret_path = _secret_file(project_id, secret_name)
         if not secret_path.exists():
             raise InventoryHttpError(404, f"Secret {secret_name} not found")
-        secret_data = json.loads(secret_path.read_text(encoding="utf-8"))
+        try:
+            secret_data = read_project_secret(secret_path)
+        except ProjectSecretError as exc:
+            raise InventoryHttpError(400, str(exc)) from exc
         secret_username = str(secret_data.get("username") or "").strip()
         if secret_username:
             ansible_user = secret_username

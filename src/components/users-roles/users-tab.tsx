@@ -25,6 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { stargateJson } from "@/lib/stargate";
+import { useCan } from "@/lib/authz";
 
 export function UsersTab({
   users,
@@ -39,6 +40,7 @@ export function UsersTab({
   meUsername?: string;
   onReload: () => Promise<void> | void;
 }) {
+  const can = useCan();
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [addOpen, setAddOpen] = useState(false);
@@ -94,10 +96,12 @@ export function UsersTab({
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <Plus />
-          Add User
-        </Button>
+        {can("users.create") ? (
+          <Button size="sm" onClick={() => setAddOpen(true)}>
+            <Plus />
+            Add User
+          </Button>
+        ) : null}
       </div>
       {filtered.length === 0 ? (
         <EmptyState
@@ -178,6 +182,7 @@ export function UsersTab({
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
+                    {can("users.update") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -186,6 +191,8 @@ export function UsersTab({
                       <Pencil />
                       Edit
                     </Button>
+                    ) : null}
+                    {can("users.delete") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -196,6 +203,7 @@ export function UsersTab({
                       <Trash2 />
                       Delete
                     </Button>
+                    ) : null}
                   </div>
                 </TableCell>
               </TableRow>

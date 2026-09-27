@@ -11,21 +11,23 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { projectHref, projectIdFromPath } from "@/lib/project-href";
+import type { ProjectKind } from "@/lib/project-types";
 
-const crumbLink = "transition-colors hover:text-foreground";
+const crumbLink = "min-w-0 truncate transition-colors hover:text-foreground";
 
 const PROJECT_LABELS: Record<string, string> = {
   vars: "Vars",
   hosts: "Hosts & Groups",
   inventory: "Inventory",
   "ansible-config": "Ansible Config",
-  "cluster-yaml": "Cluster definition",
+  "cluster-yaml": "Cluster setup",
+  map: "Map",
   limits: "Hosts",
   logs: "Logs",
   run: "Run",
   repos: "Repos",
   config: "Config",
-  workspace: "Workspace",
+  workspace: "Runtime",
   playbooks: "Playbooks",
   runs: "Runs",
   executions: "Executions",
@@ -37,9 +39,26 @@ const PROJECT_LABELS: Record<string, string> = {
   settings: "Project Settings",
   dashboard: "Dashboard",
   preview: "Preview",
+  init: "New cluster",
+  clusters: "Clusters",
 };
 
-export function AppBreadcrumbs() {
+function projectPageLabel(first: string, kind: ProjectKind | null): string | undefined {
+  if (kind === "atlas") {
+    if (first === "hosts") return "Inventory";
+    if (first === "settings") return "Project Settings";
+    if (first === "cluster-yaml") return "Cluster setup";
+  }
+  return PROJECT_LABELS[first];
+}
+
+function projectRootLabel(kind: ProjectKind | null): string {
+  if (kind === "atlas") return "Overview";
+  if (kind === "ansible") return "Dashboard";
+  return "Project";
+}
+
+export function AppBreadcrumbs({ kind }: { kind: ProjectKind | null }) {
   const pathname = usePathname();
   const projectId = projectIdFromPath(pathname);
 
@@ -58,7 +77,7 @@ export function AppBreadcrumbs() {
   if (pathname === "/projects/new") {
     return (
       <Breadcrumb>
-        <BreadcrumbList>
+        <BreadcrumbList className="flex-nowrap overflow-hidden">
           <BreadcrumbItem>
             <Link href="/projects" className={crumbLink}>
               Projects
@@ -76,25 +95,27 @@ export function AppBreadcrumbs() {
   if (!projectId) {
     const leaf =
       pathname === "/init"
-        ? "Init"
+        ? "New cluster"
         : pathname === "/setup"
           ? "Setup"
           : pathname === "/settings"
-            ? "Settings"
+            ? "Console"
             : pathname === "/workers"
               ? "Workers"
               : pathname === "/users"
-                ? "Users & roles"
+                ? "Users"
                 : pathname === "/server-logs"
                   ? "Server logs"
                   : pathname === "/secrets"
                     ? "Secrets Manager"
                     : pathname === "/docs"
                       ? "Docs"
-                      : "Projects";
+                      : pathname === "/about"
+                        ? "About"
+                        : "Projects";
     return (
       <Breadcrumb>
-        <BreadcrumbList>
+        <BreadcrumbList className="flex-nowrap overflow-hidden">
           <BreadcrumbItem>
             <Link href="/projects" className={crumbLink}>
               Projects
@@ -115,34 +136,20 @@ export function AppBreadcrumbs() {
 
   const rest = pathname.slice(projectHref(projectId).length).replace(/^\//, "");
   const first = rest.split("/")[0] ?? "";
-  const page = PROJECT_LABELS[first];
+  const page = projectPageLabel(first, kind) ?? projectRootLabel(kind);
 
   return (
     <Breadcrumb>
-      <BreadcrumbList>
+      <BreadcrumbList className="flex-nowrap overflow-hidden">
         <BreadcrumbItem>
           <Link href="/projects" className={crumbLink}>
             Projects
           </Link>
         </BreadcrumbItem>
         <BreadcrumbSeparator />
-        <BreadcrumbItem>
-          {page ? (
-            <Link href={projectHref(projectId)} className={crumbLink}>
-              Project
-            </Link>
-          ) : (
-            <BreadcrumbPage>Project</BreadcrumbPage>
-          )}
+        <BreadcrumbItem className="min-w-0">
+          <BreadcrumbPage className="truncate">{page}</BreadcrumbPage>
         </BreadcrumbItem>
-        {page ? (
-          <>
-            <BreadcrumbSeparator />
-            <BreadcrumbItem>
-              <BreadcrumbPage>{page}</BreadcrumbPage>
-            </BreadcrumbItem>
-          </>
-        ) : null}
       </BreadcrumbList>
     </Breadcrumb>
   );

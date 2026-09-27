@@ -14,10 +14,13 @@ export default async function ProjectRunPage({
   if (project.kind === "ansible") {
     redirect(projectHref(projectId, "/runs"));
   }
+  if (stargateApiUrl()) {
+    redirect(`${projectHref(project.id)}?run=1`);
+  }
   return (
     <AtlasSessionRunPage
       projectId={project.id}
-      hub={Boolean(stargateApiUrl())}
+      hub={false}
     />
   );
 }

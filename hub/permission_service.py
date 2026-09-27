@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 class AccessControlService:
     """Сервис для проверки прав доступа"""
     
-    def __init__(self, data_dir: Path):
+    def __init__(
+        self,
+        data_dir: Path,
+        user_service: Optional[UserService] = None,
+        role_service: Optional[RoleService] = None,
+        permission_service: Optional[PermissionServiceClass] = None,
+    ):
         """
         Инициализация сервиса
         
@@ -27,9 +33,9 @@ class AccessControlService:
             data_dir: Директория для хранения данных
         """
         self.data_dir = data_dir
-        self.user_service = UserService(data_dir)
-        self.role_service = RoleService(data_dir)
-        self.permission_service = PermissionServiceClass(data_dir)
+        self.user_service = user_service or UserService(data_dir)
+        self.role_service = role_service or RoleService(data_dir)
+        self.permission_service = permission_service or PermissionServiceClass(data_dir)
     
     def get_user_permissions(self, user_id: str) -> Set[str]:
         """

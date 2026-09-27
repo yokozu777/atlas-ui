@@ -4,18 +4,19 @@
 """
 import logging
 import os
-import secrets
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin"
 
 
 def seed_default_user(user_service, role_service, data_dir: Path) -> bool:
     """
     Create the first admin user when the auth store is empty.
-    ATLAS_ADMIN_PASSWORD skips the forced password change (CI / explicit .env).
-    Otherwise a one-time password is written to data/auth/admin-initial.txt.
+    Default credentials are admin / admin with must_change_password=True.
+    ATLAS_ADMIN_PASSWORD overrides the password and skips the forced change (CI).
     """
     try:
         users = user_service.get_all_users()
@@ -26,20 +27,11 @@ def seed_default_user(user_service, role_service, data_dir: Path) -> bool:
         password = os.environ.get("ATLAS_ADMIN_PASSWORD", "").strip()
         must_change = False
         if not password:
-            password = secrets.token_urlsafe(16)
+            password = DEFAULT_ADMIN_PASSWORD
             must_change = True
-            auth_dir = Path(data_dir) / "auth"
-            auth_dir.mkdir(parents=True, exist_ok=True)
-            initial = auth_dir / "admin-initial.txt"
-            initial.write_text(
-                f"username=admin\npassword={password}\n",
-                encoding="utf-8",
-            )
-            os.chmod(initial, 0o600)
-            logger.warning("Initial admin password written to %s (change it after first login)", initial)
 
         admin_user = user_service.create_user(
-            username="admin",
+            username=DEFAULT_ADMIN_USERNAME,
             password=password,
             email=None,
             roles=[],
@@ -60,6 +52,17 @@ def seed_default_user(user_service, role_service, data_dir: Path) -> bool:
     except Exception as e:
         logger.error(f"Error creating default user: {e}", exc_info=True)
         return False
+
+
+def align_bootstrap_admin(user_service, data_dir: Path) -> None:
+    """Drop leftover admin-initial.txt. Never rewrite the admin password."""
+    initial = Path(data_dir) / "auth" / "admin-initial.txt"
+    if initial.is_file():
+        try:
+            initial.unlink()
+            logger.info("Removed leftover %s", initial)
+        except OSError as exc:
+            logger.warning("Could not remove leftover %s: %s", initial, exc)
 
 
 def seed_default_roles(role_service, permission_service, data_dir: Path, user_service=None) -> bool:

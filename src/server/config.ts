@@ -4,6 +4,7 @@ import path from "node:path";
 
 export type AtlasUiConfig = {
   clusterctlRoot: string;
+  clusterctlFetchedAt?: string;
 };
 
 const CONFIG_DIR_NAME = "atlas-ui";
@@ -24,7 +25,10 @@ export async function loadConfig(): Promise<AtlasUiConfig | null> {
     const parsed = JSON.parse(raw) as Partial<AtlasUiConfig>;
     const clusterctlRoot = parsed.clusterctlRoot?.trim();
     if (clusterctlRoot) {
-      return { clusterctlRoot };
+      return {
+        clusterctlRoot,
+        clusterctlFetchedAt: parsed.clusterctlFetchedAt?.trim() || undefined,
+      };
     }
   } catch {
     // missing or invalid — fall through to env
@@ -38,9 +42,27 @@ export async function loadConfig(): Promise<AtlasUiConfig | null> {
 export async function saveConfig(config: AtlasUiConfig): Promise<void> {
   const file = configFilePath();
   await mkdir(/* turbopackIgnore: true */ path.dirname(file), { recursive: true });
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(
+      await readFile(/* turbopackIgnore: true */ file, "utf8"),
+    ) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      existing = parsed;
+    }
+  } catch {
+    existing = {};
+  }
+  const payload: Record<string, unknown> = {
+    ...existing,
+    clusterctlRoot: config.clusterctlRoot,
+  };
+  if (config.clusterctlFetchedAt) {
+    payload.clusterctlFetchedAt = config.clusterctlFetchedAt;
+  }
   await writeFile(
     /* turbopackIgnore: true */ file,
-    JSON.stringify({ clusterctlRoot: config.clusterctlRoot }, null, 2) + "\n",
-    "utf8",
+    JSON.stringify(payload, null, 2) + "\n",
   );
 }
+

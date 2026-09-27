@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -15,13 +16,31 @@ import {
   fetchAtlasProjectClusters,
   type ClusterRow,
 } from "@/lib/api";
+import { isCascadeDefaultCluster } from "@/lib/cluster-groups";
+import { writeAtlasClusterBrowserCookie } from "@/lib/nav-cookies";
+import { pushRecentClusterId, pushRecentContext } from "@/lib/recent-context";
 
 export const ATLAS_CLUSTER_STORAGE_PREFIX = "atlas-ui:atlas-cluster:";
+export const ATLAS_CLUSTERS_CHANGED_EVENT = "atlas-ui:clusters-changed";
+
+export function notifyAtlasClustersChanged(clusterId?: string | null) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const id = clusterId?.trim() || null;
+  window.dispatchEvent(
+    new CustomEvent(ATLAS_CLUSTERS_CHANGED_EVENT, {
+      detail: { clusterId: id },
+    }),
+  );
+}
 
 type AtlasClusterSelectionValue = {
   projectId: string | null;
   clusterId: string | null;
   clusters: ClusterRow[];
+  clustersLoading: boolean;
+  clustersError: string | null;
   setClusterId: (id: string) => void;
 };
 
@@ -49,6 +68,24 @@ function writeStored(projectId: string, clusterId: string) {
   } catch {
     /* quota / private mode */
   }
+  writeAtlasClusterBrowserCookie(projectId, clusterId);
+}
+
+export function readAtlasClusterStored(projectId: string): string | null {
+  return readStored(projectId);
+}
+
+export function writeAtlasClusterForProject(
+  projectId: string,
+  clusterId: string,
+) {
+  const next = clusterId.trim();
+  if (!projectId || !next) {
+    return;
+  }
+  writeStored(projectId, next);
+  pushRecentClusterId(projectId, next);
+  pushRecentContext({ projectId, clusterId: next });
 }
 
 function pickClusterId(
@@ -56,9 +93,11 @@ function pickClusterId(
   preferred: string | null,
   fallback: string | null,
 ): string | null {
-  const ids = clusters.map((row) => row.id);
+  const ids = clusters
+    .filter((row) => !isCascadeDefaultCluster(row.id))
+    .map((row) => row.id);
   if (ids.length === 0) {
-    return preferred ?? fallback ?? null;
+    return null;
   }
   if (preferred && ids.includes(preferred)) {
     return preferred;
@@ -72,45 +111,82 @@ function pickClusterId(
 export function AtlasClusterSelectionProvider({
   projectId,
   fallbackClusterId,
+  initialClusterId = null,
   children,
 }: {
   projectId: string | null;
   fallbackClusterId: string | null;
+  initialClusterId?: string | null;
   children: ReactNode;
 }) {
   const [clusters, setClusters] = useState<ClusterRow[]>([]);
+  const [clustersLoading, setClustersLoading] = useState(Boolean(projectId));
+  const [clustersError, setClustersError] = useState<string | null>(null);
   const [clusterId, setClusterIdState] = useState<string | null>(
-    fallbackClusterId,
+    initialClusterId ?? fallbackClusterId,
   );
+  const requestId = useRef(0);
 
-  useEffect(() => {
-    if (!projectId) {
-      setClusters([]);
-      setClusterIdState(fallbackClusterId);
-      return;
-    }
-    const stored = readStored(projectId);
-    setClusterIdState(pickClusterId([], stored, fallbackClusterId));
-    let cancelled = false;
-    void fetchAtlasProjectClusters()
-      .then((data) => {
-        if (cancelled) {
+  const reload = useCallback(
+    async (preferred?: string | null) => {
+      if (!projectId) {
+        setClusters([]);
+        setClustersLoading(false);
+        setClustersError(null);
+        setClusterIdState(fallbackClusterId);
+        return;
+      }
+      const stored = readStored(projectId);
+      const hint = preferred?.trim() || null;
+      const selected = hint || stored;
+      if (hint) {
+        writeStored(projectId, hint);
+      }
+      setClusterIdState(pickClusterId([], selected, fallbackClusterId));
+      const mine = ++requestId.current;
+      setClustersLoading(true);
+      setClustersError(null);
+      try {
+        const data = await fetchAtlasProjectClusters(projectId);
+        if (mine !== requestId.current) {
           return;
         }
         setClusters(data.clusters);
-        setClusterIdState((current) =>
-          pickClusterId(data.clusters, current ?? stored, fallbackClusterId),
+        setClustersError(null);
+        setClusterIdState(
+          pickClusterId(data.clusters, selected, fallbackClusterId),
         );
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setClusters([]);
+      } catch (err) {
+        if (mine !== requestId.current) {
+          return;
         }
-      });
+        setClustersError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (mine === requestId.current) {
+          setClustersLoading(false);
+        }
+      }
+    },
+    [projectId, fallbackClusterId],
+  );
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  useEffect(() => {
+    function onChanged(event: Event) {
+      const hint =
+        event instanceof CustomEvent
+          ? String(event.detail?.clusterId ?? "").trim() || null
+          : null;
+      void reload(hint);
+    }
+    window.addEventListener(ATLAS_CLUSTERS_CHANGED_EVENT, onChanged);
     return () => {
-      cancelled = true;
+      window.removeEventListener(ATLAS_CLUSTERS_CHANGED_EVENT, onChanged);
     };
-  }, [projectId, fallbackClusterId]);
+  }, [reload]);
 
   const setClusterId = useCallback(
     (id: string) => {
@@ -121,6 +197,8 @@ export function AtlasClusterSelectionProvider({
       setClusterIdState(next);
       if (projectId) {
         writeStored(projectId, next);
+        pushRecentClusterId(projectId, next);
+        pushRecentContext({ projectId, clusterId: next });
       }
     },
     [projectId],
@@ -131,9 +209,11 @@ export function AtlasClusterSelectionProvider({
       projectId,
       clusterId,
       clusters,
+      clustersLoading,
+      clustersError,
       setClusterId,
     }),
-    [projectId, clusterId, clusters, setClusterId],
+    [projectId, clusterId, clusters, clustersLoading, clustersError, setClusterId],
   );
 
   return (
@@ -154,9 +234,9 @@ export function useAtlasClusterSelection(): AtlasClusterSelectionValue {
 }
 
 export function AtlasClusterOverlays({ children }: { children: ReactNode }) {
-  const { clusterId } = useAtlasClusterSelection();
+  const { clusterId, projectId } = useAtlasClusterSelection();
   return (
-    <ClusterOverlaysProvider clusterId={clusterId}>
+    <ClusterOverlaysProvider clusterId={clusterId} projectId={projectId}>
       {children}
     </ClusterOverlaysProvider>
   );

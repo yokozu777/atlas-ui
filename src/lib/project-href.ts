@@ -1,5 +1,12 @@
+import { writeLastProjectCookies } from "@/lib/nav-cookies";
+import { pushRecentProjectId } from "@/lib/recent-context";
+
 export function projectHref(projectId: string, suffix = ""): string {
   return `/projects/${encodeURIComponent(projectId)}${suffix}`;
+}
+
+export function executionLogHref(projectId: string, executionId: string): string {
+  return projectHref(projectId, `/executions/${encodeURIComponent(executionId)}`);
 }
 
 export const LAST_PROJECT_STORAGE_KEY = "atlas-ui:last-project-id";
@@ -41,11 +48,13 @@ export function writeLastProjectId(id: string | null) {
   try {
     if (id) {
       window.localStorage.setItem(LAST_PROJECT_STORAGE_KEY, id);
+      pushRecentProjectId(id);
     } else {
       window.localStorage.removeItem(LAST_PROJECT_STORAGE_KEY);
     }
   } catch {
     /* quota / private mode */
   }
+  writeLastProjectCookies(id);
   window.dispatchEvent(new Event(LAST_PROJECT_EVENT));
 }

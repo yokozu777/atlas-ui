@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { Plus } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -28,6 +29,10 @@ export function GitPullSecretSelect({
   disabled,
   inheritLabel,
   compact,
+  noneLabel,
+  onAdd,
+  icon,
+  hideLabel,
 }: {
   id: string;
   label: string;
@@ -38,34 +43,75 @@ export function GitPullSecretSelect({
   disabled?: boolean;
   inheritLabel?: string;
   compact?: boolean;
+  noneLabel?: string;
+  onAdd?: () => void;
+  icon?: ReactNode;
+  hideLabel?: boolean;
 }) {
   const globalSecrets = secrets.filter((row) => row.group === "global");
   const projectSecrets = secrets.filter((row) => row.group === "project");
+  const noneText = noneLabel || "Select git pull key";
   const selected =
     value === GIT_PULL_NONE
       ? inheritLabel
         ? inheritLabel
-        : "Machine default (SSH_KEY / config.yaml)"
+        : noneText
       : value === GIT_PULL_INHERIT
         ? inheritLabel || "Project default"
         : secrets.find((row) => row.id === value)?.name || value;
+  const showAdd = Boolean(onAdd) || !compact;
+  const showHeader = hideLabel ? showAdd : !compact || Boolean(onAdd);
+  const addButton = showAdd ? (
+    onAdd ? (
+      <Button
+        type="button"
+        variant="link"
+        size="xs"
+        className="h-auto px-0"
+        disabled={disabled}
+        onClick={onAdd}
+      >
+        <Plus />
+        Add SSH key
+      </Button>
+    ) : (
+      <Button
+        variant="link"
+        size="xs"
+        className="h-auto px-0"
+        render={<Link href="/secrets" />}
+      >
+        <Plus />
+        Add SSH key
+      </Button>
+    )
+  ) : null;
 
   return (
     <div className="space-y-2">
-      {compact ? null : (
-        <div className="flex items-baseline justify-between gap-2">
-          <Label htmlFor={id}>{label}</Label>
-          <Button
-            variant="link"
-            size="xs"
-            className="h-auto px-0"
-            render={<Link href="/secrets" />}
-          >
-            <Plus />
-            Add SSH key
-          </Button>
+      {showHeader ? (
+        <div
+          className={
+            hideLabel
+              ? "flex justify-end"
+              : "flex items-baseline justify-between gap-2"
+          }
+        >
+          {hideLabel ? null : compact ? (
+            <span className="sr-only">{label}</span>
+          ) : (
+            <Label htmlFor={id}>
+              {icon ? (
+                <span className="text-muted-foreground [&_svg]:size-3.5">
+                  {icon}
+                </span>
+              ) : null}
+              {label}
+            </Label>
+          )}
+          {addButton}
         </div>
-      )}
+      ) : null}
       <Select
         value={value}
         onValueChange={(next) => onValueChange(next ?? GIT_PULL_NONE)}
@@ -78,9 +124,7 @@ export function GitPullSecretSelect({
           {inheritLabel ? (
             <SelectItem value={GIT_PULL_INHERIT}>{inheritLabel}</SelectItem>
           ) : (
-            <SelectItem value={GIT_PULL_NONE}>
-              Machine default (SSH_KEY / config.yaml)
-            </SelectItem>
+            <SelectItem value={GIT_PULL_NONE}>{noneText}</SelectItem>
           )}
           {globalSecrets.length ? (
             <SelectGroup>

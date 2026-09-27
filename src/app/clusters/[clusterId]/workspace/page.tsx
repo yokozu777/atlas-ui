@@ -1,10 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { use, useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  Boxes,
+  ChevronDown,
+  FolderOpen,
+  HardDrive,
+  RefreshCw,
+  RotateCcw,
+  ScrollText,
+  Server,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { AtlasRunProgressCard } from "@/components/atlas-run-progress-card";
 import { ConfirmAction } from "@/components/confirm-action";
 import { EmptyState } from "@/components/empty-state";
 import { JsonBlock } from "@/components/json-block";
@@ -29,6 +39,7 @@ import {
   executionStatusLabel,
 } from "@/lib/project-dashboard";
 import { projectHref } from "@/lib/project-href";
+import { notifyExecution } from "@/lib/notification-inbox";
 import { stargateJson } from "@/lib/stargate";
 import { cn } from "@/lib/utils";
 
@@ -45,13 +56,15 @@ export function ClusterWorkspaceView({
   clusterId,
   projectId,
   hub = false,
+  hideHeader = false,
 }: {
   clusterId: string;
   projectId?: string;
   hub?: boolean;
+  hideHeader?: boolean;
 }) {
   const logsHref = projectId
-    ? projectHref(projectId, "/logs")
+    ? projectHref(projectId, "/executions?tab=logs")
     : clusterHref(clusterId, "/logs");
   const [status, setStatus] = useState<WorkspaceShowPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -63,7 +76,8 @@ export function ClusterWorkspaceView({
   const [executionStatus, setExecutionStatus] = useState<string | null>(null);
   const [localLog, setLocalLog] = useState("");
   const [folders, setFolders] = useState<string[]>([]);
-  const [tab, setTab] = useState("");
+  const [section, setSection] = useState<"cluster" | "files">("cluster");
+  const [folderTab, setFolderTab] = useState("");
   const [fsKey, setFsKey] = useState(0);
   const { text, running } = useExecutionStream(
     hub && projectId ? projectId : "",
@@ -82,7 +96,7 @@ export function ClusterWorkspaceView({
       .filter((row) => row.kind === "dir" && row.name !== "logs")
       .map((row) => row.name);
     setFolders(dirs);
-    setTab((current) =>
+    setFolderTab((current) =>
       current && dirs.includes(current) ? current : (dirs[0] ?? ""),
     );
   }, [clusterId]);
@@ -110,7 +124,7 @@ export function ClusterWorkspaceView({
     void loadFolders().catch(() => {
       if (!cancelled) {
         setFolders([]);
-        setTab("");
+        setFolderTab("");
       }
     });
     return () => {
@@ -169,7 +183,16 @@ export function ClusterWorkspaceView({
         setExecutionId(result.executionId);
         setExecutionStatus("QUEUED");
         setLocalLog("");
-        toast.success("Reset queued on worker");
+        if (projectId) {
+          notifyExecution(
+            "success",
+            "Reset queued on worker",
+            projectId,
+            result.executionId,
+          );
+        } else {
+          toast.success("Reset queued on worker");
+        }
         return;
       }
       setLocalLog(result.log ?? "");
@@ -232,78 +255,150 @@ export function ClusterWorkspaceView({
   const showLocalLog = Boolean(!hub && localLog);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-6">
-      <PageHeader
-        kicker="Atlas"
-        title="Workspace"
-        description="Runtime directory for this cluster. Reset deletes only workspace/<cluster_id>/ — durable tfstate stays."
-        actions={
-          <Button variant="outline" render={<Link href={logsHref} />}>
-            Logs
-          </Button>
-        }
-      />
+    <div
+      className={
+        hideHeader
+          ? "space-y-6"
+          : "flex min-h-0 flex-1 flex-col gap-6"
+      }
+    >
+      {hideHeader ? null : (
+        <PageHeader
+          kicker="Atlas"
+          title="Workspace"
+          description="Runtime directory for this cluster. Reset deletes only workspace/<cluster_id>/ — durable tfstate stays."
+          actions={
+            <Button variant="outline" render={<Link href={logsHref} />}>
+              Logs
+            </Button>
+          }
+        />
+      )}
 
       {!loaded ? (
         <EmptyState title="Loading workspace" />
       ) : loadError && !status ? (
         <EmptyState title="Workspace unavailable" description={loadError} />
       ) : (
-        <>
-          <Panel className="grid gap-4 px-4 py-4 sm:grid-cols-2">
-            <ContextField
-              label="Cluster"
-              value={status?.cluster_id || clusterId}
-              mono
-            />
-            <ContextField
-              label="Workspace id"
-              value={status?.workspace_id || "—"}
-              mono
-            />
-            <ContextField
-              label="Runtime path"
-              value={status?.workspace_root || "—"}
-              mono
-            />
-            <ContextField label="Logs path" value={status?.logs || "—"} mono />
-            <ContextField
-              label="Kubeconfig"
-              value={
-                status?.kubeconfig_exists === true
-                  ? "yes"
-                  : status?.kubeconfig_exists === false
-                    ? "no"
-                    : "—"
-              }
-            />
-          </Panel>
-          {loadError ? (
-            <p className="text-sm text-destructive">{loadError}</p>
-          ) : null}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" disabled={busy} onClick={() => void refresh()}>
-              Refresh
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              className="sm:ml-auto"
-              disabled={busy}
-              onClick={() => setConfirmOpen(true)}
-            >
-              Reset runtime
-            </Button>
-          </div>
-          <div>
-            <SectionHeader title="Runtime files" />
+        <Tabs
+          value={section}
+          onValueChange={(next) => {
+            if (next === "files") setSection("files");
+            else setSection("cluster");
+          }}
+          className="gap-4"
+        >
+          <TabsList>
+            <TabsTrigger value="cluster">
+              <Server />
+              Cluster
+            </TabsTrigger>
+            <TabsTrigger value="files">
+              <FolderOpen />
+              Runtime files
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="cluster" className="space-y-4">
+            <Panel className="grid gap-4 px-4 py-4 sm:grid-cols-2 xl:grid-cols-5">
+              <ContextField
+                label="Cluster"
+                icon={<Server />}
+                value={status?.cluster_id || clusterId}
+                mono
+              />
+              <ContextField
+                label="Workspace"
+                icon={<FolderOpen />}
+                value={status?.workspace_id || "—"}
+                mono
+              />
+              <ContextField
+                label="Folder on disk"
+                icon={<HardDrive />}
+                value={status?.workspace_root || "—"}
+                mono
+              />
+              <ContextField
+                label="Logs folder"
+                icon={<ScrollText />}
+                value={status?.logs || "—"}
+                mono
+              />
+              <ContextField
+                label="Kubernetes config"
+                icon={<Boxes />}
+                value={
+                  status?.kubeconfig_exists === true
+                    ? "Ready"
+                    : status?.kubeconfig_exists === false
+                      ? "Not created yet"
+                      : "—"
+                }
+              />
+            </Panel>
+            {loadError ? (
+              <p className="text-sm text-destructive">{loadError}</p>
+            ) : null}
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              <Button
+                type="button"
+                disabled={busy}
+                onClick={() => void refresh()}
+              >
+                <RefreshCw />
+                Refresh
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={busy}
+                onClick={() => setConfirmOpen(true)}
+              >
+                <RotateCcw />
+                Reset runtime
+              </Button>
+            </div>
+            <div>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-auto gap-2 px-0 text-sm font-normal text-muted-foreground hover:text-foreground"
+                aria-expanded={advanced}
+                onClick={() => setAdvanced((value) => !value)}
+              >
+                Advanced
+                <ChevronDown
+                  className={cn(
+                    "size-4 transition-transform",
+                    advanced ? "rotate-180" : "rotate-0",
+                  )}
+                />
+              </Button>
+              {advanced ? (
+                <div className="mt-3">
+                  <JsonBlock value={status ?? {}} label="workspace show" />
+                </div>
+              ) : null}
+            </div>
+          </TabsContent>
+          <TabsContent value="files" className="min-w-0 space-y-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              <Button
+                type="button"
+                disabled={busy}
+                onClick={() => void refresh()}
+              >
+                <RefreshCw />
+                Refresh
+              </Button>
+            </div>
             {folders.length === 0 ? (
               <EmptyState
                 title="No runtime folders"
                 description="Workspace directories appear here after a run. Logs are on the Logs page."
               />
             ) : (
-              <Tabs value={tab} onValueChange={setTab}>
+              <Tabs value={folderTab} onValueChange={setFolderTab}>
                 <TabsList
                   variant="line"
                   className="h-auto w-full flex-wrap justify-start"
@@ -316,7 +411,7 @@ export function ClusterWorkspaceView({
                 </TabsList>
                 {folders.map((name) => (
                   <TabsContent key={name} value={name} className="mt-4">
-                    {tab === name ? (
+                    {folderTab === name ? (
                       <WorkspaceFsBrowser
                         clusterId={clusterId}
                         rootRel={name}
@@ -327,32 +422,9 @@ export function ClusterWorkspaceView({
                 ))}
               </Tabs>
             )}
-          </div>
-        </>
+          </TabsContent>
+        </Tabs>
       )}
-
-      <div>
-        <Button
-          type="button"
-          variant="ghost"
-          className="h-auto gap-2 px-0 text-sm font-normal text-muted-foreground hover:text-foreground"
-          aria-expanded={advanced}
-          onClick={() => setAdvanced((value) => !value)}
-        >
-          Advanced
-          <ChevronDown
-            className={cn(
-              "size-4 transition-transform",
-              advanced ? "rotate-180" : "rotate-0",
-            )}
-          />
-        </Button>
-        {advanced ? (
-          <div className="mt-3">
-            <JsonBlock value={status ?? {}} label="workspace show" />
-          </div>
-        ) : null}
-      </div>
 
       {showHubLog && executionId && projectId ? (
         <div>
@@ -393,11 +465,9 @@ export function ClusterWorkspaceView({
               </>
             }
           />
-          <LogViewer
-            jobId={null}
+          <AtlasRunProgressCard
+            status={liveStatus}
             text={text}
-            running={running}
-            label="worker log"
           />
         </div>
       ) : null}
@@ -430,15 +500,22 @@ export function ClusterWorkspaceView({
 function ContextField({
   label,
   value,
+  icon,
   mono,
 }: {
   label: string;
   value: string;
+  icon?: ReactNode;
   mono?: boolean;
 }) {
   return (
     <div className="min-w-0 space-y-1">
-      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {icon ? (
+          <span className="[&_svg]:size-3.5">{icon}</span>
+        ) : null}
+        {label}
+      </p>
       <p className={cn("text-sm", mono && "font-mono break-all")}>{value}</p>
     </div>
   );

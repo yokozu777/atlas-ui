@@ -1,94 +1,115 @@
-# Run atlas-ui from Docker Hub images (no local build).
+# Published images (no build).
+# Required in .env: ATLAS_INVENTORY=/abs/path/to/atlas-inventory
+# Optional: ATLAS_CLUSTER_ROOT  ATLAS_UI_IMAGE_TAG
 #
-#   cp .env.example .env   # inventory/workspace/SSH_KEY; clusterctl defaults to ./atlas-clusterctl
+#   cp .env.example .env
 #   docker compose -f docker-compose.hub.yml pull
 #   docker compose -f docker-compose.hub.yml up -d
 #
-# Pin a release: ATLAS_UI_IMAGE_TAG=2026-09-09 docker compose -f docker-compose.hub.yml up -d
-#
-# .env holds host paths only. Inside containers they are /atlas/clusterctl,
-# /atlas/clusters, /atlas/workspace, /atlas/ssh/id_rsa. Worker starts krang
-# via /var/run/docker.sock (not CLUSTER_EXECUTOR_FORCE_LOCAL on hub/worker).
-# Unset ATLAS_CLUSTER_ROOT → ${PWD}/atlas-clusterctl. Clone from Settings or git.
+# Inside hub/worker: /atlas/clusterctl  /atlas/clusters  /atlas/workspace
+# SSH for clusterctl: System / Secrets Manager. Do not set SSH_KEY.
 
-x-atlas-clusterctl-bind: &atlas-clusterctl-bind
+# --- in-container mounts (fixed) ---
+x-in-clusterctl: &in_clusterctl /atlas/clusterctl
+x-in-clusters: &in_clusters /atlas/clusters
+x-in-workspace: &in_workspace /atlas/workspace
+
+# --- host bind sources (the only machine-specific values) ---
+x-host-clusterctl: &host_clusterctl ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
+x-host-clusters: &host_clusters ${ATLAS_INVENTORY:?set ATLAS_INVENTORY in .env}/clusters
+x-host-workspace: &host_workspace ${ATLAS_INVENTORY:?set ATLAS_INVENTORY in .env}/workspace
+
+# --- images / git ---
+x-git-url: &git_url https://gitea.mxhash.com/root/atlas-clusterctl.git
+x-image-hub: &image_hub harbor.mxhash.com/library/atlas-ui-hub:${ATLAS_UI_IMAGE_TAG:-latest}
+x-image-ui: &image_ui harbor.mxhash.com/library/atlas-ui:${ATLAS_UI_IMAGE_TAG:-latest}
+x-image-worker: &image_worker harbor.mxhash.com/library/atlas-ui-worker:${ATLAS_UI_IMAGE_TAG:-latest}
+
+# --- shared fragments ---
+x-bind-clusterctl: &bind_clusterctl
   type: bind
-  source: ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
-  target: /atlas/clusterctl
-
-x-atlas-clusters-bind: &atlas-clusters-bind
+  source: *host_clusterctl
+  target: *in_clusterctl
+x-bind-clusters: &bind_clusters
   type: bind
-  source: ${ATLAS_CLUSTERS_ROOT}
-  target: /atlas/clusters
-
-x-atlas-workspace-bind: &atlas-workspace-bind
+  source: *host_clusters
+  target: *in_clusters
+x-bind-workspace: &bind_workspace
   type: bind
-  source: ${ATLAS_WORKSPACE_ROOT}
-  target: /atlas/workspace
+  source: *host_workspace
+  target: *in_workspace
 
-x-atlas-path-env: &atlas-path-env
-  ATLAS_CLUSTER_ROOT: /atlas/clusterctl
-  ATLAS_CLUSTERS_ROOT: /atlas/clusters
-  ATLAS_WORKSPACE_ROOT: /atlas/workspace
-  ATLAS_CLUSTER_ROOT_HOST: ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
-  ATLAS_CLUSTERS_ROOT_HOST: ${ATLAS_CLUSTERS_ROOT}
-  ATLAS_WORKSPACE_ROOT_HOST: ${ATLAS_WORKSPACE_ROOT}
+x-hub-volumes: &hub_volumes
+  - ./data:/app/data
+  - *bind_clusterctl
+  - *bind_clusters
+  - *bind_workspace
+  - /var/run/docker.sock:/var/run/docker.sock
+
+x-path-env: &path_env
+  ATLAS_CLUSTER_ROOT: *in_clusterctl
+  ATLAS_CLUSTERS_ROOT: *in_clusters
+  ATLAS_WORKSPACE_ROOT: *in_workspace
+  ATLAS_CLUSTER_ROOT_HOST: *host_clusterctl
+  ATLAS_CLUSTERS_ROOT_HOST: *host_clusters
+  ATLAS_WORKSPACE_ROOT_HOST: *host_workspace
+  ATLAS_CLUSTERCTL_GIT_URL: *git_url
+
+x-healthcheck: &hub_health
+  test:
+    [
+      "CMD",
+      "python3",
+      "-c",
+      "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+    ]
+  interval: 2s
+  timeout: 2s
+  retries: 20
+  start_period: 5s
 
 services:
   hub:
-    image: yokozu/atlas-ui-hub:${ATLAS_UI_IMAGE_TAG:-latest}
+    image: *image_hub
     container_name: atlas-ui-hub
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - *atlas-clusterctl-bind
-      - *atlas-clusters-bind
-      - *atlas-workspace-bind
+    volumes: *hub_volumes
     environment:
       TZ: Europe/Berlin
       DATA_DIR: /app/data
       PORT: 8000
-      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
-      <<: *atlas-path-env
+      <<: *path_env
+    healthcheck: *hub_health
     restart: unless-stopped
 
   ui:
-    image: yokozu/atlas-ui:${ATLAS_UI_IMAGE_TAG:-latest}
+    image: *image_ui
     container_name: atlas-ui
     ports:
       - "3000:3000"
     environment:
       TZ: Europe/Berlin
       HUB_API_URL: http://hub:8000
-      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
-      ATLAS_CLUSTER_ROOT: /atlas/clusterctl
+      ATLAS_CLUSTERCTL_GIT_URL: *git_url
+      ATLAS_CLUSTER_ROOT: *in_clusterctl
     depends_on:
-      - hub
+      hub:
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
-    image: yokozu/atlas-ui-worker:${ATLAS_UI_IMAGE_TAG:-latest}
+    image: *image_worker
     container_name: atlas-ui-worker
-    volumes:
-      - ./data:/app/data
-      - *atlas-clusterctl-bind
-      - *atlas-clusters-bind
-      - *atlas-workspace-bind
-      - /var/run/docker.sock:/var/run/docker.sock
-      - type: bind
-        source: ${SSH_KEY}
-        target: /atlas/ssh/id_rsa
-        read_only: true
+    volumes: *hub_volumes
     environment:
       TZ: Europe/Berlin
-      WORKER_SERVER_URL: ${WORKER_SERVER_URL:-http://hub:8000}
+      WORKER_SERVER_URL: http://hub:8000
       DATA_DIR: /app/data
       WORKER_TOKEN_FILE: /app/data/worker.token
       ATLAS_WORKER_RUNTIME: docker
-      ATLAS_CLUSTERCTL_GIT_URL: ${ATLAS_CLUSTERCTL_GIT_URL:-https://github.com/yokozu777/atlas-clusterctl.git}
-      SSH_KEY: /atlas/ssh/id_rsa
-      <<: *atlas-path-env
+      <<: *path_env
     depends_on:
-      - hub
+      hub:
+        condition: service_healthy
     restart: unless-stopped

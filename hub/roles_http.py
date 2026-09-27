@@ -91,6 +91,11 @@ def update_role(
     role_id: str,
     body: dict[str, Any],
 ) -> dict[str, Any]:
+    existing = role_service.get_role_by_id(role_id)
+    if existing and existing.name == "admin":
+        incoming_name = str(body.get("name") or "").strip() if body.get("name") else None
+        if incoming_name is not None and incoming_name != "admin":
+            raise RolesHttpError(400, "Cannot rename the admin role")
     name = str(body.get("name") or "").strip() if body.get("name") else None
     description = (
         str(body.get("description") or "").strip()
@@ -120,6 +125,9 @@ def update_role(
 
 
 def delete_role(role_service: Any, role_id: str) -> dict[str, Any]:
+    role = role_service.get_role_by_id(role_id)
+    if role and role.name == "admin":
+        raise RolesHttpError(400, "Cannot delete the admin role")
     if not role_service.delete_role(role_id):
         raise RolesHttpError(404, "Role not found")
     return {"success": True, "message": "Role deleted successfully"}

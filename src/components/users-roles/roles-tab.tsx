@@ -25,6 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { stargateJson } from "@/lib/stargate";
+import { useCan } from "@/lib/authz";
 
 export function RolesTab({
   roles,
@@ -35,6 +36,7 @@ export function RolesTab({
   permissions: PermissionRow[];
   onReload: () => Promise<void> | void;
 }) {
+  const can = useCan();
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [addOpen, setAddOpen] = useState(false);
@@ -78,10 +80,12 @@ export function RolesTab({
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <Plus />
-          Add Role
-        </Button>
+        {can("roles.create") ? (
+          <Button size="sm" onClick={() => setAddOpen(true)}>
+            <Plus />
+            Add Role
+          </Button>
+        ) : null}
       </div>
       {filtered.length === 0 ? (
         <EmptyState
@@ -144,6 +148,7 @@ export function RolesTab({
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
+                      {can("roles.update") ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -152,6 +157,8 @@ export function RolesTab({
                         <Pencil />
                         Edit
                       </Button>
+                      ) : null}
+                      {can("roles.delete") && row.name !== "admin" ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -161,6 +168,7 @@ export function RolesTab({
                         <Trash2 />
                         Delete
                       </Button>
+                      ) : null}
                     </div>
                   </TableCell>
                 </TableRow>

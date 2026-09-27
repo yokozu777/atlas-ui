@@ -14,6 +14,7 @@ import {
   secretTypeLabel,
   type SecretRow,
 } from "@/components/project-secrets/types";
+import { SecretKeyDownloadMenu } from "@/components/secret-key-download";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -27,10 +28,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { fetchProject, stargateJson } from "@/lib/stargate";
+import { useAuthz, useCan } from "@/lib/authz";
 import type { StargateProject } from "@/lib/project-types";
 
 export function ProjectSecretsPage({ projectId }: { projectId: string }) {
   const q = `project_id=${encodeURIComponent(projectId)}`;
+  const can = useCan();
+  const { ready } = useAuthz();
   const [project, setProject] = useState<StargateProject | null>(null);
   const [secrets, setSecrets] = useState<SecretRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -55,11 +59,16 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   useEffect(() => {
+    if (!ready) return;
+    if (!can("secrets.read")) {
+      setError("secrets.read required");
+      return;
+    }
     void load().catch((err: unknown) =>
       setError(err instanceof Error ? err.message : String(err)),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, ready]);
 
   const filtered = useMemo(() => {
     const qtext = search.trim().toLowerCase();
@@ -105,14 +114,22 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
     }
   }
 
+  if (!ready) {
+    return <EmptyState title="Loading secrets" />;
+  }
   if (error) {
-    return <EmptyState title="Secrets unavailable" description={error} />;
+    return (
+      <EmptyState
+        title={error.includes("required") ? "Forbidden" : "Secrets unavailable"}
+        description={error}
+      />
+    );
   }
 
   return (
     <div>
       <PageHeader
-        kicker="Infrastructure"
+        kicker={project?.kind === "atlas" ? "Project" : "Infrastructure"}
         title="Secrets"
         description={
           <div className="space-y-3">
@@ -133,10 +150,12 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
+        {can("secrets.create") ? (
         <Button size="sm" onClick={() => setAddOpen(true)}>
           <Plus />
           Add Secret
         </Button>
+        ) : null}
       </div>
       {filtered.length === 0 ? (
         <EmptyState
@@ -205,6 +224,13 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
+                      {ssh && can("secrets.read") ? (
+                        <SecretKeyDownloadMenu
+                          kind="project"
+                          projectId={projectId}
+                          name={name}
+                        />
+                      ) : null}
                       <Button
                         size="xs"
                         variant="ghost"
@@ -213,7 +239,8 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
                         <Info />
                         Details
                       </Button>
-                      {row.type === "ssh_key" || row.type === "login_password" ? (
+                      {row.type === "ssh_key" || row.type === "login_password"
+                        ? can("secrets.update") && (
                         <Button
                           size="xs"
                           variant="ghost"
@@ -222,7 +249,9 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
                           <Pencil />
                           Edit
                         </Button>
-                      ) : null}
+                          )
+                        : null}
+                      {can("secrets.delete") ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -232,6 +261,7 @@ export function ProjectSecretsPage({ projectId }: { projectId: string }) {
                         <Trash2 />
                         Delete
                       </Button>
+                      ) : null}
                     </div>
                   </TableCell>
                 </TableRow>

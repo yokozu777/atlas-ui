@@ -77,6 +77,23 @@ def worker_loop(server_url: str, poll_interval: int = 3, project_id: str = None,
     signal.signal(signal.SIGTERM, signal_handler)
     
     logger.info("Worker started, waiting for tasks...")
+    try:
+        from secret_encryption import get_encryption
+        from .config import DATA_DIR as _enc_data_dir
+        get_encryption(_enc_data_dir)
+    except Exception as exc:
+        logger.error(
+            "Encryption key missing (%s). Encrypted project secrets will fail until "
+            "GLOBAL_SECRETS_ENCRYPTION_KEY or data/auth/encryption_key is set.",
+            exc,
+        )
+    try:
+        from ssh_temp import apply_worker_ssh_key_scope, sweep_stale_ssh_files
+        from .config import DATA_DIR
+        scope = apply_worker_ssh_key_scope(http_client.worker_id)
+        sweep_stale_ssh_files(DATA_DIR, scope=scope)
+    except Exception as exc:
+        logger.warning("SSH identity sweeper failed: %s", exc)
     
     # Импортируем модуль для сбора системной информации
     from .system_info import collect_system_info
@@ -117,9 +134,14 @@ def worker_loop(server_url: str, poll_interval: int = 3, project_id: str = None,
             current_time = time.time()
             if current_time - last_heartbeat >= heartbeat_interval:
                 try:
-                    heartbeat_success = http_client.heartbeat()
+                    heartbeat_success = http_client.heartbeat(
+                        max_concurrency=max_concurrency
+                    )
                     if heartbeat_success:
                         last_heartbeat = current_time
+                        if http_client.worker_id:
+                            from ssh_temp import apply_worker_ssh_key_scope
+                            apply_worker_ssh_key_scope(http_client.worker_id)
                     else:
                         logger.warning("Heartbeat failed — check WORKER_TOKEN / WORKER_TOKEN_FILE")
                 except Exception as e:

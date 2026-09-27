@@ -10,24 +10,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from executions_store import get_project_dir
+from project_secret_crypto import ProjectSecretError, read_project_secret, write_project_secret
+from ssh_key_material import (
+    derive_openssh_public,
+    generate_ed25519_openssh,
+    validate_ssh_private_key,
+)
 
 logger = logging.getLogger(__name__)
-
-BEGIN_MARKERS = (
-    "-----BEGIN RSA PRIVATE KEY-----",
-    "-----BEGIN OPENSSH PRIVATE KEY-----",
-    "-----BEGIN EC PRIVATE KEY-----",
-    "-----BEGIN DSA PRIVATE KEY-----",
-    "-----BEGIN PRIVATE KEY-----",
-)
-END_MARKERS = (
-    "-----END RSA PRIVATE KEY-----",
-    "-----END OPENSSH PRIVATE KEY-----",
-    "-----END EC PRIVATE KEY-----",
-    "-----END DSA PRIVATE KEY-----",
-    "-----END PRIVATE KEY-----",
-)
-_BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
 
 
 class SecretsHttpError(Exception):
@@ -43,42 +33,52 @@ def secrets_dir(project_id: str) -> Path:
     return path
 
 
-def validate_ssh_private_key(private_key: Any) -> tuple[bool, Optional[str]]:
-    if not private_key or not isinstance(private_key, str):
-        return False, "Private key must be a non-empty string"
-    private_key = private_key.strip()
-    if len(private_key) < 100:
-        return False, "Private key is too short to be valid"
-    has_begin = any(marker in private_key for marker in BEGIN_MARKERS)
-    if not has_begin:
-        return False, "Private key must start with '-----BEGIN ... PRIVATE KEY-----'"
-    has_end = any(marker in private_key for marker in END_MARKERS)
-    if not has_end:
-        return False, "Private key must end with '-----END ... PRIVATE KEY-----'"
-    begin_marker = next((marker for marker in BEGIN_MARKERS if marker in private_key), None)
-    if begin_marker:
-        key_type = begin_marker.replace("-----BEGIN ", "").replace("-----", "")
-        expected_end = f"-----END {key_type}-----"
-        if expected_end not in private_key:
-            return (
-                False,
-                f"Private key END marker does not match BEGIN marker. Expected '{expected_end}'",
-            )
-    begin_pos = private_key.find("-----BEGIN")
-    end_pos = private_key.find("-----END")
-    if begin_pos == -1 or end_pos == -1:
-        return False, "Private key structure is invalid"
-    if end_pos <= begin_pos:
-        return False, "Private key END marker must come after BEGIN marker"
-    content_start = private_key.find("-----", begin_pos + 1)
-    if content_start == -1 or content_start >= end_pos:
-        return False, "Private key must have content between BEGIN and END markers"
-    content = private_key[content_start + 5 : end_pos].strip()
-    if not content:
-        return False, "Private key content between markers is empty"
-    if not _BASE64_RE.match(content):
-        return False, "Private key content contains invalid characters (expected base64)"
-    return True, None
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _apply_ssh_key_material(
+    secret_data: dict[str, Any], body: dict[str, Any], *, generate: bool, require_private: bool
+) -> None:
+    if generate:
+        if str(body.get("privateKey") or "").strip():
+            raise SecretsHttpError(400, "Do not paste a private key when generate is true")
+        generated = generate_ed25519_openssh(
+            comment=str(body.get("comment") or "").strip(),
+            passphrase=str(body.get("passphrase") or ""),
+        )
+        secret_data["privateKey"] = generated["privateKey"]
+        secret_data["publicKey"] = generated["publicKey"]
+        secret_data["fingerprint"] = generated["fingerprint"]
+        secret_data["keyType"] = generated["keyType"]
+        return
+    private_key = str(body.get("privateKey") or "").strip()
+    if not private_key:
+        if require_private:
+            raise SecretsHttpError(400, "Private key is required for SSH key secret")
+        return
+    is_valid, error_msg = validate_ssh_private_key(
+        private_key,
+        passphrase=str(body.get("passphrase") or secret_data.get("passphrase") or ""),
+    )
+    if not is_valid:
+        raise SecretsHttpError(400, f"Invalid private key format: {error_msg}")
+    secret_data["privateKey"] = private_key
+    derived = derive_openssh_public(
+        private_key,
+        passphrase=str(body.get("passphrase") or secret_data.get("passphrase") or ""),
+    )
+    public_key = str(body.get("publicKey") or "").strip() or derived.get("publicKey") or ""
+    if public_key:
+        secret_data["publicKey"] = public_key
+    if derived.get("fingerprint"):
+        secret_data["fingerprint"] = derived["fingerprint"]
+    if derived.get("keyType"):
+        secret_data["keyType"] = derived["keyType"]
 
 
 def slugify_secret_name(name: Any) -> str:
@@ -130,7 +130,7 @@ def sanitize_secret(secret_data: dict[str, Any], fallback_name: Optional[str] = 
         material = {
             "password": {"present": bool(password), "length": len(password) if password else 0},
         }
-    return {
+    sanitized: dict[str, Any] = {
         "name": name,
         "type": secret_type,
         "username": secret_data.get("username", ""),
@@ -140,6 +140,17 @@ def sanitize_secret(secret_data: dict[str, Any], fallback_name: Optional[str] = 
         "version": secret_data.get("version", 1),
         "material": material,
     }
+    if secret_type == "ssh_key":
+        public_key = str(secret_data.get("publicKey") or "").strip()
+        if public_key:
+            sanitized["publicKey"] = public_key
+        fingerprint = str(secret_data.get("fingerprint") or "").strip()
+        if fingerprint:
+            sanitized["fingerprint"] = fingerprint
+        key_type = str(secret_data.get("keyType") or "").strip()
+        if key_type:
+            sanitized["keyType"] = key_type
+    return sanitized
 
 
 def _meta_from_file(
@@ -276,8 +287,10 @@ def get_secret(project_id: str, secret_name: str) -> dict[str, Any]:
     if not secret_file.exists():
         raise SecretsHttpError(404, "Secret not found")
     if secret_file.suffix == ".json":
-        with open(secret_file, encoding="utf-8") as fh:
-            secret_data = json.load(fh)
+        try:
+            secret_data = read_project_secret(secret_file)
+        except ProjectSecretError as exc:
+            raise SecretsHttpError(400, str(exc)) from exc
     else:
         with open(secret_file, encoding="utf-8") as fh:
             content = fh.read().strip()
@@ -302,17 +315,9 @@ def create_secret(project_id: str, body: dict[str, Any]) -> dict[str, Any]:
     secret_file = get_secret_file_path(project_id, safe_name, secret_type=secret_type)
     if secret_file.exists():
         raise SecretsHttpError(409, "Secret with this name already exists")
-    if secret_type == "ssh_key":
-        private_key = str(body.get("privateKey") or "").strip()
-        if not private_key:
-            raise SecretsHttpError(400, "Private key is required for SSH key secret")
-        is_valid, error_msg = validate_ssh_private_key(private_key)
-        if not is_valid:
-            raise SecretsHttpError(400, f"Invalid private key format: {error_msg}")
-    else:
-        password = str(body.get("password") or "").strip()
-        if not password:
-            raise SecretsHttpError(400, "Password is required for login/password secret")
+    generate = _truthy(body.get("generate"))
+    if secret_type == "login_password" and generate:
+        raise SecretsHttpError(400, "generate is only valid for SSH key secrets")
     current_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     secret_data: dict[str, Any] = {
         "version": 1,
@@ -324,17 +329,22 @@ def create_secret(project_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "updatedAt": current_time,
     }
     if secret_type == "ssh_key":
-        secret_data["privateKey"] = private_key
+        _apply_ssh_key_material(secret_data, body, generate=generate, require_private=True)
         if body.get("passphrase"):
             secret_data["passphrase"] = str(body.get("passphrase") or "").strip()
     else:
+        password = str(body.get("password") or "").strip()
+        if not password:
+            raise SecretsHttpError(400, "Password is required for login/password secret")
         secret_data["password"] = password
-    with open(secret_file, "w", encoding="utf-8") as fh:
-        json.dump(secret_data, fh, indent=2, ensure_ascii=False)
-    os.chmod(secret_file, 0o600)
+    write_project_secret(secret_file, secret_data)
+    secret = sanitize_secret(secret_data, fallback_name=safe_name)
+    if generate:
+        secret = dict(secret)
+        secret["privateKey"] = str(secret_data.get("privateKey") or "")
     return {
         "success": True,
-        "secret": sanitize_secret(secret_data, fallback_name=safe_name),
+        "secret": secret,
         "message": "Secret created successfully",
     }
 
@@ -347,8 +357,10 @@ def update_secret(project_id: str, secret_name: str, body: dict[str, Any]) -> di
     if not secret_file.exists():
         raise SecretsHttpError(404, "Secret not found")
     if secret_file.suffix == ".json":
-        with open(secret_file, encoding="utf-8") as fh:
-            existing = json.load(fh)
+        try:
+            existing = read_project_secret(secret_file)
+        except ProjectSecretError as exc:
+            raise SecretsHttpError(400, str(exc)) from exc
     else:
         with open(secret_file, encoding="utf-8") as fh:
             content = fh.read().strip()
@@ -362,12 +374,11 @@ def update_secret(project_id: str, secret_name: str, body: dict[str, Any]) -> di
             "updatedAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         )
     if existing.get("type") == "ssh_key":
-        if "privateKey" in body and str(body.get("privateKey") or "").strip():
-            private_key = str(body.get("privateKey") or "").strip()
-            is_valid, error_msg = validate_ssh_private_key(private_key)
-            if not is_valid:
-                raise SecretsHttpError(400, f"Invalid private key format: {error_msg}")
-            existing["privateKey"] = private_key
+        generate = _truthy(body.get("generate"))
+        if generate or str(body.get("privateKey") or "").strip():
+            _apply_ssh_key_material(
+                existing, body, generate=generate, require_private=False
+            )
         if "passphrase" in body and str(body.get("passphrase") or "").strip():
             existing["passphrase"] = str(body.get("passphrase") or "").strip()
     elif existing.get("type") == "login_password":
@@ -375,8 +386,7 @@ def update_secret(project_id: str, secret_name: str, body: dict[str, Any]) -> di
             existing["password"] = str(body.get("password") or "").strip()
     existing["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if secret_file.suffix == ".json":
-        with open(secret_file, "w", encoding="utf-8") as fh:
-            json.dump(existing, fh, indent=2, ensure_ascii=False)
+        write_project_secret(secret_file, existing)
     elif "password" in body:
         with open(secret_file, "w", encoding="utf-8") as fh:
             fh.write(str(body.get("password") or "").strip())
@@ -384,10 +394,53 @@ def update_secret(project_id: str, secret_name: str, body: dict[str, Any]) -> di
         with open(secret_file, "w", encoding="utf-8") as fh:
             fh.write(str(body.get("content") or "").strip())
     os.chmod(secret_file, 0o600)
+    secret = sanitize_secret(existing, fallback_name=secret_name)
+    if existing.get("type") == "ssh_key" and _truthy(body.get("generate")):
+        secret = dict(secret)
+        secret["privateKey"] = str(existing.get("privateKey") or "")
     return {
         "success": True,
-        "secret": sanitize_secret(existing, fallback_name=secret_name),
+        "secret": secret,
         "message": "Secret updated successfully",
+    }
+
+
+def export_secret(project_id: str, secret_name: str) -> dict[str, Any]:
+    try:
+        secret_file = _find_secret_file(project_id, secret_name)
+    except ValueError as exc:
+        raise SecretsHttpError(400, str(exc)) from exc
+    if not secret_file.exists() or secret_file.suffix != ".json":
+        raise SecretsHttpError(404, "Secret not found")
+    try:
+        secret_data = read_project_secret(secret_file)
+    except ProjectSecretError as exc:
+        raise SecretsHttpError(400, str(exc)) from exc
+    if not isinstance(secret_data, dict):
+        raise SecretsHttpError(400, "Secret file is invalid")
+    secret_type = str(secret_data.get("type") or "ssh_key")
+    if secret_type != "ssh_key":
+        raise SecretsHttpError(400, "Only SSH key secrets can be exported")
+    private_key = str(secret_data.get("privateKey") or "")
+    if not private_key.strip():
+        raise SecretsHttpError(404, "Private key is not stored")
+    public_key = str(secret_data.get("publicKey") or "").strip()
+    if not public_key:
+        derived = derive_openssh_public(
+            private_key, passphrase=str(secret_data.get("passphrase") or "")
+        )
+        public_key = str(derived.get("publicKey") or "")
+        if public_key:
+            secret_data["publicKey"] = public_key
+            if derived.get("fingerprint"):
+                secret_data["fingerprint"] = derived["fingerprint"]
+            write_project_secret(secret_file, secret_data)
+    return {
+        "success": True,
+        "name": secret_data.get("name") or secret_name,
+        "type": "ssh_key",
+        "publicKey": public_key,
+        "privateKey": private_key,
     }
 
 

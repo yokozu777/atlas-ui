@@ -6,7 +6,15 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+from atlas_operator_ssh import describe_clusterctl_ssh
+from clusterctl_ssh import (
+    ClusterctlSshError,
+    clear_clusterctl_ssh_if_matches,
+    load_clusterctl_ssh_secret_id,
+    save_clusterctl_ssh_secret_id,
+)
 from global_secrets_manager import GlobalSecretError, GlobalSecretsManager
+from ssh_key_material import derive_openssh_public, generate_ed25519_openssh
 from secret_encryption import (
     generate_and_save_encryption_key,
     get_encryption_key_file_path,
@@ -18,7 +26,15 @@ import secret_encryption
 logger = logging.getLogger(__name__)
 
 MATERIAL_FIELDS = ("privateKey", "passphrase", "token", "password")
-OPTIONAL_FIELDS = ("username", "publicKey", "fingerprint")
+OPTIONAL_FIELDS = ("username", "publicKey", "fingerprint", "keyType", "comment", "registry")
+CREATE_BODY_SKIP = {
+    "name",
+    "type",
+    "description",
+    "metadata",
+    "generate",
+    "useAsClusterctlSsh",
+}
 
 
 class GlobalSecretsHttpError(Exception):
@@ -40,11 +56,106 @@ def manager(data_dir: Path) -> GlobalSecretsManager:
     return GlobalSecretsManager(Path(data_dir))
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _with_one_time_generated_private_key(
+    secret: dict[str, Any], secret_data: dict[str, Any], *, generate: bool
+) -> dict[str, Any]:
+    """Include the generated private key once in create/rotate responses."""
+    if not generate:
+        return secret
+    private_key = str(secret_data.get("privateKey") or "")
+    if not private_key.strip():
+        return secret
+    out = dict(secret)
+    out["privateKey"] = private_key
+    return out
+
+
+def _apply_generated_or_derived_ssh(secret_data: dict[str, Any], *, generate: bool) -> None:
+    if generate:
+        if str(secret_data.get("privateKey") or "").strip():
+            raise GlobalSecretsHttpError(
+                400, "Do not paste a private key when generate is true"
+            )
+        passphrase = str(secret_data.get("passphrase") or "")
+        generated = generate_ed25519_openssh(
+            comment=str(secret_data.get("comment") or ""),
+            passphrase=passphrase,
+        )
+        secret_data.update(generated)
+        if not passphrase.strip():
+            secret_data["passphrase"] = ""
+        return
+    private_key = str(secret_data.get("privateKey") or "")
+    if not private_key.strip() or str(secret_data.get("publicKey") or "").strip():
+        return
+    derived = derive_openssh_public(
+        private_key, passphrase=str(secret_data.get("passphrase") or "")
+    )
+    for key, value in derived.items():
+        secret_data.setdefault(key, value)
+
+
+def _apply_clusterctl_flag(
+    data_dir: Path, secret_id: str, body: dict[str, Any], *, created: bool
+) -> None:
+    if "useAsClusterctlSsh" not in body:
+        return
+    try:
+        if _truthy(body.get("useAsClusterctlSsh")):
+            save_clusterctl_ssh_secret_id(data_dir, secret_id)
+        elif not created:
+            current = load_clusterctl_ssh_secret_id(data_dir)
+            if current == secret_id:
+                save_clusterctl_ssh_secret_id(data_dir, None)
+    except ClusterctlSshError as exc:
+        raise GlobalSecretsHttpError(exc.status_code, exc.message) from exc
+
+
 def list_global_secrets(
     data_dir: Path, secret_type: Optional[str] = None, search: Optional[str] = None
 ) -> dict[str, Any]:
     secrets = manager(data_dir).list_secrets(secret_type=secret_type or None, search=search or None)
     return {"success": True, "secrets": secrets}
+
+
+def export_global_secret(data_dir: Path, secret_id: str) -> dict[str, Any]:
+    try:
+        secret = manager(data_dir).get_secret(secret_id, include_material=True)
+    except GlobalSecretError as exc:
+        raise GlobalSecretsHttpError(400, str(exc)) from exc
+    if not secret:
+        raise GlobalSecretsHttpError(404, "Secret not found")
+    secret_type = str(secret.get("type") or "")
+    if secret_type != "git_ssh_key":
+        raise GlobalSecretsHttpError(400, "Only SSH key secrets can be exported")
+    private_key = str(secret.get("privateKey") or "")
+    if not private_key.strip():
+        raise GlobalSecretsHttpError(404, "Private key is not stored")
+    public_key = str(secret.get("publicKey") or "").strip()
+    metadata = secret.get("metadata") if isinstance(secret.get("metadata"), dict) else {}
+    if not public_key:
+        public_key = str(metadata.get("publicKey") or "").strip()
+    if not public_key:
+        derived = derive_openssh_public(
+            private_key, passphrase=str(secret.get("passphrase") or "")
+        )
+        public_key = str(derived.get("publicKey") or "")
+    return {
+        "success": True,
+        "id": secret.get("id") or secret_id,
+        "name": secret.get("name") or "",
+        "type": secret_type,
+        "publicKey": public_key,
+        "privateKey": private_key,
+    }
 
 
 def get_global_secret(data_dir: Path, secret_id: str) -> dict[str, Any]:
@@ -69,13 +180,16 @@ def create_global_secret(data_dir: Path, body: dict[str, Any]) -> tuple[dict[str
     secret_data = {
         key: value
         for key, value in data.items()
-        if key not in {"name", "type", "description", "metadata"}
+        if key not in CREATE_BODY_SKIP
     }
     metadata = data.get("metadata")
     if isinstance(metadata, dict):
         for key, value in metadata.items():
             if value:
                 secret_data[key] = value
+    generate = _truthy(data.get("generate"))
+    if secret_type == "git_ssh_key":
+        _apply_generated_or_derived_ssh(secret_data, generate=generate)
     try:
         secret = manager(data_dir).create_secret(
             name=name,
@@ -85,6 +199,10 @@ def create_global_secret(data_dir: Path, body: dict[str, Any]) -> tuple[dict[str
         )
     except GlobalSecretError as exc:
         raise GlobalSecretsHttpError(400, str(exc)) from exc
+    _apply_clusterctl_flag(data_dir, str(secret.get("id") or ""), data, created=True)
+    secret = _with_one_time_generated_private_key(
+        secret, secret_data, generate=generate
+    )
     return {"success": True, "secret": secret, "message": "Secret created successfully"}, 201
 
 
@@ -94,12 +212,27 @@ def update_global_secret(data_dir: Path, secret_id: str, body: dict[str, Any]) -
     for field in MATERIAL_FIELDS + OPTIONAL_FIELDS:
         if field in data:
             secret_material[field] = data[field]
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            if value and key not in secret_material:
+                secret_material[key] = value
+    generate = _truthy(data.get("generate"))
+    if generate:
+        existing = manager(data_dir).get_secret(secret_id, include_material=False)
+        if not existing:
+            raise GlobalSecretsHttpError(404, "Secret not found")
+        if str(existing.get("type") or "") != "git_ssh_key":
+            raise GlobalSecretsHttpError(400, "generate is only valid for SSH keys")
+        _apply_generated_or_derived_ssh(secret_material, generate=True)
+    elif str(secret_material.get("privateKey") or "").strip():
+        _apply_generated_or_derived_ssh(secret_material, generate=False)
     try:
         secret = manager(data_dir).update_secret(
             secret_id=secret_id,
             name=data.get("name"),
             description=data.get("description"),
-            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
+            metadata=metadata,
             secret_material=secret_material or None,
         )
     except GlobalSecretError as exc:
@@ -107,6 +240,10 @@ def update_global_secret(data_dir: Path, secret_id: str, body: dict[str, Any]) -
         if "not found" in message.lower():
             raise GlobalSecretsHttpError(404, message) from exc
         raise GlobalSecretsHttpError(400, message) from exc
+    _apply_clusterctl_flag(data_dir, secret_id, data, created=False)
+    secret = _with_one_time_generated_private_key(
+        secret, secret_material, generate=generate
+    )
     return {"success": True, "secret": secret, "message": "Secret updated successfully"}
 
 
@@ -117,7 +254,24 @@ def delete_global_secret(data_dir: Path, secret_id: str) -> dict[str, Any]:
         raise GlobalSecretsHttpError(400, str(exc)) from exc
     if not deleted:
         raise GlobalSecretsHttpError(404, "Secret not found")
+    clear_clusterctl_ssh_if_matches(data_dir, secret_id)
     return {"success": True, "message": "Secret deleted successfully"}
+
+
+def get_clusterctl_ssh(data_dir: Path) -> dict[str, Any]:
+    payload = describe_clusterctl_ssh(data_dir)
+    payload["success"] = True
+    return payload
+
+
+def put_clusterctl_ssh(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
+    raw = (body or {}).get("sshSecretId")
+    secret_id = None if raw is None else str(raw).strip() or None
+    try:
+        saved = save_clusterctl_ssh_secret_id(data_dir, secret_id)
+    except ClusterctlSshError as exc:
+        raise GlobalSecretsHttpError(exc.status_code, exc.message) from exc
+    return {"success": True, "sshSecretId": saved}
 
 
 def global_secret_options(data_dir: Path, purpose: Optional[str] = None) -> dict[str, Any]:

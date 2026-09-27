@@ -9,14 +9,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from clusterctl_config import (  # noqa: E402
     apply_project_path_fields,
+    clusterctl_fetched_at_from_ui_config,
     clusterctl_root_from_project,
     clusterctl_root_from_ui_config,
     inspect_run_params_from_project,
     load_path_defaults,
+    remap_host_bind_path,
     resolve_clusters_root,
     resolve_configured_path,
     resolve_workspace_root,
     save_clusterctl_root_to_ui_config,
+    ENV_CLUSTERS_ROOT,
+    ENV_CLUSTERS_ROOT_HOST,
+    ENV_WORKSPACE_ROOT,
+    ENV_WORKSPACE_ROOT_HOST,
 )
 
 
@@ -28,15 +34,20 @@ class ClusterctlConfigTests(unittest.TestCase):
             key: os.environ.get(key)
             for key in (
                 "ATLAS_CLUSTER_ROOT",
+                "ATLAS_CLUSTER_ROOT_HOST",
                 "ATLAS_CLUSTERCTL_CONFIG",
                 "ATLAS_CLUSTERS_ROOT",
+                "ATLAS_CLUSTERS_ROOT_HOST",
                 "ATLAS_WORKSPACE_ROOT",
+                "ATLAS_WORKSPACE_ROOT_HOST",
                 "ATLAS_UI_CONFIG",
             )
         }
         os.environ.pop("ATLAS_CLUSTERCTL_CONFIG", None)
         os.environ.pop("ATLAS_CLUSTERS_ROOT", None)
+        os.environ.pop("ATLAS_CLUSTERS_ROOT_HOST", None)
         os.environ.pop("ATLAS_WORKSPACE_ROOT", None)
+        os.environ.pop("ATLAS_WORKSPACE_ROOT_HOST", None)
         os.environ["ATLAS_UI_CONFIG"] = str(self.root / "missing-ui-config.json")
 
     def tearDown(self):
@@ -151,6 +162,16 @@ class ClusterctlConfigTests(unittest.TestCase):
             1,
         )
 
+    def test_save_clusterctl_root_records_fetched_at(self):
+        cfg = self.root / "ui-config.json"
+        os.environ["ATLAS_UI_CONFIG"] = str(cfg)
+        dest = self.root / "atlas-clusterctl"
+        dest.mkdir()
+        save_clusterctl_root_to_ui_config(dest, fetched=True)
+        stamp = clusterctl_fetched_at_from_ui_config()
+        self.assertIsNotNone(stamp)
+        self.assertRegex(stamp or "", r"^\d{4}-\d{2}-\d{2}T")
+
     def test_env_beats_ui_config(self):
         os.environ["ATLAS_CLUSTER_ROOT"] = "/from-env"
         cfg = self.root / "ui-config.json"
@@ -228,6 +249,43 @@ class ClusterctlConfigTests(unittest.TestCase):
         self.assertEqual(
             resolve_workspace_root(ctl, {"workspace_root": str(missing_w)}),
             env_w.resolve(),
+        )
+
+    def test_remap_host_inventory_path_inside_container(self):
+        host = "/home/homer/Documents/git/atlas-inventory/clusters"
+        inside = self.root / "atlas-clusters"
+        inside.mkdir()
+        os.environ[ENV_CLUSTERS_ROOT] = str(inside)
+        os.environ[ENV_CLUSTERS_ROOT_HOST] = host + "/"
+        os.environ[ENV_WORKSPACE_ROOT] = str(self.root / "atlas-ws")
+        os.environ[ENV_WORKSPACE_ROOT_HOST] = (
+            "/home/homer/Documents/git/atlas-inventory/workspace/"
+        )
+        (self.root / "atlas-ws").mkdir()
+        mapped = remap_host_bind_path(
+            host,
+            host_env=ENV_CLUSTERS_ROOT_HOST,
+            container_env=ENV_CLUSTERS_ROOT,
+        )
+        self.assertEqual(mapped.resolve(), inside.resolve())
+        params = inspect_run_params_from_project(
+            {
+                "clustersRoot": host,
+                "workspaceRoot": "/home/homer/Documents/git/atlas-inventory/workspace",
+            }
+        )
+        self.assertEqual(Path(params["clusters_root"]).resolve(), inside.resolve())
+        ctl = self.root / "atlas-clusterctl"
+        ctl.mkdir()
+        self.assertEqual(
+            resolve_clusters_root(ctl, {"clusters_root": host}),
+            inside.resolve(),
+        )
+        from atlas_inspect import resolve_clusters_root_for_list
+
+        self.assertEqual(
+            resolve_clusters_root_for_list({"clusters_root": host}),
+            inside.resolve(),
         )
 
 

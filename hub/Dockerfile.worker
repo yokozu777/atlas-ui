@@ -1,35 +1,58 @@
-# Hub worker
-# Build context: atlas-ui repo root
+# Hub worker. Build context: atlas-ui repo root.
+# Alpine + ansible-core (playbook/vault/galaxy). Galaxy collections live in
+# the clusterctl workspace, not this image.
 # docker-cli talks to the host daemon via /var/run/docker.sock (sibling
-# krang container for execution.mode=docker). Not docker.io: that package
-# is dockerd, and Debian's split does not ship /usr/bin/docker.
-FROM python:3.14-slim
+# krang container for execution.mode=docker). Do not apk add docker: that
+# package is the engine, not /usr/bin/docker.
+ARG PYTHON_BASE_IMAGE=python:3.14-alpine
+
+FROM ${PYTHON_BASE_IMAGE} AS deps
+WORKDIR /build
+RUN apk add --no-cache gcc musl-dev libffi-dev openssl-dev
+COPY hub/worker/requirements.txt /build/requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r /build/requirements.txt
+
+FROM ${PYTHON_BASE_IMAGE}
+ARG INSTALL_CUSTOM_CA_SSL_CERT=true
+ARG CA_CERT_URL=https://ca.mxhash.com:8443/roots.pem
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-client \
-    ansible \
-    sshpass \
-    bash \
-    git \
-    ca-certificates \
-    docker-cli \
-    net-tools \
-    iputils-ping \
-    python3-passlib \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+      bash \
+      git \
+      openssh-client \
+      sshpass \
+      ca-certificates \
+      curl \
+      libffi \
+      openssl \
+      docker-cli \
+ && if [ "${INSTALL_CUSTOM_CA_SSL_CERT}" = "true" ]; then \
+      mkdir -p /usr/local/share/ca-certificates \
+      && curl -fsSk "${CA_CERT_URL}" -o /usr/local/share/ca-certificates/custom_ca.crt \
+      && update-ca-certificates; \
+    fi \
+ && apk del curl
 
-COPY hub/worker/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
+COPY --from=deps /install /usr/local
 COPY hub/clusterctl_config.py /app/clusterctl_config.py
+COPY hub/ssh_key_material.py /app/ssh_key_material.py
+COPY hub/ssh_temp.py /app/ssh_temp.py
+COPY hub/secret_encryption.py /app/secret_encryption.py
+COPY hub/project_secret_crypto.py /app/project_secret_crypto.py
+COPY hub/vault_pass.py /app/vault_pass.py
 COPY hub/worker /app/worker
-
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data \
+  && chmod +x /app/worker/docker-entrypoint.sh \
+  && find /usr/local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
+  && find /usr/local -type f -name '*.pyc' -delete 2>/dev/null || true \
+  && pip cache purge 2>/dev/null || true
 
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/app/data
 ENV WORKER_SERVER_URL=http://hub:8000
+ENV PYTHONDONTWRITEBYTECODE=1
 
+ENTRYPOINT ["/app/worker/docker-entrypoint.sh"]
 CMD ["python", "-m", "worker.main", "--poll-interval", "5", "--max-concurrency", "1"]

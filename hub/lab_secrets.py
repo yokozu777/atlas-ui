@@ -51,6 +51,9 @@ def resolve_jwt_secret(data_dir: Path) -> str:
 def resolve_encryption_key(data_dir: Path) -> str:
     env = os.environ.get("GLOBAL_SECRETS_ENCRYPTION_KEY", "").strip()
     if env:
+        path = encryption_key_path(data_dir)
+        if not _read_secret_file(path):
+            _write_secret_file(path, env)
         return env
     stored = _read_secret_file(encryption_key_path(data_dir))
     if stored:
@@ -84,6 +87,11 @@ def ensure_lab_secrets(data_dir: Path) -> None:
                 _write_secret_file(path, secrets.token_urlsafe(32))
                 stored = _read_secret_file(path)
         os.environ["GLOBAL_SECRETS_ENCRYPTION_KEY"] = stored
+    else:
+        path = encryption_key_path(data_dir)
+        env_key = os.environ["GLOBAL_SECRETS_ENCRYPTION_KEY"].strip()
+        if env_key and not _read_secret_file(path):
+            _write_secret_file(path, env_key)
 
 
 if __name__ == "__main__":

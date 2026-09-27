@@ -37,9 +37,20 @@ export type RawPlaybook = {
   description?: string;
 };
 
+export type ExecutionRunParams = {
+  inventory_files?: string[];
+  ansible_config?: string;
+  cluster_id?: string;
+  phases?: string[];
+  argv?: string[];
+  root_ssh?: boolean;
+  executor?: string;
+};
+
 export type RawExecution = {
   id?: string;
   executionId?: string;
+  kind?: string;
   status?: string;
   playbookId?: string;
   playbook_id?: string;
@@ -52,7 +63,7 @@ export type RawExecution = {
   duration?: number | null;
   workerName?: string;
   selectionSnapshot?: { playbookName?: string; playbookId?: string };
-  runParams?: { inventory_files?: string[] };
+  runParams?: ExecutionRunParams;
 };
 
 export type RawWorker = {
@@ -93,10 +104,13 @@ export type DashboardExecution = {
   playbookName: string;
   playbookId: string | null;
   status: StatusKind;
+  rawStatus?: string;
+  kind?: string | null;
   target: string;
   duration: string;
   startedAt: number | null;
   workerName: string;
+  runParams?: ExecutionRunParams;
 };
 
 export type RepoPullKind = "ok" | "error" | "idle";
@@ -350,6 +364,8 @@ export function mapExecution(
     playbookName: playbookNameOf(raw),
     playbookId: playbookIdOf(raw, playbooks),
     status: executionStatusKind(raw.status),
+    rawStatus: raw.status,
+    kind: raw.kind ?? null,
     target: targetLabel(raw),
     duration: durationLabel(raw),
     startedAt:
@@ -358,6 +374,7 @@ export function mapExecution(
       toMs(raw.createdAt) ??
       toMs(raw.created_at),
     workerName: displayOrDash(raw.workerName),
+    runParams: raw.runParams,
   };
 }
 

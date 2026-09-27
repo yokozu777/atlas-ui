@@ -28,4 +28,5 @@ export {
   formatClockTime,
   joinPlainLines,
   normalizeLogChunk,
+  parseLogText,
 } from "./ingest";

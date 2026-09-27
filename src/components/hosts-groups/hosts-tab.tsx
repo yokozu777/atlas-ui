@@ -3,7 +3,6 @@
 import { Check, Info, KeyRound, Layers, Plus, Search } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
-import { LogViewer } from "@/components/log-viewer";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,8 +19,13 @@ import {
 import {
   groupBadgeVariant,
   hostStatusKind,
+  hostStatusLabel,
   parseYamlScalars,
 } from "@/components/hosts-groups/helpers";
+import type { HostStatus } from "@/components/hosts-groups/types";
+
+import { useCan } from "@/lib/authz";
+import { formatRelativeTime } from "@/lib/project-dashboard";
 
 export type HostTableRow = {
   name: string;
@@ -29,9 +33,15 @@ export type HostTableRow = {
   inventoryFile: string;
   varsFile: string;
   status: string;
+  lastCheckedAt?: string | null;
   connectionSecret?: string;
   ansibleUser?: string;
   ansiblePort?: string;
+};
+
+export type AtlasSshDisplay = {
+  name: string | null;
+  fingerprint: string | null;
 };
 
 export function buildHostRows(
@@ -39,7 +49,7 @@ export function buildHostRows(
   hostGroups: Record<string, string[]>,
   inventoryFile: string,
   hostVars: Record<string, string>,
-  statuses: Record<string, { status?: string }>,
+  statuses: Record<string, HostStatus>,
 ): HostTableRow[] {
   return names.map((name) => {
     const parsed = parseYamlScalars(hostVars[name] || "");
@@ -49,6 +59,7 @@ export function buildHostRows(
       inventoryFile,
       varsFile: parsed.vars_file || `host_vars/${name}.yml`,
       status: statuses[name]?.status || "unknown",
+      lastCheckedAt: statuses[name]?.last_checked_at || null,
       connectionSecret: parsed.connectionSecret,
       ansibleUser: parsed.ansible_user,
       ansiblePort: parsed.ansible_port,
@@ -71,10 +82,7 @@ export function HostsTab({
   busy,
   running,
   checkingHost,
-  executionId,
-  logText,
-  logRunning,
-  logHost,
+  atlasSsh,
 }: {
   rows: HostTableRow[];
   selected: string[];
@@ -90,11 +98,9 @@ export function HostsTab({
   busy: boolean;
   running: boolean;
   checkingHost: string | null;
-  executionId: string | null;
-  logText: string;
-  logRunning: boolean;
-  logHost: string | null;
+  atlasSsh?: AtlasSshDisplay | null;
 }) {
+  const can = useCan();
   const filtered = rows.filter((row) => {
     const q = search.trim().toLowerCase();
     if (!q) return true;
@@ -126,14 +132,16 @@ export function HostsTab({
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium">Hosts</p>
         <div className="flex flex-wrap items-center gap-2">
+          {can("inventory.create") ? (
           <Button size="sm" onClick={onAddHost}>
             <Plus />
             Add Host
           </Button>
+          ) : null}
           <Button
             size="sm"
             variant="outline"
-            disabled={busy || running}
+            disabled={busy || running || !can("playbooks.execute")}
             onClick={onCheckAll}
           >
             <Check />
@@ -176,15 +184,25 @@ export function HostsTab({
           </TableHeader>
           <TableBody>
             {filtered.map((row) => {
-              const kind = hostStatusKind(row.status);
+              const checking = checkingHost === row.name;
+              const displayStatus = checking ? "checking" : row.status;
+              const kind = hostStatusKind(displayStatus);
               const conn = row.connectionSecret
                 ? `${row.connectionSecret}${
                     row.ansibleUser
                       ? ` (${row.ansibleUser}@${row.ansiblePort || "22"})`
                       : ""
                   }`
-                : "—";
-              const checking = checkingHost === row.name || (logHost === row.name && logRunning);
+                : atlasSsh?.name
+                  ? `${atlasSsh.name} (${row.ansibleUser || "root"}@${row.ansiblePort || "22"})`
+                  : "—";
+              const inherited = !row.connectionSecret && Boolean(atlasSsh?.name);
+              const checkedAt = row.lastCheckedAt
+                ? formatRelativeTime(row.lastCheckedAt)
+                : null;
+              const checkedTitle = row.lastCheckedAt
+                ? new Date(row.lastCheckedAt).toLocaleString()
+                : undefined;
               return (
                 <TableRow key={row.name}>
                   <TableCell>
@@ -212,10 +230,14 @@ export function HostsTab({
                       <span className="font-mono text-xs text-muted-foreground">
                         {conn}
                       </span>
+                      {inherited ? (
+                        <Badge variant="outline">Atlas</Badge>
+                      ) : null}
                       <Button
                         size="xs"
                         variant="link"
                         className="h-auto px-0 text-info"
+                        disabled={!can("inventory.update")}
                         onClick={() => onConnection(row)}
                       >
                         Override
@@ -229,16 +251,28 @@ export function HostsTab({
                     {row.varsFile}
                   </TableCell>
                   <TableCell>
-                    <StatusBadge status={kind}>
-                      {(row.status || "unknown").toUpperCase()}
-                    </StatusBadge>
+                    <div className="flex flex-col items-start gap-0.5">
+                      <StatusBadge status={kind}>
+                        {hostStatusLabel(displayStatus)}
+                      </StatusBadge>
+                      <span
+                        className="text-[11px] text-muted-foreground"
+                        title={checkedTitle}
+                      >
+                        {checkedAt
+                          ? `Checked ${checkedAt}`
+                          : checking
+                            ? "Checking…"
+                            : "Never checked"}
+                      </span>
+                    </div>
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
                       <Button
                         size="xs"
                         variant="ghost"
-                        disabled={busy || running}
+                        disabled={busy || running || !can("playbooks.execute")}
                         onClick={() => onCheck(row.name)}
                       >
                         <Check />
@@ -247,12 +281,12 @@ export function HostsTab({
                       <Button
                         size="xs"
                         variant="ghost"
-                        disabled={busy || running}
                         onClick={() => onFacts(row.name)}
                       >
                         <Info />
-                        Get facts
+                        Host facts
                       </Button>
+                      {can("inventory.update") ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -261,6 +295,8 @@ export function HostsTab({
                         <Layers />
                         Assign Group
                       </Button>
+                      ) : null}
+                      {can("inventory.update") ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -269,6 +305,7 @@ export function HostsTab({
                         <KeyRound />
                         Connection
                       </Button>
+                      ) : null}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -277,17 +314,6 @@ export function HostsTab({
           </TableBody>
         </Table>
       )}
-      {executionId ? (
-        <div className="mt-6">
-          <LogViewer
-            jobId={null}
-            text={logText}
-            running={logRunning}
-            compact
-            label={`${logHost || "host"} ${executionId}`}
-          />
-        </div>
-      ) : null}
     </div>
   );
 }

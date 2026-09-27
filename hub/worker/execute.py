@@ -478,24 +478,34 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                             key_path = Path(key_file_path)
                             if key_path.exists() and key_path.suffix == '.json':
                                 try:
-                                    # Загружаем секрет из JSON
-                                    with open(key_path, 'r', encoding='utf-8') as f:
-                                        secret_data = json.load(f)
-                                    
+                                    from project_secret_crypto import (
+                                        ProjectSecretError,
+                                        read_project_secret,
+                                    )
+
+                                    try:
+                                        secret_data = read_project_secret(key_path)
+                                    except ProjectSecretError as exc:
+                                        logger.error(
+                                            "[execute_run] Failed to decrypt secret %s: %s",
+                                            connection_secret_name,
+                                            exc,
+                                        )
+                                        raise RuntimeError(
+                                            f"Cannot decrypt secret {connection_secret_name}: {exc}. "
+                                            "Set GLOBAL_SECRETS_ENCRYPTION_KEY or data/auth/encryption_key."
+                                        ) from exc
+
                                     if secret_data.get('type') == 'ssh_key':
                                         private_key = secret_data.get('privateKey', '')
                                         if private_key:
-                                            # Создаем временный файл ключа
-                                            temp_key_file = TEMP_DIR / f'ssh_key_{uuid.uuid4().hex[:8]}.pem'
-                                            TEMP_DIR.mkdir(parents=True, exist_ok=True)
-                                            
-                                            with open(temp_key_file, 'w', encoding='utf-8') as f:
-                                                key_content = private_key
-                                                if not key_content.endswith('\n'):
-                                                    key_content = key_content + '\n'
-                                                f.write(key_content)
-                                            
-                                            os.chmod(temp_key_file, 0o600)
+                                            from ssh_temp import write_ssh_identity
+
+                                            temp_key_file = write_ssh_identity(
+                                                private_key,
+                                                data_dir=TEMP_DIR.parent,
+                                                passphrase=str(secret_data.get('passphrase') or ''),
+                                            )
                                             abs_key_path = str(temp_key_file.resolve())
                                             
                                             # Сохраняем путь для последующего удаления
@@ -524,10 +534,16 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                                     elif secret_data.get('type') == 'login_password':
                                         # Для пароля ничего не делаем, он уже в host_vars
                                         logger.debug(f"[execute_run] Using password from secret {connection_secret_name} for host {host_name}")
+                                except RuntimeError:
+                                    raise
                                 except Exception as e:
                                     logger.error(f"[execute_run] Error processing connection secret for host {host_name}: {e}")
+                                    raise
+                except RuntimeError:
+                    raise
                 except Exception as e:
                     logger.error(f"[execute_run] Error in process_host_connection_secrets: {e}")
+                    raise
                 
                 return temp_key_files_list, host_vars_updates
             

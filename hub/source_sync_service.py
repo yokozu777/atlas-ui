@@ -79,7 +79,182 @@ class SourceSyncService:
         
         # Sync state file per project
         self._sync_state_file = lambda project_id: projects_dir / project_id / '.sync_state.json'
-    
+
+    def _git_run(self, args, *, cwd, env=None, check=False):
+        result = subprocess.run(
+            args, cwd=str(cwd), capture_output=True, text=True, env=env
+        )
+        logger.info(
+            "[GIT] %s returncode=%s stdout=%s stderr=%s",
+            " ".join(args),
+            result.returncode,
+            (result.stdout or "").strip() or "none",
+            (result.stderr or "").strip() or "none",
+        )
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, args, result.stdout, result.stderr
+            )
+        return result
+
+    def _git_ensure_identity(self, work_dir: Path) -> None:
+        for cfg_key, cfg_val in (
+            ("user.email", "stargate@local"),
+            ("user.name", "Stargate Sync"),
+        ):
+            check = self._git_run(["git", "config", "--get", cfg_key], cwd=work_dir)
+            if check.returncode != 0 or not (check.stdout or "").strip():
+                self._git_run(
+                    ["git", "config", cfg_key, cfg_val], cwd=work_dir, check=True
+                )
+
+    def _git_checkout_ref(self, work_dir: Path, ref: str) -> None:
+        current = self._git_run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=work_dir)
+        current_branch = current.stdout.strip() if current.returncode == 0 else None
+        verify = self._git_run(["git", "rev-parse", "--verify", ref], cwd=work_dir)
+        if verify.returncode != 0:
+            result = self._git_run(["git", "checkout", "-b", ref], cwd=work_dir)
+            if result.returncode != 0:
+                logger.error("[PUSH] Failed to create branch %s: %s", ref, result.stderr)
+        elif current_branch != ref:
+            result = self._git_run(["git", "checkout", ref], cwd=work_dir)
+            if result.returncode != 0:
+                logger.error("[PUSH] Failed to checkout branch %s: %s", ref, result.stderr)
+
+    def _git_head_revision(self, work_dir: Path) -> str:
+        result = self._git_run(["git", "rev-parse", "HEAD"], cwd=work_dir, check=True)
+        return (result.stdout or "").strip()
+
+    def _git_commit_and_push(
+        self,
+        work_dir: Path,
+        *,
+        ref: str,
+        source_key: str,
+        project_id: str,
+        auth_secret_id: Optional[str],
+        repo_url: str,
+        push: bool = True,
+    ) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+        """Shared add/commit/push for repo layout and legacy sources."""
+        logger.info(
+            "[PUSH] Starting git push for project %s, source %s, branch %s",
+            project_id,
+            source_key,
+            ref,
+        )
+        self._git_ensure_identity(work_dir)
+        self._git_checkout_ref(work_dir, ref)
+
+        commit_check = self._git_run(["git", "rev-list", "--count", "HEAD"], cwd=work_dir)
+        has_commits = False
+        if commit_check.returncode == 0:
+            try:
+                has_commits = int((commit_check.stdout or "0").strip() or "0") > 0
+            except ValueError:
+                has_commits = False
+
+        add_result = self._git_run(["git", "add", "-A"], cwd=work_dir)
+        if add_result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                add_result.returncode, ["git", "add", "-A"], add_result.stdout, add_result.stderr
+            )
+        status_result = self._git_run(["git", "status", "--porcelain"], cwd=work_dir)
+        has_changes = bool((status_result.stdout or "").strip())
+        if has_changes:
+            commit_msg = f"Sync {source_key} from Project Storage"
+            commit_result = self._git_run(
+                ["git", "commit", "-m", commit_msg], cwd=work_dir
+            )
+            if commit_result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    commit_result.returncode,
+                    ["git", "commit", "-m", commit_msg],
+                    commit_result.stdout,
+                    commit_result.stderr,
+                )
+            has_commits = True
+        if not has_commits:
+            status_result = self._git_run(["git", "status", "--porcelain"], cwd=work_dir)
+            ls_result = self._git_run(["git", "ls-files"], cwd=work_dir)
+            has_files = bool((status_result.stdout or "").strip()) or bool(
+                (ls_result.stdout or "").strip()
+            )
+            if not has_files:
+                return (
+                    False,
+                    SyncErrorCode.SYNC_IO_ERROR.value,
+                    "Repository is empty. Add files to repository before pushing.",
+                    None,
+                )
+            add_result = self._git_run(["git", "add", "-A"], cwd=work_dir)
+            if add_result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    add_result.returncode,
+                    ["git", "add", "-A"],
+                    add_result.stdout,
+                    add_result.stderr,
+                )
+            commit_msg = f"Initial commit: Sync {source_key} from Project Storage"
+            commit_result = self._git_run(
+                ["git", "commit", "-m", commit_msg], cwd=work_dir
+            )
+            if commit_result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    commit_result.returncode,
+                    ["git", "commit", "-m", commit_msg],
+                    commit_result.stdout,
+                    commit_result.stderr,
+                )
+            has_commits = True
+        if not has_commits:
+            return (
+                False,
+                SyncErrorCode.SYNC_IO_ERROR.value,
+                f"Cannot push: branch {ref} has no commits. Make at least one commit first.",
+                None,
+            )
+        if not push:
+            return True, None, None, self._git_head_revision(work_dir)
+        if not auth_secret_id:
+            return (
+                False,
+                SyncErrorCode.SYNC_GIT_AUTH_FAILED.value,
+                "Git authentication not configured. Please configure authSecretId in source settings.",
+                None,
+            )
+        with self.git_source_manager.auth_env(
+            project_id, auth_secret_id, repo_url
+        ) as git_env:
+            return self._git_push_origin(work_dir, ref, git_env)
+
+    def _git_push_origin(self, work_dir: Path, ref: str, git_env: dict) -> Tuple[
+        bool, Optional[str], Optional[str], Optional[str]
+    ]:
+        from ssh_temp import DEFAULT_GIT_SSH_COMMAND
+
+        if not git_env.get("GIT_SSH_COMMAND"):
+            git_env["GIT_SSH_COMMAND"] = DEFAULT_GIT_SSH_COMMAND
+        tracking = self._git_run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=work_dir,
+        )
+        if tracking.returncode != 0:
+            push_cmd = ["git", "push", "--set-upstream", "origin", ref]
+        else:
+            push_cmd = ["git", "push", "origin", ref]
+        push_result = self._git_run(push_cmd, cwd=work_dir, env=git_env)
+        if push_result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                push_result.returncode,
+                push_cmd,
+                push_result.stdout,
+                push_result.stderr,
+            )
+        revision = self._git_head_revision(work_dir)
+        logger.info("[PUSH] Push successful, revision: %s", revision)
+        return True, None, None, revision
+
     def get_project_storage_path(self, project_id: str, source_key: str) -> Path:
         """
         Get Project Storage path for a source.
@@ -696,192 +871,15 @@ class SourceSyncService:
                 logger.info(f"[PUSH]   - Git push base: {git_push_base}")
                 logger.info(f"[PUSH]   - RepoLayout paths: {repo_layout}")
                 logger.info(f"[PUSH] Starting git add/commit/push sequence")
-                
-                # Commit and push
-                original_cwd = os.getcwd()
-                try:
-                    os.chdir(str(git_work_dir))
-                    logger.info(f"[PUSH] Starting git push for project {project_id}, source {source_key}, branch {ref}")
-                    logger.info(f"[PUSH] Working directory: {git_work_dir}")
-                    
-                    # Ensure git user identity for commit (required by git)
-                    for cfg_key, cfg_val in [('user.email', 'stargate@local'), ('user.name', 'Stargate Sync')]:
-                        check = subprocess.run(['git', 'config', '--get', cfg_key], cwd=str(git_work_dir), capture_output=True, text=True)
-                        if check.returncode != 0 or not (check.stdout or '').strip():
-                            subprocess.run(['git', 'config', cfg_key, cfg_val], cwd=str(git_work_dir), capture_output=True, check=True)
-                            logger.info(f"[PUSH] Set git config {cfg_key} = {cfg_val}")
-                    
-                    # Check current branch
-                    logger.info(f"[PUSH] Running: git rev-parse --abbrev-ref HEAD")
-                    current_branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True)
-                    current_branch = current_branch_result.stdout.strip() if current_branch_result.returncode == 0 else None
-                    logger.info(f"[PUSH] Current branch: {current_branch}")
-                    if current_branch_result.stderr:
-                        logger.info(f"[PUSH] git rev-parse stderr: {current_branch_result.stderr}")
-                    
-                    # Check if target branch exists
-                    logger.info(f"[PUSH] Running: git rev-parse --verify {ref}")
-                    branch_check = subprocess.run(['git', 'rev-parse', '--verify', ref], capture_output=True, text=True)
-                    logger.info(f"[PUSH] Branch check result: returncode={branch_check.returncode}, stdout={branch_check.stdout.strip()}, stderr={branch_check.stderr.strip() if branch_check.stderr else 'none'}")
-                    if branch_check.returncode != 0:
-                        # Branch doesn't exist, create it
-                        logger.info(f"[PUSH] Branch {ref} doesn't exist, creating it")
-                        logger.info(f"[PUSH] Running: git checkout -b {ref}")
-                        checkout_result = subprocess.run(['git', 'checkout', '-b', ref], capture_output=True, text=True)
-                        logger.info(f"[PUSH] Checkout result: returncode={checkout_result.returncode}, stdout={checkout_result.stdout.strip()}, stderr={checkout_result.stderr.strip() if checkout_result.stderr else 'none'}")
-                        if checkout_result.returncode != 0:
-                            logger.error(f"[PUSH] Failed to create branch {ref}: {checkout_result.stderr}")
-                    elif current_branch != ref:
-                        # Switch to target branch
-                        logger.info(f"[PUSH] Switching to branch {ref}")
-                        logger.info(f"[PUSH] Running: git checkout {ref}")
-                        checkout_result = subprocess.run(['git', 'checkout', ref], capture_output=True, text=True)
-                        logger.info(f"[PUSH] Checkout result: returncode={checkout_result.returncode}, stdout={checkout_result.stdout.strip()}, stderr={checkout_result.stderr.strip() if checkout_result.stderr else 'none'}")
-                        if checkout_result.returncode != 0:
-                            logger.error(f"[PUSH] Failed to checkout branch {ref}: {checkout_result.stderr}")
-                    
-                    # Check if there are any commits
-                    logger.info(f"[PUSH] Running: git rev-list --count HEAD")
-                    commit_check = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], capture_output=True, text=True)
-                    has_commits = commit_check.returncode == 0 and int(commit_check.stdout.strip()) > 0
-                    logger.info(f"[PUSH] Repository has {commit_check.stdout.strip() if has_commits else '0'} commits")
-                    if commit_check.stderr:
-                        logger.info(f"[PUSH] git rev-list stderr: {commit_check.stderr}")
-                    
-                    # Add all changes (включая roles, playbooks, inventories)
-                    logger.info(f"[PUSH] Running: git add -A (adding all files including roles, playbooks, inventories)")
-                    add_result = subprocess.run(['git', 'add', '-A'], capture_output=True, text=True)
-                    logger.info(f"[PUSH] git add result: returncode={add_result.returncode}, stdout={add_result.stdout.strip() if add_result.stdout else 'none'}, stderr={add_result.stderr.strip() if add_result.stderr else 'none'}")
-                    if add_result.returncode != 0:
-                        logger.error(f"[PUSH] git add failed: {add_result.stderr}")
-                        raise subprocess.CalledProcessError(add_result.returncode, ['git', 'add', '-A'], add_result.stdout, add_result.stderr)
-                    
-                    # Проверяем, что файлы добавлены
-                    logger.info(f"[PUSH] Running: git status --porcelain")
-                    status_result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
-                    has_changes = bool(status_result.stdout.strip())
-                    logger.info(f"[PUSH] Has changes to commit: {has_changes}")
-                    if status_result.stdout.strip():
-                        logger.info(f"[PUSH] Files to commit:\n{status_result.stdout.strip()}")
-                    else:
-                        logger.info(f"[PUSH] No changes detected after git add")
-                    if status_result.stderr:
-                        logger.info(f"[PUSH] git status stderr: {status_result.stderr}")
-                    
-                    # Commit only if there are changes
-                    if has_changes:
-                        commit_msg = f"Sync {source_key} from Project Storage"
-                        logger.info(f"[PUSH] Running: git commit -m '{commit_msg}'")
-                        commit_result = subprocess.run(['git', 'commit', '-m', commit_msg], capture_output=True, text=True)
-                        logger.info(f"[PUSH] git commit result: returncode={commit_result.returncode}, stdout={commit_result.stdout.strip() if commit_result.stdout else 'none'}, stderr={commit_result.stderr.strip() if commit_result.stderr else 'none'}")
-                        if commit_result.returncode != 0:
-                            logger.error(f"[PUSH] git commit failed: {commit_result.stderr}")
-                            raise subprocess.CalledProcessError(commit_result.returncode, ['git', 'commit', '-m', commit_msg], commit_result.stdout, commit_result.stderr)
-                        has_commits = True  # После коммита точно есть коммиты
-                    else:
-                        logger.info(f"[PUSH] No changes to commit")
-                    
-                    # Если нет коммитов вообще, создаем первый коммит
-                    if not has_commits:
-                        logger.info(f"[PUSH] No commits found, checking if files exist for initial commit")
-                        # Проверяем, есть ли файлы для коммита (включая untracked)
-                        status_result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
-                        ls_result = subprocess.run(['git', 'ls-files'], capture_output=True, text=True)
-                        has_files = bool(status_result.stdout.strip()) or bool(ls_result.stdout.strip())
-                        
-                        if not has_files:
-                            logger.error(f"[PUSH] Repository is empty, nothing to push")
-                            return False, SyncErrorCode.SYNC_IO_ERROR.value, f"Repository is empty. Add files to repository before pushing.", None
-                        
-                        # Добавляем все файлы перед первым коммитом
-                        logger.info(f"[PUSH] Adding all files for initial commit")
-                        logger.info(f"[PUSH] Running: git add -A")
-                        add_result = subprocess.run(['git', 'add', '-A'], capture_output=True, text=True)
-                        logger.info(f"[PUSH] git add result: returncode={add_result.returncode}, stdout={add_result.stdout.strip() if add_result.stdout else 'none'}, stderr={add_result.stderr.strip() if add_result.stderr else 'none'}")
-                        if add_result.returncode != 0:
-                            logger.error(f"[PUSH] git add failed: {add_result.stderr}")
-                            raise subprocess.CalledProcessError(add_result.returncode, ['git', 'add', '-A'], add_result.stdout, add_result.stderr)
-                        
-                        # Создаем первый коммит
-                        commit_msg = f"Initial commit: Sync {source_key} from Project Storage"
-                        logger.info(f"[PUSH] Running: git commit -m '{commit_msg}' (initial commit)")
-                        commit_result = subprocess.run(['git', 'commit', '-m', commit_msg], capture_output=True, text=True)
-                        logger.info(f"[PUSH] git commit result: returncode={commit_result.returncode}, stdout={commit_result.stdout.strip() if commit_result.stdout else 'none'}, stderr={commit_result.stderr.strip() if commit_result.stderr else 'none'}")
-                        if commit_result.returncode != 0:
-                            logger.error(f"[PUSH] git commit failed: {commit_result.stderr}")
-                            raise subprocess.CalledProcessError(commit_result.returncode, ['git', 'commit', '-m', commit_msg], commit_result.stdout, commit_result.stderr)
-                        has_commits = True
-                    
-                    # Push (if auth configured)
-                    if not auth_secret_id:
-                        logger.error(f"[PUSH] No auth_secret_id configured, cannot push")
-                        return False, SyncErrorCode.SYNC_GIT_AUTH_FAILED.value, "Git authentication not configured. Please configure authSecretId in source settings.", None
-                    
-                    try:
-                        git_env = self.git_source_manager._get_auth_env(project_id, auth_secret_id, repo_url)
-                    except GitSourceError as e:
-                        return False, SyncErrorCode.SYNC_GIT_AUTH_FAILED.value, str(e), None
-                    if not git_env.get('GIT_SSH_COMMAND'):
-                        git_env['GIT_SSH_COMMAND'] = 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-                        logger.info(f"[PUSH] Set GIT_SSH_COMMAND for host key bypass")
-                    
-                    # Проверяем, что есть коммиты для push
-                    if not has_commits:
-                        logger.error(f"[PUSH] Cannot push: branch {ref} has no commits")
-                        return False, SyncErrorCode.SYNC_IO_ERROR.value, f"Cannot push: branch {ref} has no commits. Make at least one commit first.", None
-                    
-                    # Проверяем, есть ли что-то для push (новые коммиты или изменения)
-                    # Получаем список коммитов, которые еще не в origin
-                    logger.info(f"[PUSH] Running: git rev-list --count HEAD...origin/{ref}")
-                    ahead_check = subprocess.run(['git', 'rev-list', '--count', f'HEAD...origin/{ref}'], capture_output=True, text=True)
-                    commits_ahead = ahead_check.returncode == 0 and int(ahead_check.stdout.strip()) > 0
-                    logger.info(f"[PUSH] Commits ahead of origin/{ref}: {ahead_check.stdout.strip() if commits_ahead else '0'}")
-                    if ahead_check.stderr:
-                        logger.info(f"[PUSH] git rev-list stderr: {ahead_check.stderr}")
-                    
-                    # Push даже если нет новых коммитов (может быть нужно обновить remote)
-                    # Используем --set-upstream для первого push, если ветка еще не отслеживается
-                    logger.info(f"[PUSH] Running: git rev-parse --abbrev-ref --symbolic-full-name @{{u}}")
-                    tracking_check = subprocess.run(['git', 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], capture_output=True, text=True)
-                    has_tracking = tracking_check.returncode == 0
-                    logger.info(f"[PUSH] Branch tracking check: returncode={tracking_check.returncode}, has_tracking={has_tracking}")
-                    if tracking_check.stderr:
-                        logger.info(f"[PUSH] git rev-parse tracking stderr: {tracking_check.stderr}")
-                    
-                    if not has_tracking:
-                        logger.info(f"[PUSH] Branch doesn't track remote, using --set-upstream")
-                        logger.info(f"[PUSH] Running: git push --set-upstream origin {ref}")
-                        push_result = subprocess.run(['git', 'push', '--set-upstream', 'origin', ref], capture_output=True, text=True, env=git_env)
-                        logger.info(f"[PUSH] git push result: returncode={push_result.returncode}, stdout={push_result.stdout.strip() if push_result.stdout else 'none'}, stderr={push_result.stderr.strip() if push_result.stderr else 'none'}")
-                        if push_result.returncode != 0:
-                            logger.error(f"[PUSH] git push failed: {push_result.stderr}")
-                            raise subprocess.CalledProcessError(push_result.returncode, ['git', 'push', '--set-upstream', 'origin', ref], push_result.stdout, push_result.stderr)
-                    else:
-                        logger.info(f"[PUSH] Running: git push origin {ref}")
-                        push_result = subprocess.run(['git', 'push', 'origin', ref], capture_output=True, text=True, env=git_env)
-                        logger.info(f"[PUSH] git push result: returncode={push_result.returncode}, stdout={push_result.stdout.strip() if push_result.stdout else 'none'}, stderr={push_result.stderr.strip() if push_result.stderr else 'none'}")
-                        if push_result.returncode != 0:
-                            logger.error(f"[PUSH] git push failed: {push_result.stderr}")
-                            raise subprocess.CalledProcessError(push_result.returncode, ['git', 'push', 'origin', ref], push_result.stdout, push_result.stderr)
-                    
-                    # Compute revision
-                    logger.info(f"[PUSH] Running: git rev-parse HEAD")
-                    result = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True)
-                    revision = result.stdout.strip()
-                    logger.info(f"[PUSH] Push successful, revision: {revision}")
-                    
-                    return True, None, None, revision
-                except subprocess.CalledProcessError as e:
-                    error_msg = e.stderr.decode('utf-8') if isinstance(e.stderr, bytes) else str(e.stderr) if e.stderr else str(e)
-                    stdout_msg = e.stdout.decode('utf-8') if isinstance(e.stdout, bytes) else str(e.stdout) if e.stdout else ""
-                    logger.error(f"[PUSH] Git command failed: {' '.join(e.cmd)}")
-                    logger.error(f"[PUSH] Exit code: {e.returncode}")
-                    logger.error(f"[PUSH] stdout: {stdout_msg}")
-                    logger.error(f"[PUSH] stderr: {error_msg}")
-                    raise
-                finally:
-                    os.chdir(original_cwd)
-            
+                return self._git_commit_and_push(
+                    git_work_dir,
+                    ref=ref,
+                    source_key=source_key,
+                    project_id=project_id,
+                    auth_secret_id=auth_secret_id,
+                    repo_url=repo_url,
+                )
+
             # Стандартная логика синхронизации (только для старого формата, не repo source)
             # Resolve git path (working copy)
             resolved = self.git_source_manager.resolve_path(
@@ -931,189 +929,15 @@ class SourceSyncService:
                         else:
                             shutil.copy2(item, git_work_dir / item.name)
             
-            # Commit and push (using git commands)
-            # Change to git work dir
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(str(git_work_dir))
-                logger.info(f"[PUSH] Starting git push for project {project_id}, source {source_key}, branch {ref} (legacy format)")
-                logger.info(f"[PUSH] Working directory: {git_work_dir}")
-                
-                # Ensure git user identity for commit (required by git)
-                for cfg_key, cfg_val in [('user.email', 'stargate@local'), ('user.name', 'Stargate Sync')]:
-                    check = subprocess.run(['git', 'config', '--get', cfg_key], capture_output=True, text=True)
-                    if check.returncode != 0 or not (check.stdout or '').strip():
-                        subprocess.run(['git', 'config', cfg_key, cfg_val], capture_output=True, check=True)
-                        logger.info(f"[PUSH] Set git config {cfg_key} = {cfg_val} (legacy format)")
-                
-                # Check current branch
-                logger.info(f"[PUSH] Running: git rev-parse --abbrev-ref HEAD (legacy format)")
-                current_branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True)
-                current_branch = current_branch_result.stdout.strip() if current_branch_result.returncode == 0 else None
-                logger.info(f"[PUSH] Current branch: {current_branch} (legacy format)")
-                if current_branch_result.stderr:
-                    logger.info(f"[PUSH] git rev-parse stderr: {current_branch_result.stderr} (legacy format)")
-                
-                # Check if target branch exists
-                logger.info(f"[PUSH] Running: git rev-parse --verify {ref} (legacy format)")
-                branch_check = subprocess.run(['git', 'rev-parse', '--verify', ref], capture_output=True, text=True)
-                logger.info(f"[PUSH] Branch check result: returncode={branch_check.returncode}, stdout={branch_check.stdout.strip()}, stderr={branch_check.stderr.strip() if branch_check.stderr else 'none'} (legacy format)")
-                if branch_check.returncode != 0:
-                    # Branch doesn't exist, create it
-                    logger.info(f"[PUSH] Branch {ref} doesn't exist, creating it (legacy format)")
-                    logger.info(f"[PUSH] Running: git checkout -b {ref} (legacy format)")
-                    checkout_result = subprocess.run(['git', 'checkout', '-b', ref], capture_output=True, text=True)
-                    logger.info(f"[PUSH] Checkout result: returncode={checkout_result.returncode}, stdout={checkout_result.stdout.strip()}, stderr={checkout_result.stderr.strip() if checkout_result.stderr else 'none'} (legacy format)")
-                    if checkout_result.returncode != 0:
-                        logger.error(f"[PUSH] Failed to create branch {ref}: {checkout_result.stderr} (legacy format)")
-                elif current_branch != ref:
-                    # Switch to target branch
-                    logger.info(f"[PUSH] Switching to branch {ref} (legacy format)")
-                    logger.info(f"[PUSH] Running: git checkout {ref} (legacy format)")
-                    checkout_result = subprocess.run(['git', 'checkout', ref], capture_output=True, text=True)
-                    logger.info(f"[PUSH] Checkout result: returncode={checkout_result.returncode}, stdout={checkout_result.stdout.strip()}, stderr={checkout_result.stderr.strip() if checkout_result.stderr else 'none'} (legacy format)")
-                    if checkout_result.returncode != 0:
-                        logger.error(f"[PUSH] Failed to checkout branch {ref}: {checkout_result.stderr} (legacy format)")
-                
-                # Check if there are any commits
-                logger.info(f"[PUSH] Running: git rev-list --count HEAD (legacy format)")
-                commit_check = subprocess.run(['git', 'rev-list', '--count', 'HEAD'], capture_output=True, text=True)
-                has_commits = commit_check.returncode == 0 and int(commit_check.stdout.strip()) > 0
-                logger.info(f"[PUSH] Repository has {commit_check.stdout.strip() if has_commits else '0'} commits (legacy format)")
-                if commit_check.stderr:
-                    logger.info(f"[PUSH] git rev-list stderr: {commit_check.stderr} (legacy format)")
-                
-                # Add all changes
-                logger.info(f"[PUSH] Running: git add -A (legacy format)")
-                add_result = subprocess.run(['git', 'add', '-A'], capture_output=True, text=True)
-                logger.info(f"[PUSH] git add result: returncode={add_result.returncode}, stdout={add_result.stdout.strip() if add_result.stdout else 'none'}, stderr={add_result.stderr.strip() if add_result.stderr else 'none'} (legacy format)")
-                if add_result.returncode != 0:
-                    logger.error(f"[PUSH] git add failed: {add_result.stderr} (legacy format)")
-                    raise subprocess.CalledProcessError(add_result.returncode, ['git', 'add', '-A'], add_result.stdout, add_result.stderr)
-                
-                # Check if there are changes to commit
-                logger.info(f"[PUSH] Running: git status --porcelain (legacy format)")
-                status_result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
-                has_changes = bool(status_result.stdout.strip())
-                logger.info(f"[PUSH] Has changes to commit: {has_changes} (legacy format)")
-                if status_result.stdout.strip():
-                    logger.info(f"[PUSH] Files to commit:\n{status_result.stdout.strip()} (legacy format)")
-                if status_result.stderr:
-                    logger.info(f"[PUSH] git status stderr: {status_result.stderr} (legacy format)")
-                
-                # Commit only if there are changes
-                if has_changes:
-                    commit_msg = f"Sync {source_key} from Project Storage"
-                    logger.info(f"[PUSH] Running: git commit -m '{commit_msg}' (legacy format)")
-                    commit_result = subprocess.run(['git', 'commit', '-m', commit_msg], capture_output=True, text=True)
-                    logger.info(f"[PUSH] git commit result: returncode={commit_result.returncode}, stdout={commit_result.stdout.strip() if commit_result.stdout else 'none'}, stderr={commit_result.stderr.strip() if commit_result.stderr else 'none'} (legacy format)")
-                    if commit_result.returncode != 0:
-                        logger.error(f"[PUSH] git commit failed: {commit_result.stderr} (legacy format)")
-                        raise subprocess.CalledProcessError(commit_result.returncode, ['git', 'commit', '-m', commit_msg], commit_result.stdout, commit_result.stderr)
-                    has_commits = True  # После коммита точно есть коммиты
-                else:
-                    logger.info(f"[PUSH] No changes to commit (legacy format)")
-                
-                # Если нет коммитов вообще, создаем первый коммит
-                if not has_commits:
-                    logger.info(f"[PUSH] No commits found, checking if files exist for initial commit (legacy format)")
-                    # Проверяем, есть ли файлы для коммита (включая untracked)
-                    status_result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
-                    ls_result = subprocess.run(['git', 'ls-files'], capture_output=True, text=True)
-                    has_files = bool(status_result.stdout.strip()) or bool(ls_result.stdout.strip())
-                    
-                    if not has_files:
-                        logger.error(f"[PUSH] Repository is empty, nothing to push (legacy format)")
-                        return False, SyncErrorCode.SYNC_IO_ERROR.value, f"Repository is empty. Add files to repository before pushing.", None
-                    
-                    # Добавляем все файлы перед первым коммитом
-                    logger.info(f"[PUSH] Adding all files for initial commit (legacy format)")
-                    logger.info(f"[PUSH] Running: git add -A (legacy format)")
-                    add_result = subprocess.run(['git', 'add', '-A'], capture_output=True, text=True)
-                    logger.info(f"[PUSH] git add result: returncode={add_result.returncode}, stdout={add_result.stdout.strip() if add_result.stdout else 'none'}, stderr={add_result.stderr.strip() if add_result.stderr else 'none'} (legacy format)")
-                    if add_result.returncode != 0:
-                        logger.error(f"[PUSH] git add failed: {add_result.stderr} (legacy format)")
-                        raise subprocess.CalledProcessError(add_result.returncode, ['git', 'add', '-A'], add_result.stdout, add_result.stderr)
-                    
-                    # Создаем первый коммит
-                    commit_msg = f"Initial commit: Sync {source_key} from Project Storage"
-                    logger.info(f"[PUSH] Running: git commit -m '{commit_msg}' (initial commit, legacy format)")
-                    commit_result = subprocess.run(['git', 'commit', '-m', commit_msg], capture_output=True, text=True)
-                    logger.info(f"[PUSH] git commit result: returncode={commit_result.returncode}, stdout={commit_result.stdout.strip() if commit_result.stdout else 'none'}, stderr={commit_result.stderr.strip() if commit_result.stderr else 'none'} (legacy format)")
-                    if commit_result.returncode != 0:
-                        logger.error(f"[PUSH] git commit failed: {commit_result.stderr} (legacy format)")
-                        raise subprocess.CalledProcessError(commit_result.returncode, ['git', 'commit', '-m', commit_msg], commit_result.stdout, commit_result.stderr)
-                    has_commits = True
-                
-                # Push (if auth configured)
-                if not auth_secret_id:
-                    logger.error(f"[PUSH] No auth_secret_id configured, cannot push (legacy format)")
-                    return False, SyncErrorCode.SYNC_GIT_AUTH_FAILED.value, "Git authentication not configured. Please configure authSecretId in source settings.", None
-                
-                try:
-                    git_env = self.git_source_manager._get_auth_env(project_id, auth_secret_id, repo_url)
-                except GitSourceError as e:
-                    return False, SyncErrorCode.SYNC_GIT_AUTH_FAILED.value, str(e), None
-                if not git_env.get('GIT_SSH_COMMAND'):
-                    git_env['GIT_SSH_COMMAND'] = 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-                    logger.info(f"[PUSH] Set GIT_SSH_COMMAND for host key bypass (legacy format)")
-                
-                # Проверяем, что есть коммиты для push
-                if not has_commits:
-                    logger.error(f"[PUSH] Cannot push: branch {ref} has no commits (legacy format)")
-                    return False, SyncErrorCode.SYNC_IO_ERROR.value, f"Cannot push: branch {ref} has no commits. Make at least one commit first.", None
-                
-                # Проверяем, есть ли что-то для push (новые коммиты или изменения)
-                logger.info(f"[PUSH] Running: git rev-list --count HEAD...origin/{ref} (legacy format)")
-                ahead_check = subprocess.run(['git', 'rev-list', '--count', f'HEAD...origin/{ref}'], capture_output=True, text=True)
-                commits_ahead = ahead_check.returncode == 0 and int(ahead_check.stdout.strip()) > 0
-                logger.info(f"[PUSH] Commits ahead of origin/{ref}: {ahead_check.stdout.strip() if commits_ahead else '0'} (legacy format)")
-                if ahead_check.stderr:
-                    logger.info(f"[PUSH] git rev-list stderr: {ahead_check.stderr} (legacy format)")
-                
-                # Push даже если нет новых коммитов (может быть нужно обновить remote)
-                # Используем --set-upstream для первого push, если ветка еще не отслеживается
-                logger.info(f"[PUSH] Running: git rev-parse --abbrev-ref --symbolic-full-name @{{u}} (legacy format)")
-                tracking_check = subprocess.run(['git', 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], capture_output=True, text=True)
-                has_tracking = tracking_check.returncode == 0
-                logger.info(f"[PUSH] Branch tracking check: returncode={tracking_check.returncode}, has_tracking={has_tracking} (legacy format)")
-                if tracking_check.stderr:
-                    logger.info(f"[PUSH] git rev-parse tracking stderr: {tracking_check.stderr} (legacy format)")
-                
-                if not has_tracking:
-                    logger.info(f"[PUSH] Branch doesn't track remote, using --set-upstream (legacy format)")
-                    logger.info(f"[PUSH] Running: git push --set-upstream origin {ref} (legacy format)")
-                    push_result = subprocess.run(['git', 'push', '--set-upstream', 'origin', ref], capture_output=True, text=True, env=git_env)
-                    logger.info(f"[PUSH] git push result: returncode={push_result.returncode}, stdout={push_result.stdout.strip() if push_result.stdout else 'none'}, stderr={push_result.stderr.strip() if push_result.stderr else 'none'} (legacy format)")
-                    if push_result.returncode != 0:
-                        logger.error(f"[PUSH] git push failed: {push_result.stderr} (legacy format)")
-                        raise subprocess.CalledProcessError(push_result.returncode, ['git', 'push', '--set-upstream', 'origin', ref], push_result.stdout, push_result.stderr)
-                else:
-                    logger.info(f"[PUSH] Running: git push origin {ref} (legacy format)")
-                    push_result = subprocess.run(['git', 'push', 'origin', ref], capture_output=True, text=True, env=git_env)
-                    logger.info(f"[PUSH] git push result: returncode={push_result.returncode}, stdout={push_result.stdout.strip() if push_result.stdout else 'none'}, stderr={push_result.stderr.strip() if push_result.stderr else 'none'} (legacy format)")
-                    if push_result.returncode != 0:
-                        logger.error(f"[PUSH] git push failed: {push_result.stderr} (legacy format)")
-                        raise subprocess.CalledProcessError(push_result.returncode, ['git', 'push', 'origin', ref], push_result.stdout, push_result.stderr)
-                
-                # Compute revision (commit hash)
-                logger.info(f"[PUSH] Running: git rev-parse HEAD")
-                result = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True)
-                revision = result.stdout.strip()
-                logger.info(f"[PUSH] Push successful, revision: {revision}")
-                
-                return True, None, None, revision
-            except subprocess.CalledProcessError as e:
-                error_msg = e.stderr.decode('utf-8') if isinstance(e.stderr, bytes) else str(e.stderr) if e.stderr else str(e)
-                stdout_msg = e.stdout.decode('utf-8') if isinstance(e.stdout, bytes) else str(e.stdout) if e.stdout else ""
-                logger.error(f"[PUSH] Git command failed: {' '.join(e.cmd)}")
-                logger.error(f"[PUSH] Exit code: {e.returncode}")
-                logger.error(f"[PUSH] stdout: {stdout_msg}")
-                logger.error(f"[PUSH] stderr: {error_msg}")
-                raise
-            finally:
-                os.chdir(original_cwd)
-            
+            return self._git_commit_and_push(
+                git_work_dir,
+                ref=ref,
+                source_key=source_key,
+                project_id=project_id,
+                auth_secret_id=auth_secret_id,
+                repo_url=repo_url,
+            )
+
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode('utf-8') if isinstance(e.stderr, bytes) else str(e.stderr) if e.stderr else str(e)
             stdout_msg = e.stdout.decode('utf-8') if isinstance(e.stdout, bytes) else str(e.stdout) if e.stdout else ""
@@ -1308,31 +1132,18 @@ class SourceSyncService:
                         shutil.copy2(item, local_item_path)
                         logger.info(f"Copied file from Git base: {item.name}")
                 
-                # Compute revision (используем корень репозитория для получения commit hash)
-                original_cwd = os.getcwd()
-                try:
-                    # Получаем корень репозитория для git rev-parse
-                    git_root = self.git_source_manager.resolve_path(
-                        project_id=project_id,
-                        source_key=source_key,
-                        repo_url=repo_url,
-                        ref=ref,
-                        subdir='',  # Корень репозитория
-                        auth_secret_id=auth_secret_id,
-                        force_refresh=False  # Не нужно обновлять, уже обновили выше
-                    )
-                    os.chdir(str(git_root))
-                    logger.info(f"[PULL] Running: git rev-parse HEAD")
-                    result = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True)
-                    revision = result.stdout.strip()
-                    logger.info(f"[PULL] Pull successful, revision: {revision}")
-                    return True, None, None, revision
-                except subprocess.CalledProcessError as e:
-                    error_msg = e.stderr.decode('utf-8') if isinstance(e.stderr, bytes) else str(e.stderr) if e.stderr else str(e)
-                    logger.error(f"[PULL] git rev-parse failed: {error_msg}")
-                    raise
-                finally:
-                    os.chdir(original_cwd)
+                git_root = self.git_source_manager.resolve_path(
+                    project_id=project_id,
+                    source_key=source_key,
+                    repo_url=repo_url,
+                    ref=ref,
+                    subdir='',  # Корень репозитория
+                    auth_secret_id=auth_secret_id,
+                    force_refresh=False  # Не нужно обновлять, уже обновили выше
+                )
+                revision = self._git_head_revision(git_root)
+                logger.info(f"[PULL] Pull successful, revision: {revision}")
+                return True, None, None, revision
             
             # Если указан subdir или это не repo source - используем стандартную логику
             # Try to resolve git path with auth_secret_id
@@ -1424,23 +1235,9 @@ class SourceSyncService:
                         else:
                             shutil.copy2(item, target_subdir / item.name)
             
-            # Compute revision (commit hash from git)
-            original_cwd = os.getcwd()
-            try:
-                git_work_dir = resolved.parent  # resolve_path returns Path directly
-                os.chdir(str(git_work_dir))
-                logger.info(f"[PULL] Running: git rev-parse HEAD (legacy format)")
-                result = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True)
-                revision = result.stdout.strip()
-                logger.info(f"[PULL] Pull successful, revision: {revision}")
-                
-                return True, None, None, revision
-            except subprocess.CalledProcessError as e:
-                error_msg = e.stderr.decode('utf-8') if isinstance(e.stderr, bytes) else str(e.stderr) if e.stderr else str(e)
-                logger.error(f"[PULL] git rev-parse failed: {error_msg}")
-                raise
-            finally:
-                os.chdir(original_cwd)
+            revision = self._git_head_revision(resolved)
+            logger.info(f"[PULL] Pull successful, revision: {revision}")
+            return True, None, None, revision
             
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode('utf-8') if isinstance(e.stderr, bytes) else str(e.stderr) if e.stderr else str(e)

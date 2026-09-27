@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { stargateJson } from "@/lib/stargate";
+import { useCan } from "@/lib/authz";
 
 export function PermissionsTab({
   permissions,
@@ -28,6 +29,7 @@ export function PermissionsTab({
   permissions: PermissionRow[];
   onReload: () => Promise<void> | void;
 }) {
+  const can = useCan();
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [addOpen, setAddOpen] = useState(false);
@@ -65,6 +67,10 @@ export function PermissionsTab({
 
   return (
     <div>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Custom names are stored in the catalog. Only seeded resource.action
+        names are enforced on API routes.
+      </p>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="relative min-w-56 flex-1 max-w-md">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -75,10 +81,12 @@ export function PermissionsTab({
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <Plus />
-          Add Permission
-        </Button>
+        {can("permissions.create") ? (
+          <Button size="sm" onClick={() => setAddOpen(true)}>
+            <Plus />
+            Add Permission
+          </Button>
+        ) : null}
       </div>
       {filtered.length === 0 ? (
         <EmptyState
@@ -137,6 +145,7 @@ export function PermissionsTab({
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
+                    {can("permissions.update") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -145,6 +154,8 @@ export function PermissionsTab({
                       <Pencil />
                       Edit
                     </Button>
+                    ) : null}
+                    {can("permissions.delete") ? (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -154,6 +165,7 @@ export function PermissionsTab({
                       <Trash2 />
                       Delete
                     </Button>
+                    ) : null}
                   </div>
                 </TableCell>
               </TableRow>

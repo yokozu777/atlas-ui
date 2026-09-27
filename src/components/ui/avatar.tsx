@@ -15,6 +15,21 @@ function Avatar({ className, ...props }: React.ComponentProps<"span">) {
   )
 }
 
+function AvatarImage({
+  className,
+  alt = "",
+  ...props
+}: React.ComponentProps<"img">) {
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      alt={alt}
+      className={cn("size-full object-cover", className)}
+      {...props}
+    />
+  )
+}
+
 function AvatarFallback({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
@@ -25,4 +40,4 @@ function AvatarFallback({ className, ...props }: React.ComponentProps<"span">) {
   )
 }
 
-export { Avatar, AvatarFallback }
+export { Avatar, AvatarFallback, AvatarImage }

@@ -9,9 +9,9 @@ import hashlib
 import time
 import threading
 import fcntl
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple, Dict
-import json
+from typing import Iterator, Optional, Tuple, Dict
 import logging
 
 # Настройка logger для git_source_manager
@@ -69,20 +69,32 @@ class GitSourceManager:
         self.base_cache_dir = Path(base_cache_dir)
         self.projects_dir = Path(projects_dir)
         self.base_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = Path(base_dir) if base_dir is not None else Path(projects_dir).parent
+        self._ident_lock = threading.Lock()
+        self._last_identity = None
         
         # Initialize Global Secrets Manager if available
         self.global_secrets_manager = None
         if GLOBAL_SECRETS_AVAILABLE and GlobalSecretsManager:
             try:
-                if base_dir is None:
-                    base_dir = projects_dir.parent
-                self.global_secrets_manager = GlobalSecretsManager(base_dir)
+                self.global_secrets_manager = GlobalSecretsManager(self.data_dir)
             except Exception as e:
                 logger.warning(f"Failed to initialize Global Secrets Manager: {e}")
         
         # Per-repo locks for concurrency safety
         self._repo_locks: Dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
+
+    def _load_project_secret_json(self, secret_file: Path) -> Dict:
+        from project_secret_crypto import ProjectSecretError, read_project_secret
+
+        try:
+            return read_project_secret(secret_file)
+        except ProjectSecretError as exc:
+            raise GitSourceError(
+                "SECRET_DECRYPT_FAILED",
+                f"Failed to load authentication secret: {exc}",
+            ) from exc
 
     def _find_project_secret_file(self, project_id: str, auth_secret_id: str) -> Optional[Path]:
         secrets_dir = self.projects_dir / project_id / "secrets"
@@ -243,8 +255,7 @@ class GitSourceManager:
                 if secret_file is None:
                     raise GitSourceError('SECRET_NOT_FOUND', f'Secret {auth_secret_id} not found in global or project storage')
                 
-                with open(secret_file, 'r', encoding='utf-8') as f:
-                    secret_data = json.load(f)
+                secret_data = self._load_project_secret_json(secret_file)
                 
                 secret_type = secret_data.get('type', '')
                 logger.info(f"Using project secret {auth_secret_id} (type: {secret_type}) for git auth")
@@ -291,6 +302,25 @@ class GitSourceManager:
                 f'Secret type {secret_type} is not supported for git authentication. Supported: git_ssh_key, git_token'
             )
     
+    @contextmanager
+    def auth_env(
+        self, project_id: str, auth_secret_id: Optional[str], repo_url: str = ""
+    ) -> Iterator[Dict[str, str]]:
+        """Yield git env and unlink any SSH identity written for this call."""
+        from ssh_temp import unlink_ssh_identity
+
+        identity = None
+        try:
+            with self._ident_lock:
+                try:
+                    env = self._get_auth_env(project_id, auth_secret_id, repo_url)
+                finally:
+                    identity = self._last_identity
+                    self._last_identity = None
+            yield env
+        finally:
+            unlink_ssh_identity(identity)
+
     def _setup_ssh_auth(self, secret_data: Dict, secret_id: str) -> Dict[str, str]:
         """
         Setup SSH key authentication environment.
@@ -305,6 +335,9 @@ class GitSourceManager:
         Raises:
             GitSourceError if private key is missing or invalid
         """
+        from ssh_key_material import SshKeyMaterialError
+        from ssh_temp import build_git_ssh_command, unlink_ssh_identity, write_ssh_identity
+
         env = os.environ.copy()
         
         private_key = secret_data.get('privateKey', '')
@@ -317,52 +350,29 @@ class GitSourceManager:
         if not username:
             username = 'git'  # Default username for git
         
-        passphrase = secret_data.get('passphrase', '')
-        
+        passphrase = secret_data.get('passphrase', '') or ''
+        identity = None
         try:
-            # Create temporary SSH key file
-            import tempfile
-            # Use .key extension instead of .pem for better compatibility
-            temp_key_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.key', encoding='utf-8')
-            
-            # Ensure key ends with newline (required by OpenSSH)
-            key_content = private_key.strip()
-            if not key_content.endswith('\n'):
-                key_content += '\n'
-            
-            temp_key_file.write(key_content)
-            temp_key_file.flush()  # Ensure data is written
-            temp_key_file.close()
-            
-            # Set strict permissions (owner read/write only)
-            os.chmod(temp_key_file.name, 0o600)
-            
-            # Build SSH command with username
-            ssh_command = f'ssh -i {temp_key_file.name} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            
-            # Add username if specified and not default
-            if username and username != 'git':
-                ssh_command += f' -l {username}'
-            
-            if passphrase:
-                # For passphrase-protected keys, we need to use ssh-agent
-                # This is a simplified approach; in production, consider using ssh-agent
-                ssh_command += ' -o BatchMode=yes'
-                # Note: Passphrase handling requires ssh-agent or expect script
-                # For now, we'll rely on ssh-agent if available
-                logger.warning(f"Passphrase-protected key detected for secret {secret_id}. Ensure ssh-agent is configured.")
-            
-            env['GIT_SSH_COMMAND'] = ssh_command
-            
-            # Log that SSH auth is configured (but never log the key)
-            logger.debug(f"SSH authentication configured for secret {secret_id} (key file: {temp_key_file.name}, username: {username})")
-            
+            identity = write_ssh_identity(
+                private_key, data_dir=self.data_dir, passphrase=str(passphrase)
+            )
+            env['GIT_SSH_COMMAND'] = build_git_ssh_command(identity, username=username)
+            self._last_identity = identity
+            logger.debug(
+                "SSH authentication configured for secret %s (key file: %s, username: %s)",
+                secret_id,
+                identity,
+                username,
+            )
             return env
-        
+        except SshKeyMaterialError as e:
+            unlink_ssh_identity(identity)
+            logger.error("Failed to setup SSH authentication for secret %s: %s", secret_id, e)
+            raise GitSourceError('GIT_AUTH_FAILED', f'Failed to setup SSH authentication: {e}') from e
         except Exception as e:
-            # Never log private key content
-            logger.error(f"Failed to setup SSH authentication for secret {secret_id}: {str(e)}")
-            raise GitSourceError('GIT_AUTH_FAILED', f'Failed to setup SSH authentication: {str(e)}')
+            unlink_ssh_identity(identity)
+            logger.error("Failed to setup SSH authentication for secret %s: %s", secret_id, e)
+            raise GitSourceError('GIT_AUTH_FAILED', f'Failed to setup SSH authentication: {str(e)}') from e
     
     def _safe_subdir_path(self, base_path: Path, subdir: str) -> Path:
         """
@@ -416,121 +426,118 @@ class GitSourceManager:
                 logger.info(f"Cloning repository {repo_url} to {cache_dir}")
                 cache_dir.parent.mkdir(parents=True, exist_ok=True)
                 
-                    # Get auth environment
-                env = self._get_auth_env(project_id, auth_secret_id, repo_url)
+                with self.auth_env(project_id, auth_secret_id, repo_url) as env:
                 
-                # Prepare repo URL with credentials if needed (for HTTPS with token/password)
-                clone_url = repo_url
-                if auth_secret_id and 'https://' in repo_url:
+                    # Prepare repo URL with credentials if needed (for HTTPS with token/password)
+                    clone_url = repo_url
+                    if auth_secret_id and 'https://' in repo_url:
+                        try:
+                            # Try to get secret to embed credentials in URL
+                            secret_data = None
+                        
+                            # Try global secret first
+                            if self.global_secrets_manager:
+                                try:
+                                    secret_data = self.global_secrets_manager.get_secret(
+                                        auth_secret_id, 
+                                        include_material=True
+                                    )
+                                except Exception:
+                                    pass
+                        
+                            # Fall back to project secret
+                            if not secret_data:
+                                secret_file = self._find_project_secret_file(project_id, auth_secret_id)
+                                if secret_file is None:
+                                    secrets_dir = self.projects_dir / project_id / 'secrets-storage'
+                                    candidate = secrets_dir / f"{auth_secret_id}.json"
+                                    if candidate.exists():
+                                        secret_file = candidate
+                                if secret_file is not None:
+                                    secret_data = self._load_project_secret_json(secret_file)
+                        
+                            if secret_data:
+                                secret_type = secret_data.get('type', '')
+                            
+                                # Handle git_token (global) or login_password (project)
+                                if secret_type == 'git_token':
+                                    token = secret_data.get('token', '')
+                                    username = secret_data.get('metadata', {}).get('username', '') or secret_data.get('username', '')
+                                    if token:
+                                        # Embed token in URL
+                                        from urllib.parse import urlparse, urlunparse
+                                        parsed = urlparse(repo_url)
+                                        if username:
+                                            netloc = f"{username}:{token}@{parsed.netloc}"
+                                        else:
+                                            netloc = f"{token}@{parsed.netloc}"
+                                        clone_url = urlunparse(parsed._replace(netloc=netloc))
+                            
+                                elif secret_type == 'login_password':
+                                    username = secret_data.get('username', '')
+                                    password = secret_data.get('password', '')
+                                    if username and password:
+                                        # Embed credentials in URL
+                                        from urllib.parse import urlparse, urlunparse
+                                        parsed = urlparse(repo_url)
+                                        netloc = f"{username}:{password}@{parsed.netloc}"
+                                        clone_url = urlunparse(parsed._replace(netloc=netloc))
+                        except Exception as e:
+                            logger.warning(f"Failed to embed credentials in URL: {e}")
+                
                     try:
-                        # Try to get secret to embed credentials in URL
-                        secret_data = None
-                        
-                        # Try global secret first
-                        if self.global_secrets_manager:
-                            try:
-                                secret_data = self.global_secrets_manager.get_secret(
-                                    auth_secret_id, 
-                                    include_material=True
-                                )
-                            except Exception:
-                                pass
-                        
-                        # Fall back to project secret
-                        if not secret_data:
-                            secret_file = self._find_project_secret_file(project_id, auth_secret_id)
-                            if secret_file is None:
-                                secrets_dir = self.projects_dir / project_id / 'secrets-storage'
-                                candidate = secrets_dir / f"{auth_secret_id}.json"
-                                if candidate.exists():
-                                    secret_file = candidate
-                            if secret_file is not None:
-                                with open(secret_file, 'r', encoding='utf-8') as f:
-                                    secret_data = json.load(f)
-                        
-                        if secret_data:
-                            secret_type = secret_data.get('type', '')
-                            
-                            # Handle git_token (global) or login_password (project)
-                            if secret_type == 'git_token':
-                                token = secret_data.get('token', '')
-                                username = secret_data.get('metadata', {}).get('username', '') or secret_data.get('username', '')
-                                if token:
-                                    # Embed token in URL
-                                    from urllib.parse import urlparse, urlunparse
-                                    parsed = urlparse(repo_url)
-                                    if username:
-                                        netloc = f"{username}:{token}@{parsed.netloc}"
-                                    else:
-                                        netloc = f"{token}@{parsed.netloc}"
-                                    clone_url = urlunparse(parsed._replace(netloc=netloc))
-                            
-                            elif secret_type == 'login_password':
-                                username = secret_data.get('username', '')
-                                password = secret_data.get('password', '')
-                                if username and password:
-                                    # Embed credentials in URL
-                                    from urllib.parse import urlparse, urlunparse
-                                    parsed = urlparse(repo_url)
-                                    netloc = f"{username}:{password}@{parsed.netloc}"
-                                    clone_url = urlunparse(parsed._replace(netloc=netloc))
-                    except Exception as e:
-                        logger.warning(f"Failed to embed credentials in URL: {e}")
-                
-                try:
-                    result = subprocess.run(
-                        ['git', 'clone', '--depth', '1', '--no-single-branch', clone_url, str(cache_dir)],
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                        check=False
-                    )
+                        result = subprocess.run(
+                            ['git', 'clone', '--depth', '1', '--no-single-branch', clone_url, str(cache_dir)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                            check=False
+                        )
                     
-                    if result.returncode != 0:
-                        error_msg = result.stderr or result.stdout or 'Unknown error'
-                        if 'Authentication failed' in error_msg or 'Permission denied' in error_msg:
-                            raise GitSourceError('GIT_AUTH_FAILED', f'Authentication failed: {error_msg}')
-                        raise GitSourceError('GIT_CLONE_FAILED', f'Clone failed: {error_msg}')
-                except subprocess.TimeoutExpired:
-                    raise GitSourceError('GIT_CLONE_FAILED', 'Clone operation timed out')
-                except GitSourceError:
-                    raise
-                except Exception as e:
-                    raise GitSourceError('GIT_CLONE_FAILED', f'Clone failed: {str(e)}')
+                        if result.returncode != 0:
+                            error_msg = result.stderr or result.stdout or 'Unknown error'
+                            if 'Authentication failed' in error_msg or 'Permission denied' in error_msg:
+                                raise GitSourceError('GIT_AUTH_FAILED', f'Authentication failed: {error_msg}')
+                            raise GitSourceError('GIT_CLONE_FAILED', f'Clone failed: {error_msg}')
+                    except subprocess.TimeoutExpired:
+                        raise GitSourceError('GIT_CLONE_FAILED', 'Clone operation timed out')
+                    except GitSourceError:
+                        raise
+                    except Exception as e:
+                        raise GitSourceError('GIT_CLONE_FAILED', f'Clone failed: {str(e)}')
             
             # Fetch updates if needed
             if needs_fetch:
                 logger.info(f"[PULL] Fetching updates for {repo_url}")
-                env = self._get_auth_env(project_id, auth_secret_id, repo_url)
-                
-                try:
-                    # Fetch all branches and tags
-                    logger.info(f"[PULL] Running: git fetch --all --prune")
-                    result = subprocess.run(
-                        ['git', 'fetch', '--all', '--prune'],
-                        cwd=cache_dir,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                        check=False
-                    )
+                with self.auth_env(project_id, auth_secret_id, repo_url) as env:
+                    try:
+                        # Fetch all branches and tags
+                        logger.info(f"[PULL] Running: git fetch --all --prune")
+                        result = subprocess.run(
+                            ['git', 'fetch', '--all', '--prune'],
+                            cwd=cache_dir,
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                            check=False
+                        )
                     
-                    if result.returncode != 0:
-                        error_msg = result.stderr or result.stdout or 'Unknown error'
-                        logger.error(f"[PULL] git fetch failed: {error_msg}")
-                        if 'Authentication failed' in error_msg or 'Permission denied' in error_msg:
-                            raise GitSourceError('GIT_AUTH_FAILED', f'Authentication failed: {error_msg}')
-                        logger.warning(f"[PULL] Fetch failed (non-fatal): {error_msg}")
-                    else:
-                        logger.info(f"[PULL] Fetch completed successfully for {repo_url}")
-                        if result.stdout:
-                            logger.debug(f"[PULL] Fetch output: {result.stdout}")
-                except subprocess.TimeoutExpired:
-                    logger.warning("Fetch operation timed out (non-fatal)")
-                except GitSourceError:
-                    raise
+                        if result.returncode != 0:
+                            error_msg = result.stderr or result.stdout or 'Unknown error'
+                            logger.error(f"[PULL] git fetch failed: {error_msg}")
+                            if 'Authentication failed' in error_msg or 'Permission denied' in error_msg:
+                                raise GitSourceError('GIT_AUTH_FAILED', f'Authentication failed: {error_msg}')
+                            logger.warning(f"[PULL] Fetch failed (non-fatal): {error_msg}")
+                        else:
+                            logger.info(f"[PULL] Fetch completed successfully for {repo_url}")
+                            if result.stdout:
+                                logger.debug(f"[PULL] Fetch output: {result.stdout}")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Fetch operation timed out (non-fatal)")
+                    except GitSourceError:
+                        raise
             
             # Checkout ref (always checkout after fetch to ensure we have latest changes)
             if ref:
@@ -581,15 +588,16 @@ class GitSourceManager:
                             logger.warning(f"[PULL] Initial checkout failed: {error_msg}, trying to fetch ref first")
                             # Try to fetch the ref first
                             logger.info(f"[PULL] Running: git fetch origin {ref}")
-                            fetch_result = subprocess.run(
-                                ['git', 'fetch', 'origin', ref],
-                                cwd=cache_dir,
-                                env=self._get_auth_env(project_id, auth_secret_id, repo_url),
-                                capture_output=True,
-                                text=True,
-                                timeout=60,
-                                check=False
-                            )
+                            with self.auth_env(project_id, auth_secret_id, repo_url) as env:
+                                fetch_result = subprocess.run(
+                                    ['git', 'fetch', 'origin', ref],
+                                    cwd=cache_dir,
+                                    env=env,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=60,
+                                    check=False
+                                )
                             
                             if fetch_result.returncode == 0:
                                 logger.info(f"[PULL] Fetch of ref {ref} successful, retrying checkout")

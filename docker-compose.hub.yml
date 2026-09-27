@@ -20,10 +20,10 @@ x-host-clusters: &host_clusters ${ATLAS_INVENTORY:?set ATLAS_INVENTORY in .env}/
 x-host-workspace: &host_workspace ${ATLAS_INVENTORY:?set ATLAS_INVENTORY in .env}/workspace
 
 # --- images / git ---
-x-git-url: &git_url https://gitea.mxhash.com/root/atlas-clusterctl.git
-x-image-hub: &image_hub harbor.mxhash.com/library/atlas-ui-hub:${ATLAS_UI_IMAGE_TAG:-latest}
-x-image-ui: &image_ui harbor.mxhash.com/library/atlas-ui:${ATLAS_UI_IMAGE_TAG:-latest}
-x-image-worker: &image_worker harbor.mxhash.com/library/atlas-ui-worker:${ATLAS_UI_IMAGE_TAG:-latest}
+x-git-url: &git_url https://github.com/yokozu777/atlas-clusterctl.git
+x-image-hub: &image_hub yokozu/atlas-ui-hub:${ATLAS_UI_IMAGE_TAG:-latest}
+x-image-ui: &image_ui yokozu/atlas-ui:${ATLAS_UI_IMAGE_TAG:-latest}
+x-image-worker: &image_worker yokozu/atlas-ui-worker:${ATLAS_UI_IMAGE_TAG:-latest}
 
 # --- shared fragments ---
 x-bind-clusterctl: &bind_clusterctl

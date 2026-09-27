@@ -183,7 +183,7 @@ export type ClusterctlGitStatus = {
 };
 
 export const DEFAULT_CLUSTERCTL_GIT_URL =
-  "https://gitea.mxhash.com/root/atlas-clusterctl.git";
+  "https://github.com/yokozu777/atlas-clusterctl.git";
 
 function hubUnavailable(message: string): boolean {
   return (

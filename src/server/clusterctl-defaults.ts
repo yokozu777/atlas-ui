@@ -1,5 +1,5 @@
 export const DEFAULT_CLUSTERCTL_GIT_URL =
-  "https://gitea.mxhash.com/root/atlas-clusterctl.git";
+  "https://github.com/yokozu777/atlas-clusterctl.git";
 
 export function defaultGitUrl(): string {
   return process.env.ATLAS_CLUSTERCTL_GIT_URL?.trim() || DEFAULT_CLUSTERCTL_GIT_URL;

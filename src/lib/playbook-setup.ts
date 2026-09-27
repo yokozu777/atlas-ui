@@ -199,6 +199,13 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
     fields: [
       DNS_FIELD,
       { key: "provision_gateway", label: "Gateway", group: "Network", valueType: "ipv4" },
+      {
+        key: "dns_server_ip",
+        label: "DNS server IP",
+        group: "Network",
+        valueType: "ipv4",
+        hint: "Terraform sends VM A records to this address (provision_dns_server).",
+      },
       { key: "provision_pve_host", label: "Proxmox host", group: "Proxmox", valueType: "ipv4" },
       { key: "provision_pve_user", label: "Proxmox SSH user", group: "Proxmox" },
       SSH_PUB_FIELD,
@@ -410,6 +417,13 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       { key: "k8s_lb_hostname", label: "API load balancer hostname", group: "Network" },
       { key: "k8s_api_port", label: "API port", group: "Network" },
       { key: "vip_address", label: "API VIP", group: "Network", valueType: "ipv4" },
+      {
+        key: "dns_server_ip",
+        label: "DNS server IP",
+        group: "Network",
+        valueType: "ipv4",
+        hint: "API VIP DNS and NTP use this address.",
+      },
       { key: "pod_subnet", label: "Pod subnet", group: "Network" },
       { key: "service_subnet", label: "Service subnet", group: "Network" },
       { key: "k8s_cluster_name", label: "Cluster name", group: "Identity" },

@@ -231,6 +231,18 @@ describe("k8s overlay setup schemas", () => {
     );
   });
 
+  it("exposes the BIND address on compute-provision and k8s-core", () => {
+    for (const file of ["atlas-compute-provision.yml", "atlas-k8s-core.yml"]) {
+      const field = setupSchemaForVarsFile(file, "").fields.find(
+        (item) => item.key === "dns_server_ip",
+      );
+      assert.equal(field?.label, "DNS server IP");
+      assert.equal(field?.valueType, "ipv4");
+      assert.equal(isMissingSetupValue("", field), true);
+      assert.equal(isMissingSetupValue("192.168.1.218", field), false);
+    }
+  });
+
   it("exposes the package mirror domain on node foundation", () => {
     const field = setupSchemaForVarsFile("atlas-node-foundation.yml", "").fields.find(
       (item) => item.key === "pkg_repo_nginx_domain",

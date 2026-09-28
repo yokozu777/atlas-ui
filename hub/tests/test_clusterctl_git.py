@@ -116,6 +116,22 @@ class ClusterctlGitUnitTests(unittest.TestCase):
         self.assertIsInstance(env, dict)
         self.assertEqual(env.get("GIT_SSL_NO_VERIFY"), "1")
 
+    def test_progress_clone_streams_and_forces_progress_flag(self):
+        seen: dict[str, object] = {}
+
+        def fake_stream(cmd, **kwargs):
+            seen["cmd"] = cmd
+            seen["cwd"] = kwargs.get("cwd")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch("clusterctl_git._stream_git", fake_stream):
+            gitmod._run_git(["clone", "--depth", "1", "https://example.com/a.git", "/tmp/a"], progress=True)
+        cmd = seen["cmd"]
+        self.assertIsInstance(cmd, list)
+        self.assertEqual(cmd[:3], ["git", "-c", "http.sslVerify=false"])
+        self.assertIn("clone", cmd)
+        self.assertLess(cmd.index("clone"), cmd.index("--progress"))
+
     def test_default_url_and_dest(self):
         self.assertEqual(default_git_url(), gitmod.DEFAULT_GIT_URL)
         os.environ["ATLAS_CLUSTERCTL_GIT_URL"] = "https://example.com/ctl.git"

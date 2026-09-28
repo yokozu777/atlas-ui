@@ -63,10 +63,13 @@ x-healthcheck: &hub_health
       "-c",
       "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
     ]
-  interval: 2s
-  timeout: 2s
-  retries: 20
-  start_period: 5s
+  interval: 5s
+  timeout: 5s
+  retries: 12
+  # Hub clones clusterctl before it listens. ls-remote and clone each may take
+  # GIT_TIMEOUT_SEC (180s). Stay "starting" until that finishes so Compose does
+  # not mark the hub unhealthy. Clone progress is printed to the hub logs.
+  start_period: 420s
 
 services:
   hub:

@@ -6,6 +6,7 @@ import {
   generateSetupSecret,
   ianaTimeZones,
   isMissingSetupValue,
+  normalizePveTemplatesMap,
   reuseKeysFor,
   secretReuseChoices,
   setupFieldCopyText,
@@ -299,5 +300,35 @@ describe("k8s overlay setup schemas", () => {
       (field) => field.key === "pki_ca_url",
     );
     assert.equal(ca?.valueType, "string_list");
+  });
+});
+
+describe("golden PVE template backup URL", () => {
+  it("reads an optional backup and ignores an empty one", () => {
+    const map = normalizePveTemplatesMap({
+      "ubuntu-base": {
+        id: "400100",
+        image_url: "https://example.com/u.img",
+        image_url_backup: "https://mirror.example/u.img",
+      },
+      "oracle-base": {
+        id: "400101",
+        image_url: "https://example.com/o.qcow2",
+      },
+    });
+    assert.equal(map["ubuntu-base"].image_url_backup, "https://mirror.example/u.img");
+    assert.equal(map["oracle-base"].image_url_backup, "");
+    assert.equal(map["debian-base"].image_url_backup, "");
+    const field = {
+      key: "provision_pve_templates",
+      label: "Golden PVE templates",
+      kind: "pve_templates" as const,
+    };
+    assert.equal(setupFieldInvalidMessage(field, map), null);
+    const bad = {
+      ...map,
+      "debian-base": { ...map["debian-base"], image_url_backup: "not-a-url" },
+    };
+    assert.equal(setupFieldInvalidMessage(field, bad), "Invalid URL");
   });
 });

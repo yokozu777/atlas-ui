@@ -10,6 +10,7 @@ import { SectionHeader } from "@/components/section-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAtlasMapLiveFocus } from "@/hooks/use-atlas-map-live-focus";
 import { useAtlasPackMap } from "@/hooks/use-atlas-pack-map";
 
 function LegendChip({
@@ -34,6 +35,7 @@ export function AtlasPackMapPage({ projectId }: { projectId: string }) {
     projectId,
     clusterId,
   );
+  const live = useAtlasMapLiveFocus(projectId, clusterId);
   const [refreshing, setRefreshing] = useState(false);
 
   async function refresh() {
@@ -139,6 +141,10 @@ export function AtlasPackMapPage({ projectId }: { projectId: string }) {
             graph={graph}
             projectId={projectId}
             downloadName={clusterId ?? "pack-map"}
+            activeAlias={live.alias}
+            activeState={live.state}
+            activeRoles={live.roles}
+            rolesByPhase={live.rolesByPhase}
           />
         ) : (
           <EmptyState

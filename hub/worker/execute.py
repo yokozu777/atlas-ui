@@ -1183,39 +1183,12 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
             except Exception as e:
                 logger.warning(f"Error cleaning up temp file {temp_file}: {e}")
         
-        # Очистка generated_playbooks после выполнения (playbook, inventory, key_*.pem)
+        # Очистка generated_playbooks после выполнения (playbook, inventory, key_*.pem).
+        # Atlas/clusterctl runParams не содержат temp_playbook: пустая строка даёт Path('.'),
+        # и unlink('.') падает с Errno 21.
         try:
-            run_params = execution_data.get('runParams', {})
-            if run_params:
-                temp_playbook_path = Path(run_params.get('temp_playbook', ''))
-                temp_inventory_path = run_params.get('temp_inventory')
-                gp_dir = temp_playbook_path.parent if temp_playbook_path else None
-                if temp_inventory_path and gp_dir:
-                    inv_path = Path(temp_inventory_path)
-                    if inv_path.exists() and str(inv_path.parent) == str(Path(gp_dir)):
-                        key_files_to_delete = set()
-                        try:
-                            with open(inv_path, 'r', encoding='utf-8') as inv_f:
-                                inv_data = yaml_loader.load(inv_f) or {}
-                            hosts_dict = (inv_data.get('all') or {}).get('hosts') or {}
-                            for host_data in hosts_dict.values():
-                                if isinstance(host_data, dict):
-                                    kp = host_data.get('ansible_ssh_private_key_file')
-                                    if kp and 'generated_playbooks' in str(kp) and str(kp).endswith('.pem'):
-                                        key_name = os.path.basename(str(kp))
-                                        if key_name.startswith('key_'):
-                                            key_files_to_delete.add(key_name)
-                        except Exception as inv_e:
-                            logger.debug(f"[execute_run] Could not parse inventory for keys: {inv_e}")
-                        inv_path.unlink()
-                        logger.debug(f"[execute_run] Removed generated inventory: {inv_path}")
-                        for key_name in key_files_to_delete:
-                            kf = gp_dir / key_name
-                            if kf.exists():
-                                kf.unlink()
-                                logger.debug(f"[execute_run] Removed generated key: {kf}")
-                if temp_playbook_path.exists():
-                    temp_playbook_path.unlink()
-                    logger.debug(f"[execute_run] Removed generated playbook: {temp_playbook_path}")
+            from execution_cleanup import cleanup_run_generated_playbooks
+
+            cleanup_run_generated_playbooks(execution_data.get('runParams'))
         except Exception as e:
             logger.warning(f"[execute_run] Error cleaning up generated_playbooks: {e}")

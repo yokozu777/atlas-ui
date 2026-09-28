@@ -315,9 +315,12 @@ def pve_templates_block(value: Any) -> list[str]:
             item = {}
         ident = coerce_write_value(item.get("id", ""))
         url = item.get("image_url", "")
+        backup = str(item.get("image_url_backup", "") or "").strip()
         lines.append(f"  {name}:")
         lines.append(f"    id: {_format_scalar(ident)}")
         lines.append(f"    image_url: {_format_scalar(url)}")
+        if backup:
+            lines.append(f"    image_url_backup: {_format_scalar(backup)}")
     return lines
 
 

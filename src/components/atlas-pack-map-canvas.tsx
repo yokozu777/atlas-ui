@@ -24,7 +24,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { FileDown, Loader2, Scan, ZoomIn, ZoomOut } from "lucide-react";
+import { FileDown, Loader2, LocateFixed, Scan, ZoomIn, ZoomOut } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -442,7 +442,13 @@ function toFlow(
   };
 }
 
-function PackMapControls({ downloadName }: { downloadName: string }) {
+function PackMapControls({
+  downloadName,
+  focusPhaseId,
+}: {
+  downloadName: string;
+  focusPhaseId: string | null;
+}) {
   const { zoomIn, zoomOut, fitView, getNodes } = useReactFlow();
   const [saving, setSaving] = useState(false);
   const iconButton =
@@ -497,6 +503,24 @@ function PackMapControls({ downloadName }: { downloadName: string }) {
           onClick={() => void fitView({ padding: 0.18, duration: 200 })}
         >
           <Scan className="size-4" />
+        </button>
+        <button
+          type="button"
+          aria-label="Center on active phase"
+          title={focusPhaseId ? "Center on active phase" : "No active phase"}
+          className={`${iconButton} border-t border-border`}
+          disabled={!focusPhaseId}
+          onClick={() => {
+            if (!focusPhaseId) return;
+            void fitView({
+              nodes: [{ id: focusPhaseId }],
+              padding: 0.35,
+              duration: 380,
+              maxZoom: 1.5,
+            });
+          }}
+        >
+          <LocateFixed className="size-4" />
         </button>
         <button
           type="button"
@@ -661,7 +685,7 @@ export function AtlasPackMapCanvas({
       <PackMapMeasuredLayout graph={graph} nodes={nodes} setNodes={setNodes} />
       <PackMapFocus ids={liveIds} />
       <Background gap={22} size={1} color="oklch(1 0 0 / 8%)" />
-      <PackMapControls downloadName={downloadName} />
+      <PackMapControls downloadName={downloadName} focusPhaseId={liveIds[0] ?? null} />
       <MiniMap
         pannable
         zoomable

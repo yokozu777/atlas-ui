@@ -1896,10 +1896,18 @@ function PveTemplatesEditor({
       </button>
       {open
         ? PVE_TEMPLATE_KEYS.map((name) => {
-            const entry = value[name] ?? { id: "", image_url: "" };
+            const entry = value[name] ?? {
+              id: "",
+              image_url: "",
+              image_url_backup: "",
+            };
             const urlInvalid = setupFieldInvalidMessage(
               { key: `${name}_url`, label: name, valueType: "url" },
               entry.image_url,
+            );
+            const backupInvalid = setupFieldInvalidMessage(
+              { key: `${name}_backup`, label: name, valueType: "url" },
+              entry.image_url_backup,
             );
             return (
               <div key={name} className="grid gap-1.5 sm:grid-cols-[7rem_1fr]">
@@ -1934,6 +1942,33 @@ function PveTemplatesEditor({
                   />
                   {urlInvalid ? (
                     <p className="mt-0.5 text-[11px] text-red-500">{urlInvalid}</p>
+                  ) : null}
+                </div>
+                <div className="sm:col-span-2">
+                  <label
+                    htmlFor={`pve-${name}-backup`}
+                    className="mb-0.5 block text-[11px] text-muted-foreground"
+                  >
+                    Backup image URL
+                  </label>
+                  <Input
+                    id={`pve-${name}-backup`}
+                    className="h-8 border-foreground/20 bg-background font-mono text-[13px]"
+                    value={entry.image_url_backup}
+                    aria-label={`${name} backup image url`}
+                    aria-invalid={Boolean(backupInvalid)}
+                    onChange={(event) =>
+                      onChange({
+                        ...value,
+                        [name]: {
+                          ...entry,
+                          image_url_backup: event.target.value,
+                        },
+                      })
+                    }
+                  />
+                  {backupInvalid ? (
+                    <p className="mt-0.5 text-[11px] text-red-500">{backupInvalid}</p>
                   ) : null}
                 </div>
               </div>

@@ -40,6 +40,7 @@ export type VarsSetupOrigin = "leaf" | "env" | "org" | "missing";
 export type PveTemplateEntry = {
   id: string;
   image_url: string;
+  image_url_backup: string;
 };
 
 export const PVE_TEMPLATE_KEYS = [
@@ -606,7 +607,7 @@ const DEFAULT_PLACEHOLDERS = ["example.com", "changeme"];
 export function emptyPveTemplatesMap(): PveTemplatesMap {
   const next: PveTemplatesMap = {};
   for (const name of PVE_TEMPLATE_KEYS) {
-    next[name] = { id: "", image_url: "" };
+    next[name] = { id: "", image_url: "", image_url_backup: "" };
   }
   return next;
 }
@@ -622,6 +623,8 @@ export function normalizePveTemplatesMap(value: unknown): PveTemplatesMap {
     next[name] = {
       id: item.id == null ? "" : String(item.id),
       image_url: item.image_url == null ? "" : String(item.image_url),
+      image_url_backup:
+        item.image_url_backup == null ? "" : String(item.image_url_backup),
     };
   }
   return next;
@@ -975,9 +978,15 @@ export function setupFieldInvalidMessage(
     const map = normalizePveTemplatesMap(value);
     for (const name of PVE_TEMPLATE_KEYS) {
       const url = map[name]?.image_url?.trim() ?? "";
-      if (!url || isJinjaValue(url)) continue;
-      const message = httpUrlInvalid(url);
-      if (message) return message;
+      if (url && !isJinjaValue(url)) {
+        const message = httpUrlInvalid(url);
+        if (message) return message;
+      }
+      const backup = map[name]?.image_url_backup?.trim() ?? "";
+      if (backup && !isJinjaValue(backup)) {
+        const message = httpUrlInvalid(backup);
+        if (message) return message;
+      }
     }
     return null;
   }
@@ -1024,7 +1033,7 @@ export function setupSearchHaystack(
     for (const name of PVE_TEMPLATE_KEYS) {
       const entry = value[name];
       if (!entry) continue;
-      parts.push(name, entry.id, entry.image_url);
+      parts.push(name, entry.id, entry.image_url, entry.image_url_backup);
     }
   }
   return parts.join(" ").toLowerCase();

@@ -104,6 +104,29 @@ class VarsSetupYamlTests(unittest.TestCase):
         self.assertIn("other: 1", next_text)
         self.assertEqual(next_text.count("provision_pve_templates:"), 1)
 
+    def test_pve_templates_backup_written_only_when_set(self) -> None:
+        block = pve_templates_block(
+            {
+                "ubuntu-base": {
+                    "id": 400100,
+                    "image_url": "https://example.com/u.img",
+                    "image_url_backup": "https://mirror.example/u.img",
+                },
+                "oracle-base": {
+                    "id": 400101,
+                    "image_url": "https://example.com/o.qcow2",
+                    "image_url_backup": "  ",
+                },
+                "debian-base": {
+                    "id": 400102,
+                    "image_url": "https://example.com/d.qcow2",
+                },
+            }
+        )
+        text = "\n".join(block)
+        self.assertEqual(text.count("image_url_backup:"), 1)
+        self.assertIn("https://mirror.example/u.img", text)
+
     def test_string_list_block_and_stringify(self) -> None:
         block = atlas_vars_setup.string_list_block(
             "pki_ca_url",

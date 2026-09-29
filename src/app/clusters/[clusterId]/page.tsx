@@ -61,7 +61,7 @@ import {
   type HostStatusRow,
   type RawWorker,
 } from "@/lib/project-dashboard";
-import { projectHref, projectIdFromPath } from "@/lib/project-href";
+import { executionLogHref, projectHref, projectIdFromPath } from "@/lib/project-href";
 import { stargateJson } from "@/lib/stargate";
 
 export default function ClusterHomePage({
@@ -491,10 +491,23 @@ export function ClusterHomeView({ clusterId }: { clusterId: string }) {
               status={liveStatus}
               text={text}
               phases={runPhases}
+              onSelect={(id) => {
+                if (!projectId || !executionId || !id.startsWith("phase:")) {
+                  return;
+                }
+                router.push(
+                  executionLogHref(
+                    projectId,
+                    executionId,
+                    id.slice("phase:".length),
+                  ),
+                );
+              }}
             />
             <AtlasPackMapLive
               projectId={projectId}
               clusterId={clusterId}
+              executionId={executionId}
               status={liveStatus}
               text={text}
               phases={runPhases}

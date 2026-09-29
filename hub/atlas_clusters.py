@@ -1,7 +1,10 @@
 """Atlas project cluster membership, catalog metadata, and optional disk purge."""
 from __future__ import annotations
 
+import json
+import logging
 import shutil
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -23,9 +26,12 @@ from clusterctl_config import (
     _explicit_path,
 )
 from project_kind import atlas_archived_cluster_ids, atlas_owned_cluster_ids
+from json_file_lock import update_json_file
 from projects_store import (
     persist_atlas_cluster_membership,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AtlasClustersError(Exception):
@@ -78,12 +84,201 @@ def _require_owned(project: Mapping[str, Any], cluster_id: str) -> str:
     return cid
 
 
+def _as_epoch(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    number: Optional[float] = None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            number = parsed.timestamp()
+    if number is None or number <= 0:
+        return None
+    if number > 1e12:
+        number = number / 1000.0
+    return number
+
+
+def _created_stamp_path(project_id: str) -> Path:
+    from executions_store import get_project_dir
+
+    return get_project_dir(project_id) / "history" / "cluster-created.json"
+
+
+def load_created_stamps(project_id: str) -> dict[str, float]:
+    if not project_id:
+        return {}
+    path = _created_stamp_path(project_id)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    stamps: dict[str, float] = {}
+    for key, value in raw.items():
+        epoch = _as_epoch(value)
+        if epoch is not None:
+            stamps[str(key)] = epoch
+    return stamps
+
+
+def remember_created_stamps(project_id: str, fresh: Mapping[str, float]) -> None:
+    """Freeze the first observed cluster.yaml time so later edits do not move it."""
+    if not project_id or not fresh:
+        return
+    from executions_store import get_project_dir
+
+    root = get_project_dir(project_id)
+    if not root.is_dir():
+        return
+
+    def mutator(data: Any) -> None:
+        if not isinstance(data, dict):
+            return None
+        for cid, epoch in fresh.items():
+            if _as_epoch(data.get(cid)) is None and epoch > 0:
+                data[cid] = epoch
+        return None
+
+    try:
+        update_json_file(
+            root / "history" / "cluster-created.json", mutator, default={}
+        )
+    except (OSError, json.JSONDecodeError):
+        logger.warning("cluster created stamp was not saved", exc_info=True)
+
+
+def filesystem_created_epoch(leaf: Path) -> Optional[float]:
+    """When cluster.yaml appeared on disk. Linux has no birth time in Python stat."""
+    cfg = leaf / CLUSTER_CONFIG_NAME
+    target = cfg if cfg.is_file() else leaf if leaf.is_dir() else None
+    if target is None:
+        return None
+    try:
+        st = target.stat()
+    except OSError:
+        return None
+    birth = float(getattr(st, "st_birthtime", 0) or 0)
+    if birth > 0:
+        return birth
+    changed = float(st.st_ctime or 0)
+    return changed if changed > 0 else None
+
+
+def _execution_cluster_id(data: Mapping[str, Any]) -> Optional[str]:
+    params = data.get("runParams") if isinstance(data.get("runParams"), dict) else {}
+    raw = (
+        params.get("cluster_id")
+        or params.get("clusterId")
+        or data.get("cluster_id")
+        or data.get("clusterId")
+    )
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return normalize_inventory_cluster_id(text)
+    except InspectError:
+        return None
+
+
+def _execution_moment(data: Mapping[str, Any]) -> Optional[float]:
+    best: Optional[float] = None
+    for key in ("finishedAt", "startedAt", "queuedAt", "createdAt", "statusUpdatedAt"):
+        moment = _as_epoch(data.get(key))
+        if moment is not None and (best is None or moment > best):
+            best = moment
+    return best
+
+
+def execution_stats_by_cluster(project_id: str) -> dict[str, dict[str, Any]]:
+    from executions_store import get_project_executions_dir
+
+    if not project_id:
+        return {}
+    directory = get_project_executions_dir(project_id)
+    if not directory.is_dir():
+        return {}
+    stats: dict[str, dict[str, Any]] = {}
+    for path in directory.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        cid = _execution_cluster_id(data)
+        if not cid:
+            continue
+        bucket = stats.get(cid)
+        if bucket is None:
+            bucket = {"runCount": 0, "successCount": 0, "lastRunAt": None}
+            stats[cid] = bucket
+        bucket["runCount"] += 1
+        if str(data.get("status") or "").upper() == "SUCCESS":
+            bucket["successCount"] += 1
+        moment = _execution_moment(data)
+        last = bucket.get("lastRunAt")
+        if moment is not None and (not isinstance(last, (int, float)) or moment > last):
+            bucket["lastRunAt"] = moment
+    return stats
+
+
+def _activity_fields(activity: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    src = activity or {}
+
+    def count(key: str) -> int:
+        try:
+            value = int(src.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
+
+    return {
+        "createdAt": _as_epoch(src.get("createdAt")),
+        "runCount": count("runCount"),
+        "successCount": count("successCount"),
+        "lastRunAt": _as_epoch(src.get("lastRunAt")),
+    }
+
+
+def _activity_for_cluster(project_id: str, cid: str, leaf: Path) -> dict[str, Any]:
+    stamps = load_created_stamps(project_id)
+    created = stamps.get(cid)
+    if created is None:
+        created = filesystem_created_epoch(leaf)
+        if created is not None:
+            remember_created_stamps(project_id, {cid: created})
+    bucket = execution_stats_by_cluster(project_id).get(cid, {})
+    return {
+        "createdAt": created,
+        "runCount": bucket.get("runCount", 0),
+        "successCount": bucket.get("successCount", 0),
+        "lastRunAt": bucket.get("lastRunAt"),
+    }
+
+
 def describe_cluster(
     cluster_id: str,
     *,
     clusters_root: Path,
     workspace_parent: Optional[Path],
     archived: bool,
+    project_id: str = "",
+    activity: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     cid = str(cluster_id).strip()
     env, name = split_cluster_id(cid)
@@ -103,6 +298,8 @@ def describe_cluster(
         except ValueError:
             workspace_exists = False
     capacity = summarize_hosts_capacity(leaf)
+    if activity is None:
+        activity = _activity_for_cluster(project_id, cid, leaf)
     return {
         "id": cid,
         "env": env,
@@ -114,6 +311,7 @@ def describe_cluster(
         "kind": "deployable" if leaf_exists else "broken",
         "active": False,
         **capacity,
+        **_activity_fields(activity),
     }
 
 
@@ -122,14 +320,35 @@ def list_project_clusters(project: Mapping[str, Any]) -> dict[str, Any]:
     workspace_parent = _workspace_parent(project)
     owned = atlas_owned_cluster_ids(project)
     archived = set(atlas_archived_cluster_ids(project))
+    project_id = str(project.get("id") or "").strip()
+    stats = execution_stats_by_cluster(project_id)
+    stamps = load_created_stamps(project_id)
+    fresh: dict[str, float] = {}
+    prepared: list[tuple[str, Optional[float]]] = []
+    for cid in owned:
+        created = stamps.get(cid)
+        if created is None:
+            created = filesystem_created_epoch(
+                inventory_leaf_path(clusters_root, cid)
+            )
+            if created is not None:
+                fresh[cid] = created
+        prepared.append((cid, created))
+    remember_created_stamps(project_id, fresh)
     rows = [
         describe_cluster(
             cid,
             clusters_root=clusters_root,
             workspace_parent=workspace_parent,
             archived=cid in archived,
+            activity={
+                "createdAt": created,
+                "runCount": stats.get(cid, {}).get("runCount", 0),
+                "successCount": stats.get(cid, {}).get("successCount", 0),
+                "lastRunAt": stats.get(cid, {}).get("lastRunAt"),
+            },
         )
-        for cid in owned
+        for cid, created in prepared
     ]
     return {
         "clustersRoot": str(clusters_root),
@@ -266,4 +485,5 @@ def patch_cluster_display_name(
         clusters_root=clusters_root,
         workspace_parent=workspace_parent,
         archived=archived,
+        project_id=str(project.get("id") or ""),
     )

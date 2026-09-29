@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 
@@ -11,10 +11,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { loginStargate } from "@/lib/stargate";
-import { safeAtlasNextPath } from "@/lib/hub-session-gate";
+import { atlasPostLoginPath } from "@/lib/hub-session-gate";
 
 export function LoginForm() {
-  const router = useRouter();
   const search = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -42,19 +41,15 @@ export function LoginForm() {
     setBusy(true);
     try {
       const data = await loginStargate(username, password);
-      toast.success("Signed in");
       const mustChange =
         data.user &&
         typeof data.user === "object" &&
         "must_change_password" in data.user &&
         Boolean((data.user as { must_change_password?: boolean }).must_change_password);
-      router.push(
-        mustChange ? "/change-password" : safeAtlasNextPath(search.get("next")),
-      );
-      router.refresh();
+      toast.success("Signed in");
+      window.location.assign(atlasPostLoginPath(search.get("next"), mustChange));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
       setBusy(false);
     }
   }

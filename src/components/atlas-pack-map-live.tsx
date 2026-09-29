@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { Map as MapIcon } from "lucide-react";
 
 import { AtlasPackMapCanvas } from "@/components/atlas-pack-map-canvas";
@@ -15,7 +16,7 @@ import {
   packMapRoleProgress,
   packMapRoleProgressByPhase,
 } from "@/lib/atlas-run-progress";
-import { projectHref } from "@/lib/project-href";
+import { projectHref, executionLogHref } from "@/lib/project-href";
 import { cn } from "@/lib/utils";
 
 export function AtlasPackMapLive({
@@ -24,16 +25,28 @@ export function AtlasPackMapLive({
   status,
   text,
   phases,
+  executionId,
 }: {
   projectId: string;
   clusterId: string;
   status?: string | null;
   text: string;
   phases?: string[];
+  executionId?: string | null;
 }) {
   const { graph, parsed, yamlText, yamlError, loading } = useAtlasPackMap(
     projectId,
     clusterId,
+  );
+  const router = useRouter();
+  const openPhaseLog = useCallback(
+    (alias: string) => {
+      if (!executionId) {
+        return;
+      }
+      router.push(executionLogHref(projectId, executionId, alias));
+    },
+    [executionId, projectId, router],
   );
   const loggedPhases = useMemo(() => packMapPhaseAliases(text), [text]);
   const mapPhases = phases && phases.length > 0 ? phases : loggedPhases;
@@ -96,6 +109,7 @@ export function AtlasPackMapLive({
             activeState={focus.state}
             activeRoles={roles}
             rolesByPhase={rolesByPhase}
+            onPhaseClick={executionId ? openPhaseLog : undefined}
           />
         ) : (
           <p className="p-4 text-sm text-muted-foreground">No packs declared.</p>

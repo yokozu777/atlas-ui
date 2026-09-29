@@ -108,6 +108,40 @@ function ClusterCapacity({ row }: { row: ClusterRow }) {
   );
 }
 
+function formatClusterWhen(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return "—";
+  const ms = value < 1e12 ? value * 1000 : value;
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function ClusterActivity({ row }: { row: ClusterRow }) {
+  const runs = row.runCount ?? 0;
+  const successful = row.successCount ?? 0;
+  return (
+    <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+      <dt className="text-muted-foreground">Created</dt>
+      <dd className="text-right tabular-nums">{formatClusterWhen(row.createdAt)}</dd>
+      <dt className="text-muted-foreground">Runs</dt>
+      <dd
+        className="text-right tabular-nums"
+        title={`${runs} runs, ${successful} successful`}
+      >
+        {runs}/{successful} successful
+      </dd>
+      <dt className="text-muted-foreground">Last run</dt>
+      <dd className="text-right tabular-nums">{formatClusterWhen(row.lastRunAt)}</dd>
+    </dl>
+  );
+}
+
 export function ClustersCatalog({ projectId }: { projectId: string }) {
   const router = useRouter();
   const can = useCan();
@@ -805,6 +839,7 @@ function ClusterSections({
                         </p>
                       ) : null}
                       <ClusterCapacity row={row} />
+                      <ClusterActivity row={row} />
                     </div>
                     <FavoriteStar
                       pressed={isFavorite(row.id)}

@@ -191,10 +191,25 @@ describe("k8s overlay setup schemas", () => {
     const grafana = setupSchemaForVarsFile("atlas-k8s-addons.secrets.yml", "").fields.find(
       (field) => field.key === "grafana_admin_password",
     );
+    const openbaoOidc = setupSchemaForVarsFile("atlas-k8s-addons.secrets.yml", "").fields.find(
+      (field) => field.key === "openbao_oidc_client_secret",
+    );
+    const openbaoAdmin = setupSchemaForVarsFile("atlas-k8s-addons.secrets.yml", "").fields.find(
+      (field) => field.key === "openbao_admin_password",
+    );
     assert.equal(vip?.input, "password");
     assert.equal(grafana?.input, "password");
+    assert.equal(openbaoOidc?.input, "password");
+    assert.equal(openbaoOidc?.group, "OIDC");
+    assert.equal(openbaoAdmin?.input, "password");
+    assert.equal(openbaoAdmin?.group, "OpenBao");
     assert.equal(isMissingSetupValue("CHANGEME", vip), true);
     assert.equal(isMissingSetupValue("CHANGEME", grafana), true);
+    assert.equal(
+      isMissingSetupValue("CHANGEME_openbao_oidc_client_secret_32b", openbaoOidc),
+      true,
+    );
+    assert.equal(isMissingSetupValue("real-openbao-secret", openbaoOidc), false);
   });
 
   it("treats optional DNS key and empty helm nginx domain as present", () => {

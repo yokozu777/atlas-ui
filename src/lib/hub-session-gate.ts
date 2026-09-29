@@ -56,6 +56,27 @@ export function safeAtlasNextPath(raw: string | null | undefined): string {
   return value;
 }
 
+export function atlasPostLoginPath(
+  next: string | null | undefined,
+  mustChangePassword: boolean,
+): string {
+  if (mustChangePassword) {
+    return "/change-password";
+  }
+  const path = safeAtlasNextPath(next);
+  if (path === "/login" || path.startsWith("/login/") || path.startsWith("/login?")) {
+    return "/projects";
+  }
+  return path;
+}
+
+export function shouldRestoreSessionFromRefresh(
+  hasAccessCookie: boolean,
+  hasRefreshCookie: boolean,
+): boolean {
+  return !hasAccessCookie && hasRefreshCookie;
+}
+
 export function hubAuthMeUrl(apiUrl: string): string {
   return `${apiUrl.replace(/\/$/, "")}/api/auth/me`;
 }

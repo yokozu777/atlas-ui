@@ -28,10 +28,16 @@ import { FileDown, Loader2, LocateFixed, Scan, ZoomIn, ZoomOut } from "lucide-re
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
   layoutPackMapCopy,
   PACK_MAP_NODE_W,
+  packMapActiveEntryId,
   packMapHref,
   packMapStatusLabel,
   type PackMapEdge,
@@ -53,6 +59,7 @@ type FlowData = PackMapNode & {
   href: string | null;
   live: PackMapLiveState | null;
   roleMarks: PackMapRoleMark[] | null;
+  onPhaseClick?: (alias: string) => void;
 };
 type FlowNode = Node<FlowData, "packMap">;
 
@@ -165,10 +172,21 @@ function PackMapFlowNode({ data }: NodeProps<FlowNode>) {
         data.live === "fail" && "ring-2 ring-destructive shadow-[0_0_18px] shadow-destructive/40",
         data.live === "done" && "ring-2 ring-success shadow-[0_0_18px] shadow-success/30",
         !data.live && statusRing(data.status),
-        data.href ? "cursor-pointer" : "cursor-default",
+        data.onPhaseClick && data.kind === "phase"
+          ? "cursor-pointer"
+          : data.href
+            ? "cursor-pointer"
+            : "cursor-default",
       )}
     >
-      {data.href ? (
+      {data.onPhaseClick && data.kind === "phase" ? (
+        <button
+          type="button"
+          className="nopan nodrag absolute inset-0 z-10 cursor-pointer rounded-xl"
+          aria-label={`Open log for ${data.title}`}
+          onClick={() => data.onPhaseClick?.(data.title)}
+        />
+      ) : data.href ? (
         <a
           href={data.href}
           className="nopan nodrag absolute inset-0 z-10 rounded-xl"
@@ -360,6 +378,7 @@ function toFlow(
   live: { ids: string[]; state: PackMapLiveState | null },
   roles: PackMapRoleProgress | null,
   rolesByPhase: Record<string, PackMapRoleProgress> | null,
+  onPhaseClick?: (alias: string) => void,
 ): { nodes: FlowNode[]; edges: Edge[] } {
   const columnOf = Object.fromEntries(
     graph.nodes.map((node) => [node.id, node.column] as const),
@@ -399,7 +418,8 @@ function toFlow(
         zIndex: highlighted ? 3 : 2,
         data: {
           ...node,
-          href: packMapHref(projectId, node.hrefKind),
+          href: onPhaseClick && node.kind === "phase" ? null : packMapHref(projectId, node.hrefKind),
+          onPhaseClick,
           live: highlighted ? live.state : null,
           roleMarks: progress
             ? packMapRoleMarks(
@@ -442,17 +462,53 @@ function toFlow(
   };
 }
 
+function MapControlButton({
+  label,
+  className,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  className: string;
+  disabled?: boolean;
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-label={label}
+            className={className}
+            disabled={disabled}
+            onClick={onClick}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent side="left">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function PackMapControls({
   downloadName,
-  focusPhaseId,
+  focusEntryId,
 }: {
   downloadName: string;
-  focusPhaseId: string | null;
+  focusEntryId: string | null;
 }) {
   const { zoomIn, zoomOut, fitView, getNodes } = useReactFlow();
   const [saving, setSaving] = useState(false);
   const iconButton =
     "flex size-8 items-center justify-center text-foreground hover:bg-muted disabled:opacity-50";
+  const focusLabel = focusEntryId
+    ? "Center on active entry"
+    : "No active entry";
 
   async function downloadPdf(target: HTMLButtonElement) {
     const root = target.closest(".react-flow");
@@ -480,40 +536,35 @@ function PackMapControls({
   return (
     <Panel position="top-right" className="!m-2">
       <div className="flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm">
-        <button
-          type="button"
-          aria-label="Zoom in"
+        <MapControlButton
+          label="Zoom in"
           className={iconButton}
           onClick={() => void zoomIn({ duration: 200 })}
         >
           <ZoomIn className="size-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Zoom out"
+        </MapControlButton>
+        <MapControlButton
+          label="Zoom out"
           className={`${iconButton} border-t border-border`}
           onClick={() => void zoomOut({ duration: 200 })}
         >
           <ZoomOut className="size-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Fit view"
+        </MapControlButton>
+        <MapControlButton
+          label="Fit view"
           className={`${iconButton} border-t border-border`}
           onClick={() => void fitView({ padding: 0.18, duration: 200 })}
         >
           <Scan className="size-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Center on active phase"
-          title={focusPhaseId ? "Center on active phase" : "No active phase"}
+        </MapControlButton>
+        <MapControlButton
+          label={focusLabel}
           className={`${iconButton} border-t border-border`}
-          disabled={!focusPhaseId}
+          disabled={!focusEntryId}
           onClick={() => {
-            if (!focusPhaseId) return;
+            if (!focusEntryId) return;
             void fitView({
-              nodes: [{ id: focusPhaseId }],
+              nodes: [{ id: focusEntryId }],
               padding: 0.35,
               duration: 380,
               maxZoom: 1.5,
@@ -521,11 +572,9 @@ function PackMapControls({
           }}
         >
           <LocateFixed className="size-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Download PDF"
-          title="Download PDF"
+        </MapControlButton>
+        <MapControlButton
+          label="Download PDF"
           className="flex h-8 items-center justify-center gap-1 border-t border-border px-2 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
           disabled={saving}
           onClick={(event) => void downloadPdf(event.currentTarget)}
@@ -536,7 +585,7 @@ function PackMapControls({
             <FileDown className="size-3.5" />
           )}
           PDF
-        </button>
+        </MapControlButton>
       </div>
     </Panel>
   );
@@ -619,6 +668,7 @@ export function AtlasPackMapCanvas({
   activeRoles = null,
   rolesByPhase = null,
   downloadName = "pack-map",
+  onPhaseClick,
 }: {
   graph: PackMapGraph;
   projectId: string;
@@ -627,6 +677,7 @@ export function AtlasPackMapCanvas({
   activeRoles?: PackMapRoleProgress | null;
   rolesByPhase?: Record<string, PackMapRoleProgress> | null;
   downloadName?: string;
+  onPhaseClick?: (alias: string) => void;
 }) {
   const liveIds = useMemo(
     () => packMapLiveIds(graph, activeState ? activeAlias : null),
@@ -640,8 +691,9 @@ export function AtlasPackMapCanvas({
         { ids: liveIds, state: activeState },
         activeRoles,
         rolesByPhase,
+        onPhaseClick,
       ),
-    [activeRoles, activeState, graph, liveIds, projectId, rolesByPhase],
+    [activeRoles, activeState, graph, liveIds, onPhaseClick, projectId, rolesByPhase],
   );
   const [nodes, setNodes, onNodesChange] = useNodesState(flow.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(flow.edges);
@@ -678,14 +730,18 @@ export function AtlasPackMapCanvas({
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable
-      panOnScroll
+      zoomOnScroll
+      panOnScroll={false}
       colorMode="dark"
       className="atlas-pack-map bg-transparent"
     >
       <PackMapMeasuredLayout graph={graph} nodes={nodes} setNodes={setNodes} />
       <PackMapFocus ids={liveIds} />
       <Background gap={22} size={1} color="oklch(1 0 0 / 8%)" />
-      <PackMapControls downloadName={downloadName} focusPhaseId={liveIds[0] ?? null} />
+      <PackMapControls
+        downloadName={downloadName}
+        focusEntryId={packMapActiveEntryId(graph.nodes, liveIds)}
+      />
       <MiniMap
         pannable
         zoomable

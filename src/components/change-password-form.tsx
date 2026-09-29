@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
@@ -9,10 +9,10 @@ import { Panel } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { safeAtlasNextPath } from "@/lib/hub-session-gate";
 import { changePasswordStargate } from "@/lib/stargate";
 
 export function ChangePasswordForm() {
-  const router = useRouter();
   const search = useSearchParams();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -24,11 +24,9 @@ export function ChangePasswordForm() {
     try {
       await changePasswordStargate(currentPassword, newPassword);
       toast.success("Password updated");
-      router.push(search.get("next") || "/projects");
-      router.refresh();
+      window.location.assign(safeAtlasNextPath(search.get("next")));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
       setBusy(false);
     }
   }

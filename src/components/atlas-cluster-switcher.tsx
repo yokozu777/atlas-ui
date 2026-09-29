@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import type { ClusterRow } from "@/lib/api";
 import {
   clusterMatchesQuery,
-  groupClusters,
+  clusterSwitcherGroups,
   isCascadeDefaultCluster,
 } from "@/lib/cluster-groups";
 import { projectHref } from "@/lib/project-href";
@@ -61,23 +61,20 @@ export function AtlasClusterSwitcher() {
 
   const groups = useMemo<ContextSwitcherGroup<ClusterHit>[]>(() => {
     const recentIds = projectId ? readRecentClusterIds(projectId) : [];
-    const recentHits = recentIds
-      .map((id) => items.find((hit) => hit.cluster.id === id))
-      .filter((hit): hit is ClusterHit => Boolean(hit));
-    const recentSet = new Set(recentHits.map((hit) => hit.cluster.id));
-    const rest = items.filter((hit) => !recentSet.has(hit.cluster.id));
-    const sections: ContextSwitcherGroup<ClusterHit>[] = [];
-    if (recentHits.length > 0) {
-      sections.push({ id: "recent", label: "Recent", items: recentHits });
-    }
-    for (const group of groupClusters(rest.map((hit) => hit.cluster))) {
-      sections.push({
-        id: group.key,
-        label: group.label,
-        items: group.items.map((cluster) => ({ key: cluster.id, cluster })),
-      });
-    }
-    return sections;
+    return clusterSwitcherGroups(
+      items.map((hit) => hit.cluster),
+      recentIds,
+    ).map((group) => ({
+      id: group.key,
+      label: group.label,
+      items: group.items.map((cluster) => {
+        const hit = items.find((item) => item.cluster.id === cluster.id);
+        if (group.key !== "recent") {
+          return hit ?? { key: cluster.id, cluster };
+        }
+        return { key: `recent:${cluster.id}`, cluster };
+      }),
+    }));
   }, [items, projectId]);
 
   const selected = useMemo(() => {

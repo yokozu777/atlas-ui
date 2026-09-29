@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import { ChevronDown, RefreshCw, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 
@@ -21,7 +22,7 @@ import {
   executionStatusKind,
   executionStatusLabel,
 } from "@/lib/project-dashboard";
-import { projectHref } from "@/lib/project-href";
+import { executionLogHref, projectHref } from "@/lib/project-href";
 import { stargateJson } from "@/lib/stargate";
 import { cn } from "@/lib/utils";
 
@@ -78,6 +79,7 @@ function AtlasClusterRuntimeLoaded({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [executionStatus, setExecutionStatus] = useState<string | null>(null);
+  const router = useRouter();
   const { text, running } = useExecutionStream(projectId, executionId);
 
   const loadShow = useCallback(async () => {
@@ -267,7 +269,22 @@ function AtlasClusterRuntimeLoaded({
                   Open log
                 </Button>
               </div>
-              <AtlasRunProgressCard status={liveStatus} text={text} />
+              <AtlasRunProgressCard
+                status={liveStatus}
+                text={text}
+                onSelect={(id) => {
+                  if (!executionId || !id.startsWith("phase:")) {
+                    return;
+                  }
+                  router.push(
+                    executionLogHref(
+                      projectId,
+                      executionId,
+                      id.slice("phase:".length),
+                    ),
+                  );
+                }}
+              />
             </div>
           ) : null}
           {status ? (

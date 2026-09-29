@@ -80,7 +80,7 @@ export function JobProgress({
           const phase = step.id.startsWith("phase:");
           const selected = selectedId === step.id;
           const className = cn(
-            "flex w-full items-start gap-2 rounded-md bg-muted/50 px-3 py-2 text-left",
+            "flex w-full cursor-pointer items-start gap-2 rounded-md bg-muted/50 px-3 py-2 text-left",
             step.state === "running" && "ring-1 ring-chart-1/40",
             step.state === "fail" && "ring-1 ring-destructive/40",
             selected && "ring-1 ring-foreground/40",

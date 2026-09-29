@@ -5,8 +5,20 @@ export function projectHref(projectId: string, suffix = ""): string {
   return `/projects/${encodeURIComponent(projectId)}${suffix}`;
 }
 
-export function executionLogHref(projectId: string, executionId: string): string {
-  return projectHref(projectId, `/executions/${encodeURIComponent(executionId)}`);
+export function executionLogHref(
+  projectId: string,
+  executionId: string,
+  phase?: string | null,
+): string {
+  const base = projectHref(
+    projectId,
+    `/executions/${encodeURIComponent(executionId)}`,
+  );
+  const name = (phase || "").trim();
+  if (!name) {
+    return base;
+  }
+  return `${base}?phase=${encodeURIComponent(name)}`;
 }
 
 export const LAST_PROJECT_STORAGE_KEY = "atlas-ui:last-project-id";

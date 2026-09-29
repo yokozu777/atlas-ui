@@ -541,6 +541,9 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       secretField("vault_oidc_client_secret", "Vault OIDC client secret", "OIDC", [
         "CHANGEME_vault_oidc_client_secret_32b",
       ]),
+      secretField("openbao_oidc_client_secret", "OpenBao OIDC client secret", "OIDC", [
+        "CHANGEME_openbao_oidc_client_secret_32b",
+      ]),
       secretField("argocd_oidc_client_secret", "Argo CD OIDC client secret", "OIDC", [
         "CHANGEME_argocd_oidc_client_secret_32b",
       ]),
@@ -597,6 +600,9 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       ]),
       secretField("vault_admin_password", "Vault admin password", "Vault", [
         "CHANGEME_vault_admin",
+      ]),
+      secretField("openbao_admin_password", "OpenBao admin password", "OpenBao", [
+        "CHANGEME_openbao_admin",
       ]),
     ],
   },

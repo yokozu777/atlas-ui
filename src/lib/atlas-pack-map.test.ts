@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   buildPackMapGraph,
   layoutPackMapCopy,
+  packMapActiveEntryId,
   packMapColumnOverlaps,
   packMapEntryRuntime,
   packMapHref,
@@ -377,5 +378,23 @@ describe("layoutPackMapCopy", () => {
       .sort((left, right) => left.y - right.y);
     assert.ok(entries.length >= 2);
     assert.ok((entries[0].y ?? 0) + 220 <= (entries[1].y ?? 0));
+  });
+});
+
+describe("packMapActiveEntryId", () => {
+  it("returns the entry that calls the live phase", () => {
+    const graph = buildPackMapGraph({
+      clusterId: "lab/k8s",
+      draft: draft(),
+    });
+    assert.equal(
+      packMapActiveEntryId(graph.nodes, [
+        "phase:0:provision",
+        "entry:atlas-compute-provision/provision",
+      ]),
+      "entry:atlas-compute-provision/provision",
+    );
+    assert.equal(packMapActiveEntryId(graph.nodes, ["phase:0:provision"]), null);
+    assert.equal(packMapActiveEntryId(graph.nodes, []), null);
   });
 });

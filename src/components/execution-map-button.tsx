@@ -103,6 +103,7 @@ export function ExecutionMapButton({
             <AtlasPackMapLive
               projectId={projectId}
               clusterId={clusterId}
+              executionId={executionId}
               status={progressStatus(status)}
               text={text ?? ""}
               phases={phases}

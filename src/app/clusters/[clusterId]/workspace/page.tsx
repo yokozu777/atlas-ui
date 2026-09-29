@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { use, useCallback, useEffect, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   Boxes,
   ChevronDown,
@@ -38,7 +39,7 @@ import {
   executionStatusKind,
   executionStatusLabel,
 } from "@/lib/project-dashboard";
-import { projectHref } from "@/lib/project-href";
+import { executionLogHref, projectHref } from "@/lib/project-href";
 import { notifyExecution } from "@/lib/notification-inbox";
 import { stargateJson } from "@/lib/stargate";
 import { cn } from "@/lib/utils";
@@ -66,6 +67,7 @@ export function ClusterWorkspaceView({
   const logsHref = projectId
     ? projectHref(projectId, "/executions?tab=logs")
     : clusterHref(clusterId, "/logs");
+  const router = useRouter();
   const [status, setStatus] = useState<WorkspaceShowPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -468,6 +470,18 @@ export function ClusterWorkspaceView({
           <AtlasRunProgressCard
             status={liveStatus}
             text={text}
+            onSelect={(id) => {
+              if (!projectId || !executionId || !id.startsWith("phase:")) {
+                return;
+              }
+              router.push(
+                executionLogHref(
+                  projectId,
+                  executionId,
+                  id.slice("phase:".length),
+                ),
+              );
+            }}
           />
         </div>
       ) : null}

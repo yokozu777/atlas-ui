@@ -362,6 +362,79 @@ class AtlasClustersHttpTests(unittest.TestCase):
             self.assertEqual(row.get("memoryMb"), 12288)
             self.assertEqual(row.get("diskGb"), 370)
 
+    def test_list_includes_created_and_run_stats(self):
+        access = self._login()
+        headers = {"Authorization": f"Bearer {access}"}
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            ctl, clusters = self._inventory(tmp)
+            project_id, _ = self._create_atlas(
+                headers,
+                f"atlas-cluster-runs-{uuid.uuid4().hex[:8]}",
+                cluster_id="dev/k8s",
+                clusterctlRoot=str(ctl),
+            )
+            updated = self.client.put(
+                f"/api/projects/{project_id}",
+                json={"clustersRoot": str(clusters)},
+                headers=headers,
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            directory = get_project_executions_dir(project_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "ok.json").write_text(
+                json.dumps(
+                    {
+                        "id": "ok",
+                        "status": "SUCCESS",
+                        "kind": "atlas",
+                        "createdAt": 1700000100,
+                        "finishedAt": 1700000200,
+                        "runParams": {"cluster_id": "dev/k8s"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (directory / "bad.json").write_text(
+                json.dumps(
+                    {
+                        "id": "bad",
+                        "status": "FAILED",
+                        "createdAt": 1700000300,
+                        "finishedAt": 1700000400,
+                        "runParams": {"clusterId": "dev/k8s"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (directory / "other.json").write_text(
+                json.dumps(
+                    {
+                        "id": "other",
+                        "status": "SUCCESS",
+                        "finishedAt": 1700000500,
+                        "runParams": {"cluster_id": "prod/api"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (directory / "untagged.json").write_text(
+                json.dumps({"id": "untagged", "status": "SUCCESS", "finishedAt": 1700000600}),
+                encoding="utf-8",
+            )
+            row = self._rows(headers, project_id)[0]
+            self.assertEqual(row.get("runCount"), 2)
+            self.assertEqual(row.get("successCount"), 1)
+            self.assertEqual(row.get("lastRunAt"), 1700000400)
+            created = row.get("createdAt")
+            self.assertIsInstance(created, (int, float))
+            cfg = clusters / "dev" / "k8s" / "cluster.yaml"
+            cfg.write_text("id: dev/k8s\ndisplay_name: renamed\n", encoding="utf-8")
+            os.utime(cfg, (created + 5000, created + 5000))
+            again = self._rows(headers, project_id)[0]
+            self.assertEqual(again.get("createdAt"), created)
+            self.assertEqual(again.get("display_name"), "renamed")
+
     def test_archive_restore_and_unlink(self):
         access = self._login()
         headers = {"Authorization": f"Bearer {access}"}

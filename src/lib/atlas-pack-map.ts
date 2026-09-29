@@ -527,6 +527,14 @@ function layoutPhases(nodes: PackMapNode[]): void {
   }
 }
 
+export function packMapActiveEntryId(
+  nodes: readonly Pick<PackMapNode, "id" | "kind">[],
+  liveIds: readonly string[],
+): string | null {
+  const kindOf = new Map(nodes.map((node) => [node.id, node.kind]));
+  return liveIds.find((id) => kindOf.get(id) === "entry") ?? null;
+}
+
 export function layoutPackMapNodes(
   nodes: PackMapNode[],
   heights?: Record<string, number>,

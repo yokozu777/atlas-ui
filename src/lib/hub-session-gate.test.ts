@@ -10,8 +10,10 @@ import {
   hubSessionIsAuthenticated,
   isAtlasApiPath,
   isPublicAtlasPath,
+  atlasPostLoginPath,
   safeAtlasNextPath,
   shouldAttemptHubRefresh,
+  shouldRestoreSessionFromRefresh,
 } from "./hub-session-gate.ts";
 
 describe("isPublicAtlasPath", () => {
@@ -89,5 +91,32 @@ describe("safeAtlasNextPath", () => {
     assert.equal(safeAtlasNextPath("/\\evil"), "/projects");
     assert.equal(safeAtlasNextPath(""), "/projects");
     assert.equal(safeAtlasNextPath(null), "/projects");
+  });
+});
+
+describe("atlasPostLoginPath", () => {
+  it("follows next after a normal sign-in", () => {
+    assert.equal(
+      atlasPostLoginPath("/projects/p1/cluster-yaml", false),
+      "/projects/p1/cluster-yaml",
+    );
+  });
+
+  it("does not send the user back to the login page", () => {
+    assert.equal(atlasPostLoginPath("/login", false), "/projects");
+    assert.equal(atlasPostLoginPath("/login?next=%2Fprojects", false), "/projects");
+    assert.equal(atlasPostLoginPath(null, false), "/projects");
+  });
+
+  it("sends a first-login account to change password", () => {
+    assert.equal(atlasPostLoginPath("/projects/p1", true), "/change-password");
+  });
+});
+
+describe("shouldRestoreSessionFromRefresh", () => {
+  it("mints a new access cookie when only the refresh cookie remains", () => {
+    assert.equal(shouldRestoreSessionFromRefresh(false, true), true);
+    assert.equal(shouldRestoreSessionFromRefresh(true, true), false);
+    assert.equal(shouldRestoreSessionFromRefresh(false, false), false);
   });
 });

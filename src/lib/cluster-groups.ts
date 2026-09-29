@@ -70,3 +70,24 @@ export function groupClusters<T extends { id: string }>(rows: T[]): ClusterGroup
   }
   return sections;
 }
+
+/** Recent is a shortcut. Env groups still list every cluster, including recent ones. */
+export function clusterSwitcherGroups<T extends { id: string }>(
+  rows: T[],
+  recentIds: string[],
+): ClusterGroup<T>[] {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const recent: T[] = [];
+  for (const id of recentIds) {
+    const row = byId.get(id);
+    if (row && !recent.some((item) => item.id === row.id)) {
+      recent.push(row);
+    }
+  }
+  const sections: ClusterGroup<T>[] = [];
+  if (recent.length > 0) {
+    sections.push({ key: "recent", label: "Recent", items: recent });
+  }
+  sections.push(...groupClusters(rows));
+  return sections;
+}

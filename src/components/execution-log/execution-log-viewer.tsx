@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 
@@ -61,7 +62,8 @@ export function ExecutionLogViewer({
   const now = useNow(active);
   const status = log.status || record.record?.status || null;
   const failed = status === "FAILED";
-  const [logOpen, setLogOpen] = useState(false);
+  const phaseFromUrl = useSearchParams()?.get("phase") ?? null;
+  const [logOpen, setLogOpen] = useState<boolean | null>(null);
   const [userPhase, setUserPhase] = useState<string | null>(null);
   const slices = useMemo(() => logPhaseSlices(log.lines), [log.lines]);
   const phaseNames = useMemo(() => {
@@ -79,20 +81,15 @@ export function ExecutionLogViewer({
   );
   const failedLabel = failedPhase ? failedPhase.id.slice("phase:".length) : null;
 
-  useEffect(() => {
-    if (failed) {
-      setLogOpen(true);
-    }
-  }, [failed]);
-
-  const pickedPhase = userPhase ?? (failed ? failedLabel : null);
+  const pickedPhase = userPhase ?? phaseFromUrl ?? (failed ? failedLabel : null);
+  const showLog = logOpen ?? (failed || Boolean(phaseFromUrl));
 
   const visibleLines = useMemo(() => {
     if (!pickedPhase) {
       return log.lines;
     }
     return (
-      slices.find((slice) => slice.label === pickedPhase)?.lines ?? []
+      slices.find((slice) => slice.label === pickedPhase)?.lines ?? log.lines
     );
   }, [log.lines, pickedPhase, slices]);
   const fullBody = joinPlainLines(log.lines);
@@ -136,18 +133,18 @@ export function ExecutionLogViewer({
         variant="ghost"
         size="sm"
         className="self-start"
-        aria-expanded={logOpen}
-        onClick={() => setLogOpen((open) => !open)}
+        aria-expanded={showLog}
+        onClick={() => setLogOpen((open) => !(open ?? showLog))}
       >
-        {logOpen ? "Hide log" : "Show log"}
+        {showLog ? "Hide log" : "Show log"}
         <ChevronDown
           className={cn(
             "size-4 transition-transform",
-            logOpen ? "rotate-180" : "rotate-0",
+            showLog ? "rotate-180" : "rotate-0",
           )}
         />
       </Button>
-      {logOpen ? (
+      {showLog ? (
         <LogPane
           key={pickedPhase ?? "all"}
           lines={visibleLines}

@@ -13,6 +13,7 @@ import {
   hubSessionIsAuthenticated,
   isPublicAtlasPath,
   shouldAttemptHubRefresh,
+  shouldRestoreSessionFromRefresh,
 } from "@/lib/hub-session-gate";
 import {
   ATLAS_CLUSTER_COOKIE,
@@ -156,7 +157,22 @@ async function enforceHubSession(
   request: NextRequest,
   apiUrl: string,
 ): Promise<HubSessionOk | { ok: false; response: NextResponse }> {
-  const access = request.cookies.get(ATLAS_ACCESS_COOKIE)?.value?.trim();
+  const access = request.cookies.get(ATLAS_ACCESS_COOKIE)?.value?.trim() || "";
+  const refresh = request.cookies.get(ATLAS_REFRESH_COOKIE)?.value?.trim() || "";
+  if (
+    shouldRestoreSessionFromRefresh(Boolean(access), Boolean(refresh)) &&
+    refresh
+  ) {
+    const rotated = await refreshHubAccess(apiUrl, refresh);
+    if (rotated) {
+      return {
+        ok: true,
+        accessToken: rotated.access,
+        refreshed: rotated,
+      };
+    }
+    return { ok: false, response: loginRedirect(request) };
+  }
   if (!access) {
     return { ok: false, response: loginRedirect(request) };
   }
@@ -165,9 +181,8 @@ async function enforceHubSession(
     return { ok: true, accessToken: access };
   }
   if (hubSessionUnavailable(status)) {
-    return { ok: false, response: loginRedirect(request, false) };
+    return { ok: true, accessToken: access };
   }
-  const refresh = request.cookies.get(ATLAS_REFRESH_COOKIE)?.value?.trim();
   if (shouldAttemptHubRefresh(status, Boolean(refresh)) && refresh) {
     const rotated = await refreshHubAccess(apiUrl, refresh);
     if (rotated) {

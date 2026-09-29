@@ -18,11 +18,21 @@ export type ClusterRow = {
   cpu?: number;
   memoryMb?: number;
   diskGb?: number;
+  createdAt?: number | null;
+  runCount?: number;
+  successCount?: number;
+  lastRunAt?: number | null;
 };
 
 function asInt(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : fallback;
+}
+
+function asEpoch(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function asClusterRow(row: {
@@ -40,6 +50,10 @@ function asClusterRow(row: {
   cpu?: number;
   memoryMb?: number;
   diskGb?: number;
+  createdAt?: number | string | null;
+  runCount?: number;
+  successCount?: number;
+  lastRunAt?: number | string | null;
 }): ClusterRow | null {
   const id = String(row.id ?? "").trim();
   if (!id) return null;
@@ -63,6 +77,10 @@ function asClusterRow(row: {
     cpu: asInt(row.cpu),
     memoryMb: asInt(row.memoryMb),
     diskGb: asInt(row.diskGb),
+    createdAt: asEpoch(row.createdAt),
+    runCount: asInt(row.runCount),
+    successCount: asInt(row.successCount),
+    lastRunAt: asEpoch(row.lastRunAt),
   };
 }
 

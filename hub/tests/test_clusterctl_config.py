@@ -10,11 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clusterctl_config import (  # noqa: E402
     apply_project_path_fields,
     clusterctl_fetched_at_from_ui_config,
+    clusterctl_ignore_host_key_from_ui_config,
     clusterctl_root_from_project,
     clusterctl_root_from_ui_config,
     inspect_run_params_from_project,
     load_path_defaults,
     remap_host_bind_path,
+    resolve_clusterctl_ignore_host_key,
     resolve_clusters_root,
     resolve_configured_path,
     resolve_workspace_root,
@@ -171,6 +173,20 @@ class ClusterctlConfigTests(unittest.TestCase):
         stamp = clusterctl_fetched_at_from_ui_config()
         self.assertIsNotNone(stamp)
         self.assertRegex(stamp or "", r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_ignore_host_key_merges_ui_config(self):
+        cfg = self.root / "ui-config.json"
+        cfg.write_text('{"other": 1, "clusterctlRoot": "/old"}\n', encoding="utf-8")
+        os.environ["ATLAS_UI_CONFIG"] = str(cfg)
+        self.assertFalse(clusterctl_ignore_host_key_from_ui_config())
+        self.assertTrue(resolve_clusterctl_ignore_host_key("true"))
+        saved = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(saved["other"], 1)
+        self.assertEqual(saved["clusterctlRoot"], "/old")
+        self.assertIs(saved["clusterctlIgnoreHostKey"], True)
+        self.assertFalse(resolve_clusterctl_ignore_host_key(False))
+        self.assertFalse(clusterctl_ignore_host_key_from_ui_config())
+        self.assertTrue(resolve_clusterctl_ignore_host_key(None) is False)
 
     def test_env_beats_ui_config(self):
         os.environ["ATLAS_CLUSTER_ROOT"] = "/from-env"

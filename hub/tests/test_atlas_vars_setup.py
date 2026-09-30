@@ -5,6 +5,7 @@ sys.path.insert(0, str(_AuthEnvPath(__file__).resolve().parent))
 import auth_env  # noqa: F401
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -395,6 +396,7 @@ class VarsSetupHttpTests(unittest.TestCase):
                 if row["name"] == "atlas-compute-provision.yml"
             )
             self.assertEqual(compute["keys"]["provision_gateway"]["origin"], "env")
+            self.assertNotIn("fileMeta", compute)
             self.assertEqual(compute["keys"]["provision_gateway"]["value"], "192.168.1.1")
             self.assertNotIn("comment", compute["keys"]["provision_gateway"])
             self.assertEqual(
@@ -493,6 +495,15 @@ class VarsSetupHttpTests(unittest.TestCase):
                 data["nested"]["provision_pve_templates"]["origin"], "leaf"
             )
             self.assertEqual(data["nested"]["provision_pve_templates"]["comment"], "")
+            meta = data["fileMeta"]
+            self.assertTrue(
+                str(meta["absolutePath"]).endswith(
+                    "lab/pve/group_vars/all/atlas-compute-provision.yml"
+                )
+            )
+            self.assertTrue(meta["modifiedAt"])
+            self.assertIsNone(meta["createdAt"])
+            self.assertIsNone(meta["editedBy"])
 
     def test_put_writes_yaml_list(self) -> None:
         headers = self._login()
@@ -712,6 +723,60 @@ class VarsSetupHttpTests(unittest.TestCase):
             )
             blob = res.text
             self.assertNotIn("CHANGEME", blob)
+
+
+class VarsSetupFileFactsTests(unittest.TestCase):
+    def _git(self, repo: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_leaf_copy_carries_git_author_and_created_date(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            rel = "group_vars/all/atlas-node-foundation.secrets.yml"
+            env_dir = root / "clusters" / "lab" / "default"
+            leaf_dir = root / "clusters" / "lab" / "k8s"
+            env_file = env_dir / rel
+            leaf_file = leaf_dir / rel
+            env_file.parent.mkdir(parents=True)
+            leaf_file.parent.mkdir(parents=True)
+            env_file.write_text("initial_password: env\n", encoding="utf-8")
+            self._git(root, "init")
+            self._git(root, "add", rel.replace("group_vars", "clusters/lab/default/group_vars"))
+            self._git(
+                root,
+                "-c",
+                "user.email=env@example.com",
+                "-c",
+                "user.name=Env Author",
+                "commit",
+                "-m",
+                "env",
+            )
+            leaf_file.write_text("initial_password: leaf\n", encoding="utf-8")
+            self._git(root, "add", "clusters/lab/k8s/group_vars/all/atlas-node-foundation.secrets.yml")
+            self._git(
+                root,
+                "-c",
+                "user.email=leaf@example.com",
+                "-c",
+                "user.name=Leaf Author",
+                "commit",
+                "-m",
+                "leaf",
+            )
+            layers = [("env", env_dir), ("leaf", leaf_dir)]
+            facts = atlas_vars_setup._file_facts(atlas_vars_setup._overlay_file(layers, rel))
+            self.assertEqual(facts["absolutePath"], str(leaf_file.resolve()))
+            self.assertEqual(facts["editedBy"], "Leaf Author")
+            self.assertTrue(facts["createdAt"])
+            self.assertTrue(facts["modifiedAt"])
+            self.assertIsNone(atlas_vars_setup._file_facts(None)["absolutePath"])
 
 
 if __name__ == "__main__":

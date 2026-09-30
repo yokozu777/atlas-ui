@@ -74,6 +74,7 @@ x-healthcheck: &hub_health
 services:
   hub:
     image: *image_hub
+    platform: linux/amd64
     container_name: atlas-ui-hub
     ports:
       - "8000:8000"
@@ -88,6 +89,7 @@ services:
 
   ui:
     image: *image_ui
+    platform: linux/amd64
     container_name: atlas-ui
     ports:
       - "3000:3000"
@@ -103,6 +105,7 @@ services:
 
   worker:
     image: *image_worker
+    platform: linux/amd64
     container_name: atlas-ui-worker
     volumes: *hub_volumes
     environment:

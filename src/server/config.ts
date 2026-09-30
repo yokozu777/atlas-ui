@@ -5,6 +5,7 @@ import path from "node:path";
 export type AtlasUiConfig = {
   clusterctlRoot: string;
   clusterctlFetchedAt?: string;
+  clusterctlIgnoreHostKey?: boolean;
 };
 
 const CONFIG_DIR_NAME = "atlas-ui";
@@ -28,6 +29,7 @@ export async function loadConfig(): Promise<AtlasUiConfig | null> {
       return {
         clusterctlRoot,
         clusterctlFetchedAt: parsed.clusterctlFetchedAt?.trim() || undefined,
+        clusterctlIgnoreHostKey: parsed.clusterctlIgnoreHostKey === true,
       };
     }
   } catch {
@@ -60,9 +62,43 @@ export async function saveConfig(config: AtlasUiConfig): Promise<void> {
   if (config.clusterctlFetchedAt) {
     payload.clusterctlFetchedAt = config.clusterctlFetchedAt;
   }
+  if (config.clusterctlIgnoreHostKey !== undefined) {
+    payload.clusterctlIgnoreHostKey = config.clusterctlIgnoreHostKey;
+  }
   await writeFile(
     /* turbopackIgnore: true */ file,
     JSON.stringify(payload, null, 2) + "\n",
+  );
+}
+
+export async function readIgnoreHostKey(): Promise<boolean> {
+  try {
+    const raw = await readFile(/* turbopackIgnore: true */ configFilePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<AtlasUiConfig>;
+    return parsed.clusterctlIgnoreHostKey === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function saveIgnoreHostKey(enabled: boolean): Promise<void> {
+  const file = configFilePath();
+  await mkdir(/* turbopackIgnore: true */ path.dirname(file), { recursive: true });
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(
+      await readFile(/* turbopackIgnore: true */ file, "utf8"),
+    ) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      existing = parsed;
+    }
+  } catch {
+    existing = {};
+  }
+  existing.clusterctlIgnoreHostKey = enabled;
+  await writeFile(
+    /* turbopackIgnore: true */ file,
+    JSON.stringify(existing, null, 2) + "\n",
   );
 }
 

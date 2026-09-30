@@ -13,7 +13,7 @@ export type ContextSwitcherGroup<T> = {
 };
 
 const ITEM_CLASS =
-  "flex w-full cursor-default items-center gap-2 rounded-md px-2.5 py-1.5 text-left outline-none data-highlighted:bg-white/10 data-selected:bg-white/5";
+  "flex w-full cursor-default items-center gap-2 rounded-md px-2.5 py-1.5 text-left outline-none hover:bg-white/10 data-highlighted:bg-white/10 data-selected:bg-white/10";
 
 const VIRTUOSO_THRESHOLD = 80;
 

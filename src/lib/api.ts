@@ -195,7 +195,9 @@ export type ClusterctlGitStatus = {
   isRepo?: boolean;
   configured?: boolean;
   version?: string;
+  ref?: string;
   fetchedAt?: string | null;
+  ignoreHostKey?: boolean;
   ok?: boolean;
   error?: string | null;
 };
@@ -303,15 +305,51 @@ export type ClusterctlRefs = {
   success?: boolean;
   gitUrl?: string;
   refs?: string[];
+  refDates?: Record<string, string>;
+  ignoreHostKey?: boolean;
   error?: string;
 };
 
+function withIgnoreHostKey<T extends { ignoreHostKey?: boolean }>(
+  input: T | undefined,
+): { ignoreHostKey: boolean } | Record<string, never> {
+  if (typeof input?.ignoreHostKey !== "boolean") {
+    return {};
+  }
+  return { ignoreHostKey: input.ignoreHostKey };
+}
+
+export async function saveClusterctlIgnoreHostKey(
+  ignoreHostKey: boolean,
+): Promise<{ ignoreHostKey?: boolean }> {
+  try {
+    return await stargateJson("/atlas/clusterctl/options", {
+      method: "POST",
+      body: JSON.stringify({ ignoreHostKey }),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!hubUnavailable(message)) {
+      throw err;
+    }
+    return setupJson("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "options", ignoreHostKey }),
+    });
+  }
+}
+
 export async function listClusterctlRefs(input?: {
   url?: string;
+  ignoreHostKey?: boolean;
 }): Promise<ClusterctlRefs> {
   const params = new URLSearchParams();
   if (input?.url) {
     params.set("url", input.url);
+  }
+  if (typeof input?.ignoreHostKey === "boolean") {
+    params.set("ignoreHostKey", input.ignoreHostKey ? "true" : "false");
   }
   const q = params.toString() ? `?${params.toString()}` : "";
   try {
@@ -324,7 +362,11 @@ export async function listClusterctlRefs(input?: {
     return setupJson<ClusterctlRefs>("/api/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "refs", url: input?.url }),
+      body: JSON.stringify({
+        action: "refs",
+        url: input?.url,
+        ...withIgnoreHostKey(input),
+      }),
     });
   }
 }
@@ -333,6 +375,7 @@ export async function installClusterctlGit(input: {
   url?: string;
   dest?: string;
   ref: string;
+  ignoreHostKey?: boolean;
 }): Promise<ClusterctlGitStatus> {
   try {
     return await stargateJson<ClusterctlGitStatus>("/atlas/clusterctl/install", {
@@ -352,6 +395,7 @@ export async function installClusterctlGit(input: {
         url: input.url,
         dest: input.dest,
         ref: input.ref,
+        ...withIgnoreHostKey(input),
       }),
     });
   }
@@ -360,6 +404,7 @@ export async function installClusterctlGit(input: {
 export async function ensureClusterctlGit(input?: {
   url?: string;
   dest?: string;
+  ignoreHostKey?: boolean;
 }): Promise<ClusterctlGitStatus> {
   try {
     return await stargateJson<ClusterctlGitStatus>("/atlas/clusterctl/ensure", {
@@ -378,6 +423,7 @@ export async function ensureClusterctlGit(input?: {
         action: "ensure",
         url: input?.url,
         dest: input?.dest,
+        ...withIgnoreHostKey(input),
       }),
     });
   }

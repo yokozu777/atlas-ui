@@ -132,10 +132,7 @@ export function AtlasClusterSwitcher() {
         const current = hit.cluster.id === clusterId;
         return (
           <>
-            <span
-              className="min-w-0 flex-1 truncate font-mono text-xs"
-              title={hit.cluster.id}
-            >
+            <span className="min-w-0 flex-1 truncate font-mono text-xs">
               {hit.cluster.id}
             </span>
             {hit.cluster.kind === "broken" ? (

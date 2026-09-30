@@ -159,6 +159,11 @@ class AtlasHostsHttpTests(unittest.TestCase):
             self.assertEqual(lbs["hosts"][0]["memory"], 4096)
             self.assertEqual(lbs["hosts"][0]["clone"], "ubuntu-base")
             self.assertEqual(body.get("cloneOptions"), ["ubuntu-base", "debian-base"])
+            meta = body.get("fileMeta") or {}
+            self.assertTrue(str(meta.get("absolutePath") or "").endswith("/hosts"))
+            self.assertTrue(meta.get("modifiedAt"))
+            self.assertIsNone(meta.get("createdAt"))
+            self.assertIsNone(meta.get("editedBy"))
 
     def test_nested_groups(self):
         headers = self._login()

@@ -1,19 +1,28 @@
 """Clone / pull public atlas-clusterctl into a host checkout path."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from clusterctl_config import (
     ENV_CLUSTER_ROOT,
     clusterctl_fetched_at_from_ui_config,
+    clusterctl_ignore_host_key_from_ui_config,
+    resolve_clusterctl_ignore_host_key,
     save_clusterctl_root_to_ui_config,
 )
 
@@ -22,6 +31,23 @@ ENV_GIT_URL = "ATLAS_CLUSTERCTL_GIT_URL"
 ENV_UI_ROOT = "ATLAS_UI_ROOT"
 ENV_AUTO_INSTALL = "ATLAS_CLUSTERCTL_AUTO_INSTALL"
 GIT_TIMEOUT_SEC = 180
+_ignore_host_key: ContextVar[bool] = ContextVar(
+    "atlas_clusterctl_ignore_host_key", default=False
+)
+_GIT_SSH_IGNORE_HOST_KEY = (
+    "ssh -o StrictHostKeyChecking=no "
+    "-o UserKnownHostsFile=/dev/null "
+    "-o LogLevel=ERROR"
+)
+
+
+@contextmanager
+def _using_ignore_host_key(enabled: bool) -> Iterator[None]:
+    token = _ignore_host_key.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _ignore_host_key.reset(token)
 
 
 class ClusterctlGitError(Exception):
@@ -83,11 +109,14 @@ def _looks_like_clusterctl(path: Path) -> bool:
 
 
 def _git_env() -> dict[str, str]:
-    return {
+    env = {
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_SSL_NO_VERIFY": "1",
     }
+    if _ignore_host_key.get():
+        env["GIT_SSH_COMMAND"] = _GIT_SSH_IGNORE_HOST_KEY
+    return env
 
 
 def _with_progress(args: list[str]) -> list[str]:
@@ -255,9 +284,11 @@ def inspect_checkout(*, url: Optional[str] = None, dest: Optional[str] = None) -
         "isRepo": is_repo,
         "configured": exists and _looks_like_clusterctl(path),
         "version": "",
+        "ref": checkout_ref(path) if is_repo else "",
         "ok": False,
         "error": None,
         "fetchedAt": checkout_fetched_at(path) if exists else clusterctl_fetched_at_from_ui_config(),
+        "ignoreHostKey": clusterctl_ignore_host_key_from_ui_config(),
     }
     if exists and not path.is_dir():
         payload["error"] = f"not a directory: {path}"
@@ -328,11 +359,197 @@ def latest_ref(refs: list[str]) -> str:
     raise ClusterctlGitError(400, "no main branch or tags on that Git URL")
 
 
-def list_clusterctl_refs(*, url: Optional[str] = None) -> dict[str, Any]:
+def checkout_ref(path: Path) -> str:
+    """Branch name, else the exact tag at HEAD, else a short commit."""
+    if not _is_git_repo(path):
+        return ""
+    branch = _git_stdout(["symbolic-ref", "--short", "HEAD"], path)
+    if branch:
+        return branch
+    tag = _git_stdout(["describe", "--tags", "--exact-match", "HEAD"], path)
+    if tag:
+        return tag
+    return _git_stdout(["rev-parse", "--short", "HEAD"], path)
+
+
+def _git_stdout(args: list[str], cwd: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-c", "advice.detachedHead=false", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=_git_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _iso_z(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    return stamp.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def github_repo_from_url(url: str) -> Optional[tuple[str, str]]:
+    text = (url or "").strip()
+    rest = ""
+    for prefix in ("https://github.com/", "http://github.com/", "ssh://git@github.com/"):
+        if text.startswith(prefix):
+            rest = text[len(prefix) :]
+            break
+    else:
+        if text.startswith("git@github.com:"):
+            rest = text[len("git@github.com:") :]
+    rest = rest.strip().strip("/").removesuffix(".git")
+    owner, sep, name = rest.partition("/")
+    if not sep or not owner or not name or "/" in name:
+        return None
+    return owner, name
+
+
+def _local_git_dir(url: str) -> Optional[Path]:
+    text = (url or "").strip()
+    if text.startswith("file://"):
+        text = text[len("file://") :]
+    path = Path(text)
+    if path.is_dir() and (path / ".git").exists():
+        return path
+    return None
+
+
+def _local_ref_dates(repo: Path) -> dict[str, str]:
+    result = _run_git(
+        [
+            "for-each-ref",
+            "--format=%(refname)%09%(creatordate:iso-strict)",
+            "refs/heads/main",
+            "refs/tags",
+        ],
+        cwd=repo,
+    )
+    dates: dict[str, str] = {}
+    for raw in (result.stdout or "").splitlines():
+        name, sep, stamp = raw.partition("\t")
+        if not sep:
+            continue
+        iso = _iso_z(stamp)
+        if not iso:
+            continue
+        if name == "refs/heads/main":
+            dates["main"] = iso
+        elif name.startswith("refs/tags/") and not name.endswith("^{}"):
+            dates[name.removeprefix("refs/tags/")] = iso
+    return dates
+
+
+def _github_get_json(url: str) -> Any:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "atlas-ui",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=12) as response:
+        return json.loads(response.read().decode())
+
+
+def _commit_pushed_at(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    commit = payload.get("commit") or {}
+    committer = commit.get("committer") or {}
+    return _iso_z(str(committer.get("date") or ""))
+
+
+def _github_one_date(owner: str, name: str, ref: str) -> str:
+    root = f"https://api.github.com/repos/{owner}/{name}"
+    if ref == "main":
+        return _commit_pushed_at(_github_get_json(f"{root}/commits/main"))
+    quoted = urllib.parse.quote(ref, safe="")
+    try:
+        info = _github_get_json(f"{root}/git/ref/tags/{quoted}")
+    except urllib.error.HTTPError:
+        info = {}
+    obj = info.get("object") if isinstance(info, dict) else {}
+    if isinstance(obj, dict) and obj.get("type") == "tag" and obj.get("url"):
+        tag = _github_get_json(str(obj["url"]))
+        tagger = tag.get("tagger") if isinstance(tag, dict) else {}
+        stamp = _iso_z(str((tagger or {}).get("date") or ""))
+        if stamp:
+            return stamp
+    sha = str(obj.get("sha") or ref) if isinstance(obj, dict) else ref
+    return _commit_pushed_at(
+        _github_get_json(f"{root}/commits/{urllib.parse.quote(sha, safe='')}")
+    )
+
+
+def _github_ref_dates(owner: str, name: str, refs: list[str]) -> dict[str, str]:
+    dates: dict[str, str] = {}
+    if not refs:
+        return dates
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pending = {
+            pool.submit(_github_one_date, owner, name, ref): ref for ref in refs
+        }
+        try:
+            for future in as_completed(pending, timeout=25):
+                ref = pending[future]
+                try:
+                    stamp = future.result()
+                except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+                    continue
+                if stamp:
+                    dates[ref] = stamp
+        except TimeoutError:
+            pass
+    return dates
+
+
+def ref_pushed_at(url: str, refs: list[str]) -> dict[str, str]:
+    local = _local_git_dir(url)
+    if local is not None:
+        found = _local_ref_dates(local)
+        return {name: found[name] for name in refs if name in found}
+    slug = github_repo_from_url(url)
+    if slug is None:
+        return {}
+    try:
+        return _github_ref_dates(slug[0], slug[1], refs)
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return {}
+
+
+def list_clusterctl_refs(
+    *, url: Optional[str] = None, ignore_host_key: Any = None
+) -> dict[str, Any]:
+    enabled = resolve_clusterctl_ignore_host_key(ignore_host_key)
     git_url = resolve_url(url)
-    result = _run_git(["ls-remote", "--heads", "--tags", "--refs", git_url])
+    with _using_ignore_host_key(enabled):
+        result = _run_git(["ls-remote", "--heads", "--tags", "--refs", git_url])
     refs = parse_ls_remote(result.stdout or "")
-    return {"success": True, "gitUrl": git_url, "refs": refs}
+    return {
+        "success": True,
+        "gitUrl": git_url,
+        "refs": refs,
+        "refDates": ref_pushed_at(git_url, refs),
+        "ignoreHostKey": enabled,
+    }
 
 
 def _finish_install(path: Path, git_url: str) -> dict[str, Any]:
@@ -361,71 +578,100 @@ def install_clusterctl(
     dest: Optional[str] = None,
     ref: Optional[str] = None,
     progress: bool = False,
+    ignore_host_key: Any = None,
 ) -> dict[str, Any]:
+    enabled = resolve_clusterctl_ignore_host_key(ignore_host_key)
     git_url = resolve_url(url)
     path = resolve_dest(dest)
     chosen = _validate_ref(ref)
-    if path.exists() and not path.is_dir():
-        raise ClusterctlGitError(400, f"not a directory: {path}")
-    if _is_empty_dir(path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _run_git(
-            ["clone", "--depth", "1", "--branch", chosen, git_url, str(path)],
-            progress=progress,
-        )
-        return _finish_install(path, git_url)
-    if not _is_git_repo(path):
-        raise ClusterctlGitError(400, f"destination is not empty: {path}")
-    origin = _run_git(["remote", "get-url", "origin"], cwd=path).stdout.strip()
-    if _normalize_git_url(origin) != _normalize_git_url(git_url):
-        raise ClusterctlGitError(400, f"origin is {origin}, not {git_url}")
-    _fetch_and_checkout(path, chosen, progress=progress)
-    return _finish_install(path, git_url)
+    with _using_ignore_host_key(enabled):
+        if path.exists() and not path.is_dir():
+            raise ClusterctlGitError(400, f"not a directory: {path}")
+        if _is_empty_dir(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _run_git(
+                ["clone", "--depth", "1", "--branch", chosen, git_url, str(path)],
+                progress=progress,
+            )
+            payload = _finish_install(path, git_url)
+        elif not _is_git_repo(path):
+            raise ClusterctlGitError(400, f"destination is not empty: {path}")
+        else:
+            origin = _run_git(["remote", "get-url", "origin"], cwd=path).stdout.strip()
+            if _normalize_git_url(origin) != _normalize_git_url(git_url):
+                raise ClusterctlGitError(400, f"origin is {origin}, not {git_url}")
+            _fetch_and_checkout(path, chosen, progress=progress)
+            payload = _finish_install(path, git_url)
+    payload["ignoreHostKey"] = enabled
+    return payload
 
 
-def clone_clusterctl(*, url: Optional[str] = None, dest: Optional[str] = None) -> dict[str, Any]:
+def clone_clusterctl(
+    *,
+    url: Optional[str] = None,
+    dest: Optional[str] = None,
+    ignore_host_key: Any = None,
+) -> dict[str, Any]:
+    enabled = resolve_clusterctl_ignore_host_key(ignore_host_key)
     git_url = resolve_url(url)
     path = resolve_dest(dest)
-    if path.exists() and not path.is_dir():
-        raise ClusterctlGitError(400, f"not a directory: {path}")
-    if path.exists() and not _is_empty_dir(path):
-        if _is_git_repo(path):
-            raise ClusterctlGitError(400, "checkout already exists; use Pull")
-        raise ClusterctlGitError(400, f"destination is not empty: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(["clone", "--depth", "1", git_url, str(path)])
+    with _using_ignore_host_key(enabled):
+        if path.exists() and not path.is_dir():
+            raise ClusterctlGitError(400, f"not a directory: {path}")
+        if path.exists() and not _is_empty_dir(path):
+            if _is_git_repo(path):
+                raise ClusterctlGitError(400, "checkout already exists; use Pull")
+            raise ClusterctlGitError(400, f"destination is not empty: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _run_git(["clone", "--depth", "1", git_url, str(path)])
     if not _looks_like_clusterctl(path):
         raise ClusterctlGitError(
             400,
             f"cloned tree is not atlas-clusterctl (need ./cluster and clusterctl/__main__.py): {path}",
         )
     save_clusterctl_root_to_ui_config(path, fetched=True)
-    return inspect_checkout(url=git_url, dest=str(path))
+    payload = inspect_checkout(url=git_url, dest=str(path))
+    payload["ignoreHostKey"] = enabled
+    return payload
 
 
-def pull_clusterctl(*, url: Optional[str] = None, dest: Optional[str] = None) -> dict[str, Any]:
+def pull_clusterctl(
+    *,
+    url: Optional[str] = None,
+    dest: Optional[str] = None,
+    ignore_host_key: Any = None,
+) -> dict[str, Any]:
+    enabled = resolve_clusterctl_ignore_host_key(ignore_host_key)
     path = resolve_dest(dest)
-    if not _is_git_repo(path):
-        raise ClusterctlGitError(400, f"not a git checkout: {path}")
-    origin = _run_git(["remote", "get-url", "origin"], cwd=path).stdout.strip()
-    requested = (url or "").strip()
-    git_url = requested or origin or default_git_url()
-    if requested and origin and _normalize_git_url(origin) != _normalize_git_url(requested):
-        raise ClusterctlGitError(
-            400,
-            f"origin is {origin}, not {git_url}",
-        )
-    _run_git(["pull", "--ff-only"], cwd=path)
+    with _using_ignore_host_key(enabled):
+        if not _is_git_repo(path):
+            raise ClusterctlGitError(400, f"not a git checkout: {path}")
+        origin = _run_git(["remote", "get-url", "origin"], cwd=path).stdout.strip()
+        requested = (url or "").strip()
+        git_url = requested or origin or default_git_url()
+        if requested and origin and _normalize_git_url(origin) != _normalize_git_url(requested):
+            raise ClusterctlGitError(
+                400,
+                f"origin is {origin}, not {git_url}",
+            )
+        _run_git(["pull", "--ff-only"], cwd=path)
     if not _looks_like_clusterctl(path):
         raise ClusterctlGitError(
             400,
             f"not an atlas-clusterctl checkout (need ./cluster and clusterctl/__main__.py): {path}",
         )
     save_clusterctl_root_to_ui_config(path, fetched=True)
-    return inspect_checkout(url=git_url, dest=str(path))
+    payload = inspect_checkout(url=git_url, dest=str(path))
+    payload["ignoreHostKey"] = enabled
+    return payload
 
 
-def ensure_clusterctl(*, url: Optional[str] = None, dest: Optional[str] = None) -> dict[str, Any]:
+def ensure_clusterctl(
+    *,
+    url: Optional[str] = None,
+    dest: Optional[str] = None,
+    ignore_host_key: Any = None,
+) -> dict[str, Any]:
     """Clone the newest tag (else main) when the checkout is missing or empty."""
     payload = inspect_checkout(url=url, dest=dest)
     dest_text = str(payload.get("dest") or "")
@@ -437,7 +683,8 @@ def ensure_clusterctl(*, url: Optional[str] = None, dest: Optional[str] = None) 
         return payload
     git_url = str(payload.get("gitUrl") or "")
     print(f"clusterctl: downloading {git_url} into {dest_text}", flush=True)
-    listed = list_clusterctl_refs(url=url or git_url)
+    enabled = resolve_clusterctl_ignore_host_key(ignore_host_key)
+    listed = list_clusterctl_refs(url=url or git_url, ignore_host_key=enabled)
     chosen = latest_ref(listed.get("refs") or [])
     print(f"clusterctl: using {chosen}", flush=True)
     result = install_clusterctl(
@@ -445,6 +692,7 @@ def ensure_clusterctl(*, url: Optional[str] = None, dest: Optional[str] = None) 
         dest=payload.get("dest"),
         ref=chosen,
         progress=True,
+        ignore_host_key=enabled,
     )
     if result.get("ok"):
         version = str(result.get("version") or "").splitlines()

@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   envScopeLabel,
   generateSetupSecret,
+  generateSetupSecrets,
   ianaTimeZones,
   isMissingSetupValue,
   normalizePveTemplatesMap,
@@ -13,6 +14,7 @@ import {
   setupFieldInvalidMessage,
   setupProgressFromValues,
   setupSchemaForVarsFile,
+  setupSearchHits,
 } from "./playbook-setup.ts";
 
 describe("atlas-infra-edge.secrets.yml setup schema", () => {
@@ -39,7 +41,8 @@ describe("atlas-infra-edge.secrets.yml setup schema", () => {
     );
     assert.ok(k8s);
     assert.equal(isMissingSetupValue("", k8s), true);
-    assert.equal(isMissingSetupValue("CHANGEME", k8s), true);
+    assert.equal(isMissingSetupValue("CHANGEME", k8s), false);
+    assert.equal(isMissingSetupValue("example.com", k8s), false);
     assert.equal(isMissingSetupValue("real-secret", k8s), false);
     const progress = setupProgressFromValues(schema, {
       provision_dns_key_secret: "",
@@ -161,6 +164,21 @@ describe("setup secret helpers", () => {
     assert.notEqual(generateSetupSecret("grafana_admin_password"), grafana);
   });
 
+  it("generates every password field in a secrets file", () => {
+    const schema = setupSchemaForVarsFile("atlas-k8s-addons.secrets.yml", "");
+    const generated = generateSetupSecrets(schema.fields);
+    const passwords = schema.fields.filter((field) => field.input === "password");
+    assert.ok(passwords.length > 1);
+    assert.deepEqual(Object.keys(generated).sort(), passwords.map((field) => field.key).sort());
+    for (const [key, value] of Object.entries(generated)) {
+      assert.equal(value.length, key === "vip_auth_pass" ? 8 : 32);
+    }
+    const again = generateSetupSecrets(schema.fields);
+    assert.notEqual(again.grafana_admin_password, generated.grafana_admin_password);
+    const vars = setupSchemaForVarsFile("atlas-k8s-addons.yml", "");
+    assert.deepEqual(generateSetupSecrets(vars.fields), {});
+  });
+
   it("copies scalar text and skips an empty value", () => {
     const field = { key: "dns_domain_suffix", label: "DNS domain" };
     assert.equal(setupFieldCopyText(field, "lab.example"), "lab.example");
@@ -203,12 +221,17 @@ describe("k8s overlay setup schemas", () => {
     assert.equal(openbaoOidc?.group, "OIDC");
     assert.equal(openbaoAdmin?.input, "password");
     assert.equal(openbaoAdmin?.group, "OpenBao");
-    assert.equal(isMissingSetupValue("CHANGEME", vip), true);
-    assert.equal(isMissingSetupValue("CHANGEME", grafana), true);
+    assert.equal(isMissingSetupValue("CHANGEME", vip), false);
+    assert.equal(isMissingSetupValue("CHANGEME", grafana), false);
     assert.equal(
       isMissingSetupValue("CHANGEME_openbao_oidc_client_secret_32b", openbaoOidc),
-      true,
+      false,
     );
+    const domain = setupSchemaForVarsFile("atlas-compute-provision.yml", "").fields.find(
+      (field) => field.key === "dns_domain_suffix",
+    );
+    assert.equal(isMissingSetupValue("example.com", domain), false);
+    assert.equal(isMissingSetupValue("", domain), true);
     assert.equal(isMissingSetupValue("real-openbao-secret", openbaoOidc), false);
   });
 
@@ -345,5 +368,59 @@ describe("golden PVE template backup URL", () => {
       "debian-base": { ...map["debian-base"], image_url_backup: "not-a-url" },
     };
     assert.equal(setupFieldInvalidMessage(field, bad), "Invalid URL");
+  });
+});
+
+describe("setup search across files", () => {
+  it("matches a value in every file, not only the open one", () => {
+    const hits = setupSearchHits(
+      [
+        {
+          name: "atlas-compute-provision.yml",
+          path: "group_vars/all/atlas-compute-provision.yml",
+          keys: { dns_server_ip: { value: "192.168.1.218" } },
+        },
+        {
+          name: "atlas-k8s-core.yml",
+          path: "group_vars/all/atlas-k8s-core.yml",
+          keys: { dns_server_ip: { value: "192.168.1.218" } },
+        },
+        {
+          name: "atlas-k8s-addons.yml",
+          path: "group_vars/all/atlas-k8s-addons.yml",
+          keys: { openbao_host: { value: "openbao.example.com" } },
+        },
+      ],
+      "192.168.1.218",
+    );
+    assert.deepEqual(
+      hits.map((hit) => [hit.fileName, hit.field.key]),
+      [
+        ["atlas-compute-provision.yml", "dns_server_ip"],
+        ["atlas-k8s-core.yml", "dns_server_ip"],
+      ],
+    );
+  });
+
+  it("uses the unsaved value of the open file", () => {
+    const hits = setupSearchHits(
+      [
+        {
+          name: "atlas-compute-provision.yml",
+          path: "group_vars/all/atlas-compute-provision.yml",
+          keys: { dns_server_ip: { value: "10.0.0.1" } },
+        },
+      ],
+      "192.168.1.218",
+      {
+        overrides: {
+          "group_vars/all/atlas-compute-provision.yml": {
+            values: { dns_server_ip: "192.168.1.218" },
+          },
+        },
+      },
+    );
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]?.value, "192.168.1.218");
   });
 });

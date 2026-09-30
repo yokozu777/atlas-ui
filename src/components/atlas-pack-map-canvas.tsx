@@ -490,7 +490,7 @@ function MapControlButton({
       >
         {children}
       </TooltipTrigger>
-      <TooltipContent side="left">{label}</TooltipContent>
+      <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>
   );
 }
@@ -535,7 +535,7 @@ function PackMapControls({
 
   return (
     <Panel position="top-right" className="!m-2">
-      <div className="flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+      <div className="flex overflow-hidden rounded-lg border border-border bg-card shadow-sm">
         <MapControlButton
           label="Zoom in"
           className={iconButton}
@@ -545,21 +545,21 @@ function PackMapControls({
         </MapControlButton>
         <MapControlButton
           label="Zoom out"
-          className={`${iconButton} border-t border-border`}
+          className={`${iconButton} border-l border-border`}
           onClick={() => void zoomOut({ duration: 200 })}
         >
           <ZoomOut className="size-4" />
         </MapControlButton>
         <MapControlButton
           label="Fit view"
-          className={`${iconButton} border-t border-border`}
+          className={`${iconButton} border-l border-border`}
           onClick={() => void fitView({ padding: 0.18, duration: 200 })}
         >
           <Scan className="size-4" />
         </MapControlButton>
         <MapControlButton
           label={focusLabel}
-          className={`${iconButton} border-t border-border`}
+          className={`${iconButton} border-l border-border`}
           disabled={!focusEntryId}
           onClick={() => {
             if (!focusEntryId) return;
@@ -575,7 +575,7 @@ function PackMapControls({
         </MapControlButton>
         <MapControlButton
           label="Download PDF"
-          className="flex h-8 items-center justify-center gap-1 border-t border-border px-2 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
+          className="flex h-8 items-center justify-center gap-1 border-l border-border px-2 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
           disabled={saving}
           onClick={(event) => void downloadPdf(event.currentTarget)}
         >
@@ -734,6 +734,7 @@ export function AtlasPackMapCanvas({
       panOnScroll={false}
       colorMode="dark"
       className="atlas-pack-map bg-transparent"
+      proOptions={{ hideAttribution: true }}
     >
       <PackMapMeasuredLayout graph={graph} nodes={nodes} setNodes={setNodes} />
       <PackMapFocus ids={liveIds} />

@@ -29,6 +29,7 @@ from clusterctl_git import (  # noqa: E402
     default_dest,
     default_git_url,
     ensure_clusterctl,
+    github_repo_from_url,
     inspect_checkout,
     install_clusterctl,
     latest_ref,
@@ -115,6 +116,24 @@ class ClusterctlGitUnitTests(unittest.TestCase):
         env = captured["env"]
         self.assertIsInstance(env, dict)
         self.assertEqual(env.get("GIT_SSL_NO_VERIFY"), "1")
+        self.assertNotIn("GIT_SSH_COMMAND", env)
+
+    def test_run_git_ignore_host_key_sets_ssh_command(self):
+        captured: dict[str, object] = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch("clusterctl_git.subprocess.run", fake_run):
+            with gitmod._using_ignore_host_key(True):
+                gitmod._run_git(["ls-remote", "git@gitea.example:root/atlas-clusterctl.git"])
+        env = captured["env"]
+        self.assertIsInstance(env, dict)
+        command = env.get("GIT_SSH_COMMAND")
+        self.assertIsInstance(command, str)
+        self.assertIn("StrictHostKeyChecking=no", str(command))
+        self.assertIn("UserKnownHostsFile=/dev/null", str(command))
 
     def test_progress_clone_streams_and_forces_progress_flag(self):
         seen: dict[str, object] = {}
@@ -210,16 +229,21 @@ class ClusterctlGitUnitTests(unittest.TestCase):
         src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
         listed = list_clusterctl_refs(url=str(src))
         self.assertEqual(listed["refs"], ["main", "0.0.2", "0.0.1"])
+        self.assertEqual(set(listed["refDates"]), {"main", "0.0.2", "0.0.1"})
+        for stamp in listed["refDates"].values():
+            self.assertIn("T", stamp)
 
         dest = self.root / "checkout"
         dest.mkdir()
         first = install_clusterctl(url=str(src), dest=str(dest), ref="0.0.1")
         self.assertTrue(first["ok"])
         self.assertIn("clusterctl 0.0-test", first["version"])
+        self.assertEqual(first["ref"], "0.0.1")
 
         second = install_clusterctl(url=str(src), dest=str(dest), ref="0.0.2")
         self.assertTrue(second["ok"])
         self.assertIn("clusterctl 0.0.2-test", second["version"])
+        self.assertEqual(second["ref"], "0.0.2")
 
     def test_install_refuses_foreign_files(self):
         src = _init_clusterctl_repo(self.root / "src")
@@ -229,6 +253,38 @@ class ClusterctlGitUnitTests(unittest.TestCase):
         with self.assertRaises(ClusterctlGitError) as ctx:
             install_clusterctl(url=str(src), dest=str(dest), ref="main")
         self.assertIn("not empty", ctx.exception.message)
+
+    def test_checkout_ref_on_main_is_the_branch(self):
+        src = _tag_clusterctl_repo(_init_clusterctl_repo(self.root / "src"))
+        dest = self.root / "checkout"
+        dest.mkdir()
+        got = install_clusterctl(url=str(src), dest=str(dest), ref="main")
+        self.assertEqual(got["ref"], "main")
+
+    def test_github_ref_dates_prefer_annotated_tagger_date(self):
+        self.assertEqual(
+            github_repo_from_url("https://github.com/yokozu777/atlas-clusterctl.git"),
+            ("yokozu777", "atlas-clusterctl"),
+        )
+        self.assertEqual(
+            github_repo_from_url("git@github.com:yokozu777/atlas-clusterctl.git"),
+            ("yokozu777", "atlas-clusterctl"),
+        )
+        self.assertIsNone(github_repo_from_url(str(self.root / "src")))
+
+        def fake(url: str):
+            if url.endswith("/git/ref/tags/0.0.1"):
+                return {"object": {"type": "tag", "url": "https://api.github.com/tag-object"}}
+            if url.endswith("/tag-object"):
+                return {"tagger": {"date": "2026-09-01T12:00:00Z"}}
+            if url.endswith("/commits/main"):
+                return {"commit": {"committer": {"date": "2026-09-29T15:02:00Z"}}}
+            raise AssertionError(url)
+
+        with mock.patch.object(gitmod, "_github_get_json", fake):
+            dates = gitmod._github_ref_dates("yokozu777", "atlas-clusterctl", ["main", "0.0.1"])
+        self.assertEqual(dates["0.0.1"], "2026-09-01T12:00:00Z")
+        self.assertEqual(dates["main"], "2026-09-29T15:02:00Z")
 
     def test_install_rejects_bad_ref(self):
         with self.assertRaises(ClusterctlGitError) as ctx:
@@ -363,6 +419,7 @@ class ClusterctlGitHttpTests(unittest.TestCase):
         )
         self.assertEqual(refs.status_code, 200, refs.text)
         self.assertEqual(refs.json()["refs"], ["main", "0.0.2", "0.0.1"])
+        self.assertIn("0.0.1", refs.json()["refDates"])
 
         installed = self.client.post(
             "/api/atlas/clusterctl/install",
@@ -371,6 +428,7 @@ class ClusterctlGitHttpTests(unittest.TestCase):
         )
         self.assertEqual(installed.status_code, 200, installed.text)
         self.assertIn("clusterctl 0.0-test", installed.json()["version"])
+        self.assertEqual(installed.json()["ref"], "0.0.1")
 
         updated = self.client.post(
             "/api/atlas/clusterctl/install",

@@ -143,6 +143,34 @@ def clusterctl_fetched_at_from_ui_config() -> Optional[str]:
     return str(raw).strip()
 
 
+def clusterctl_ignore_host_key_from_ui_config() -> bool:
+    return _load_ui_config_dict().get("clusterctlIgnoreHostKey") is True
+
+
+def save_clusterctl_ignore_host_key(enabled: bool) -> None:
+    payload = _load_ui_config_dict()
+    payload["clusterctlIgnoreHostKey"] = bool(enabled)
+    _save_ui_config_dict(payload)
+
+
+def resolve_clusterctl_ignore_host_key(raw: Any = None) -> bool:
+    """None keeps the saved setting. A bool or true/false string updates it."""
+    if raw is None:
+        return clusterctl_ignore_host_key_from_ui_config()
+    if isinstance(raw, bool):
+        enabled = raw
+    else:
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            enabled = True
+        elif text in {"0", "false", "no", "off"}:
+            enabled = False
+        else:
+            return clusterctl_ignore_host_key_from_ui_config()
+    save_clusterctl_ignore_host_key(enabled)
+    return enabled
+
+
 def save_clusterctl_root_to_ui_config(root: Path, *, fetched: bool = False) -> None:
     """Persist ``clusterctlRoot`` for Settings / inspect fallback."""
     payload = _load_ui_config_dict()

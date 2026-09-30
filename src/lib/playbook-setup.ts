@@ -608,8 +608,6 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
   },
 };
 
-const DEFAULT_PLACEHOLDERS = ["example.com", "changeme"];
-
 export function emptyPveTemplatesMap(): PveTemplatesMap {
   const next: PveTemplatesMap = {};
   for (const name of PVE_TEMPLATE_KEYS) {
@@ -901,6 +899,17 @@ export function generateSetupSecret(key: string): string {
   ).join("");
 }
 
+export function generateSetupSecrets(
+  fields: PlaybookSetupField[],
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const field of fields) {
+    if (setupFieldValueType(field) !== "password") continue;
+    next[field.key] = generateSetupSecret(field.key);
+  }
+  return next;
+}
+
 export function setupFieldCopyText(
   field: PlaybookSetupField,
   value: SetupFieldValue | undefined,
@@ -1027,6 +1036,73 @@ export function setupValuesEqual(
   return JSON.stringify(a ?? "") === JSON.stringify(b ?? "");
 }
 
+export type VarsSetupFileSnapshot = {
+  name: string;
+  path: string;
+  pveFactory?: boolean;
+  keys?: Record<string, { origin?: string; value?: unknown; comment?: string }>;
+  nested?: Record<
+    string,
+    { origin?: string; value?: unknown; comment?: string }
+  >;
+};
+
+export type SetupSearchHit = {
+  path: string;
+  fileName: string;
+  field: PlaybookSetupField;
+  value: SetupFieldValue;
+  description: string;
+  origin: VarsSetupOrigin;
+};
+
+export function setupSearchHits(
+  files: VarsSetupFileSnapshot[],
+  query: string,
+  options?: {
+    pveFactory?: boolean;
+    overrides?: Record<
+      string,
+      {
+        values?: Record<string, SetupFieldValue>;
+        comments?: Record<string, string>;
+        origins?: Record<string, VarsSetupOrigin>;
+      }
+    >;
+  },
+): SetupSearchHit[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const hits: SetupSearchHit[] = [];
+  for (const file of files) {
+    const schema = setupSchemaForVarsFile(file.name, "", {
+      pveFactory: options?.pveFactory || file.pveFactory,
+    });
+    const stored = valuesFromVarsSetupFile(schema, file);
+    const override = options?.overrides?.[file.path];
+    const values = override?.values ?? stored;
+    for (const field of schema.fields) {
+      const description =
+        override?.comments?.[field.key] ?? commentFromVarsSetupFile(field, file);
+      const value = values[field.key];
+      if (!setupSearchHaystack(field, value, description).includes(needle)) {
+        continue;
+      }
+      hits.push({
+        path: file.path,
+        fileName: file.name,
+        field,
+        value,
+        description,
+        origin:
+          override?.origins?.[field.key] ??
+          originFromVarsSetupFile(field, file),
+      });
+    }
+  }
+  return hits;
+}
+
 export function setupSearchHaystack(
   field: PlaybookSetupField,
   value: SetupFieldValue | undefined,
@@ -1071,22 +1147,11 @@ export function isMissingSetupValue(
   if (setupFieldValueType(field) === "string_list") {
     const items = parseStringList(value);
     if (items.length === 0) return !field.allowEmpty;
-    if (items.every((item) => isJinjaValue(item))) return false;
-    const placeholders = [
-      ...DEFAULT_PLACEHOLDERS,
-      ...(field.placeholders ?? []).map((item) => item.toLowerCase()),
-    ];
-    return items.every((item) => placeholders.includes(item.toLowerCase()));
+    return false;
   }
-  if (value == null || typeof value !== "string") return true;
-  const trimmed = normalizeScalar(value);
-  if (!trimmed) return !field.allowEmpty;
-  if (isJinjaValue(trimmed)) return false;
-  const placeholders = [
-    ...DEFAULT_PLACEHOLDERS,
-    ...(field.placeholders ?? []).map((item) => item.toLowerCase()),
-  ];
-  return placeholders.includes(trimmed.toLowerCase());
+  if (value == null || typeof value !== "string") return !field.allowEmpty;
+  if (!normalizeScalar(value)) return !field.allowEmpty;
+  return false;
 }
 
 export function missingSetupFieldsFromText(

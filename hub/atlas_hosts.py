@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from atlas_cluster_fs import resolve_atlas_inventory_leaf
-from atlas_vars_setup import PVE_TEMPLATE_NAMES, cascade_layers
+from atlas_vars_setup import PVE_TEMPLATE_NAMES, _file_facts, cascade_layers
 
 
 class AtlasHostsError(Exception):
@@ -212,6 +212,7 @@ def list_hosts_topology(project_id: str, cluster_id: Optional[str] = None) -> di
     return {
         "clusterId": cid,
         "file": path.name,
+        "fileMeta": _file_facts(path),
         "groups": groups,
         "cloneOptions": _clone_options(leaf, cid),
     }

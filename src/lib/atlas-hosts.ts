@@ -1,6 +1,12 @@
 import { projectApiQuery, withClusterId } from "@/components/hosts-groups/helpers";
 import { stargateJson } from "@/lib/stargate";
 
+export {
+  hostTopologyChanges,
+  type HostChangeGroup,
+  type HostChangeLine,
+} from "@/lib/host-topology-changes";
+
 export type HostDisk = {
   size: string;
   slot: number;
@@ -32,6 +38,12 @@ export type HostGroup = {
 export type HostsTopology = {
   clusterId: string;
   file: string;
+  fileMeta?: {
+    modifiedAt?: string | null;
+    createdAt?: string | null;
+    editedBy?: string | null;
+    absolutePath?: string | null;
+  };
   groups: HostGroup[];
   cloneOptions: string[];
 };
@@ -116,6 +128,7 @@ export async function fetchHostsTopology(
   return {
     clusterId: String(data.clusterId || clusterId),
     file: String(data.file || "hosts"),
+    fileMeta: data.fileMeta,
     groups: (data.groups ?? []).map((group) => ({
       id: String(group.id),
       name: String(group.name || group.id),
@@ -141,6 +154,7 @@ export async function saveHostsTopology(
   return {
     clusterId: String(data.clusterId || clusterId),
     file: String(data.file || "hosts"),
+    fileMeta: data.fileMeta,
     groups: (data.groups ?? groups).map((group) => ({
       id: String(group.id),
       name: String(group.name || group.id),

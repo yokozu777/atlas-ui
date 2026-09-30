@@ -1,7 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import {
   Copy,
   Cpu,
@@ -15,6 +21,7 @@ import {
   Minus,
   Network,
   Plus,
+  Search,
   Server,
   Share2,
   Trash2,
@@ -22,6 +29,8 @@ import {
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
+import { ChangesReviewDialog } from "@/components/changes-review-dialog";
+import { FileFacts, type FileFactsMeta } from "@/components/file-facts";
 import { DistroIcon } from "@/components/distro-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,6 +54,7 @@ import {
   blankHost,
   cloneNextHost,
   fetchHostsTopology,
+  hostTopologyChanges,
   saveHostsTopology,
   type HostDisk,
   type HostGroup,
@@ -60,6 +70,15 @@ function FieldIcon({ children }: { children: ReactNode }) {
       {children}
     </span>
   );
+}
+
+function parseGroups(raw: string): HostGroup[] {
+  try {
+    const value = JSON.parse(raw) as HostGroup[];
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
 }
 
 function cloneList(options: string[], current: string): string[] {
@@ -130,6 +149,43 @@ function setGroupCount(
   });
 }
 
+function hostSearchText(host: HostTopology): string {
+  return [
+    host.ip,
+    host.hostname,
+    host.vmid,
+    host.clone,
+    String(host.sockets),
+    String(host.cores),
+    String(host.memory),
+    host.numa ? "numa" : "",
+    ...host.disks.flatMap((disk) => [disk.size, String(disk.slot), disk.storage]),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function groupMatchesQuery(group: HostGroup, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return (
+    group.name.toLowerCase().includes(needle) ||
+    group.id.toLowerCase().includes(needle)
+  );
+}
+
+function hostMatchesQuery(host: HostTopology, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return hostSearchText(host).includes(needle);
+}
+
+function groupMatchCount(group: HostGroup, query: string): number {
+  if (!query.trim()) return group.hosts.length;
+  if (groupMatchesQuery(group, query)) return group.hosts.length;
+  return group.hosts.filter((host) => hostMatchesQuery(host, query)).length;
+}
+
 export function HostsTopologyDialog({
   open,
   onOpenChange,
@@ -151,16 +207,39 @@ export function HostsTopologyDialog({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [fileMeta, setFileMeta] = useState<FileFactsMeta | undefined>();
 
-  const dirty = JSON.stringify(groups) !== baseline;
+  const changeGroups = useMemo(
+    () => hostTopologyChanges(parseGroups(baseline), groups),
+    [baseline, groups],
+  );
+  const pendingCount = changeGroups.reduce(
+    (sum, group) => sum + group.lines.length,
+    0,
+  );
+  const dirty = pendingCount > 0;
   const selected =
     groups.find((group) => group.id === groupId) ?? groups[0] ?? null;
   const fallbackClone = cloneOptions[0] || "";
+
+  function applyQuery(value: string) {
+    setQuery(value);
+    const needle = value.trim();
+    if (!needle) return;
+    const current = groups.find((group) => group.id === (groupId ?? groups[0]?.id));
+    if (current && groupMatchCount(current, needle) > 0) return;
+    const next = groups.find((group) => groupMatchCount(group, needle) > 0);
+    if (next) setGroupId(next.id);
+  }
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
     setDiscardOpen(false);
+    setReviewOpen(false);
+    setQuery("");
     let cancelled = false;
     void fetchHostsTopology(projectId, clusterId)
       .then((data) => {
@@ -168,6 +247,7 @@ export function HostsTopologyDialog({
         setGroups(data.groups);
         setBaseline(JSON.stringify(data.groups));
         setCloneOptions(data.cloneOptions);
+        setFileMeta(data.fileMeta);
         setGroupId(data.groups[0]?.id ?? null);
       })
       .catch((err: unknown) => {
@@ -175,6 +255,7 @@ export function HostsTopologyDialog({
         toast.error(err instanceof Error ? err.message : String(err));
         setGroups([]);
         setBaseline("[]");
+        setFileMeta(undefined);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -185,11 +266,20 @@ export function HostsTopologyDialog({
   }, [open, projectId, clusterId]);
 
   function requestClose() {
+    if (reviewOpen) {
+      setReviewOpen(false);
+      return;
+    }
     if (dirty) {
       setDiscardOpen(true);
       return;
     }
     onOpenChange(false);
+  }
+
+  function resetAll() {
+    setGroups(parseGroups(baseline));
+    setReviewOpen(false);
   }
 
   async function save() {
@@ -199,7 +289,9 @@ export function HostsTopologyDialog({
       setGroups(data.groups);
       setBaseline(JSON.stringify(data.groups));
       setCloneOptions(data.cloneOptions);
+      setFileMeta(data.fileMeta);
       toast.success("Hosts saved");
+      setReviewOpen(false);
       onOpenChange(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -213,6 +305,7 @@ export function HostsTopologyDialog({
       <Dialog
         open={open}
         onOpenChange={(next) => {
+          if (!next && reviewOpen) return;
           if (!next) requestClose();
         }}
       >
@@ -233,6 +326,8 @@ export function HostsTopologyDialog({
               <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 {groups.map((group) => {
                   const active = group.id === selected?.id;
+                  const needle = query.trim();
+                  const matches = groupMatchCount(group, query);
                   return (
                     <button
                       key={group.id}
@@ -246,9 +341,17 @@ export function HostsTopologyDialog({
                       onClick={() => setGroupId(group.id)}
                     >
                       <span className="min-w-0 truncate font-mono text-xs">
-                        {group.name}
+                        <HighlightText text={group.name} query={query} />
                       </span>
-                      <Badge variant="outline">{group.hosts.length}</Badge>
+                      {needle ? (
+                        matches > 0 ? (
+                          <Badge variant="info" title="Search matches">
+                            {matches}
+                          </Badge>
+                        ) : null
+                      ) : (
+                        <Badge variant="outline">{group.hosts.length}</Badge>
+                      )}
                     </button>
                   );
                 })}
@@ -257,16 +360,19 @@ export function HostsTopologyDialog({
 
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-4 py-3 pr-14">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                    Hosts
-                  </p>
-                  <DialogTitle className="mt-1 truncate font-mono text-sm font-medium">
-                    {clusterId}
-                  </DialogTitle>
-                  <DialogDescription className="mt-0.5 text-xs text-muted-foreground">
-                    Groups, IPs, and VM resources from the cluster hosts file
-                  </DialogDescription>
+                <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-6 gap-y-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                      Hosts
+                    </p>
+                    <DialogTitle className="mt-1 truncate font-mono text-sm font-medium">
+                      {clusterId}
+                    </DialogTitle>
+                    <DialogDescription className="mt-0.5 text-xs text-muted-foreground">
+                      Groups, IPs, and VM resources from the cluster hosts file
+                    </DialogDescription>
+                  </div>
+                  <FileFacts meta={fileMeta} />
                 </div>
                 <Button
                   nativeButton={false}
@@ -276,6 +382,19 @@ export function HostsTopologyDialog({
                 >
                   Open YAML
                 </Button>
+              </div>
+
+              <div className="flex shrink-0 border-b border-border bg-muted/40 px-4 py-2.5">
+                <div className="relative min-w-0 flex-1">
+                  <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={query}
+                    onChange={(event) => applyQuery(event.target.value)}
+                    placeholder="Search hosts"
+                    aria-label="Search hosts"
+                    className="h-8 bg-background pl-8 font-normal"
+                  />
+                </div>
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
@@ -289,6 +408,7 @@ export function HostsTopologyDialog({
                 ) : (
                   <GroupEditor
                     group={selected}
+                    query={query}
                     cloneOptions={cloneOptions}
                     onCount={(count) =>
                       setGroups(
@@ -322,22 +442,44 @@ export function HostsTopologyDialog({
                 </fieldset>
               </div>
 
-              <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border px-4 py-3">
-                <Button variant="outline" onClick={requestClose}>
-                  Cancel
-                </Button>
-                <Button
-                  onClick={() => void save()}
-                  disabled={busy || loading || !dirty || !canWrite}
-                >
-                  Save changes
-                </Button>
+              <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-[#161618] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {pendingCount
+                    ? `${pendingCount} unsaved change${pendingCount === 1 ? "" : "s"}`
+                    : "No unsaved changes"}
+                </span>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={pendingCount === 0 || busy || loading}
+                    onClick={resetAll}
+                  >
+                    Reset
+                  </Button>
+                  <Button variant="ghost" onClick={requestClose}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={() => setReviewOpen(true)}
+                    disabled={busy || loading || pendingCount === 0 || !canWrite}
+                  >
+                    {busy ? "Saving…" : "Save changes"}
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
         </DialogContent>
       </Dialog>
 
+      <ChangesReviewDialog
+        open={open && reviewOpen && changeGroups.length > 0}
+        onOpenChange={setReviewOpen}
+        groups={changeGroups}
+        busy={busy}
+        onConfirm={() => void save()}
+      />
       <ConfirmAction
         open={discardOpen}
         onOpenChange={setDiscardOpen}
@@ -345,7 +487,10 @@ export function HostsTopologyDialog({
         description="Unsaved topology edits will be lost."
         confirmLabel="Discard"
         destructive
-        onConfirm={() => onOpenChange(false)}
+        onConfirm={() => {
+          setReviewOpen(false);
+          onOpenChange(false);
+        }}
       />
     </>
   );
@@ -353,6 +498,7 @@ export function HostsTopologyDialog({
 
 function GroupEditor({
   group,
+  query,
   cloneOptions,
   onCount,
   onHost,
@@ -360,6 +506,7 @@ function GroupEditor({
   onRemoveHost,
 }: {
   group: HostGroup;
+  query: string;
   cloneOptions: string[];
   onCount: (count: number) => void;
   onHost: (index: number, patch: Partial<HostTopology>) => void;
@@ -370,14 +517,20 @@ function GroupEditor({
   ) => void;
   onRemoveHost: (index: number) => void;
 }) {
+  const showAll = groupMatchesQuery(group, query);
+  const visible = group.hosts
+    .map((host, index) => ({ host, index }))
+    .filter(({ host }) => showAll || hostMatchesQuery(host, query));
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="font-mono text-sm">{group.name}</p>
+          <p className="font-mono text-sm">
+            <HighlightText text={group.name} query={query} />
+          </p>
           {group.id !== group.name ? (
             <p className="font-mono text-[11px] text-muted-foreground">
-              {group.id}
+              <HighlightText text={group.id} query={query} />
             </p>
           ) : null}
         </div>
@@ -421,42 +574,123 @@ function GroupEditor({
           </Button>
         </div>
       </div>
-      {group.hosts.map((host, hostIndex) => (
+      {visible.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No matching hosts.</p>
+      ) : null}
+      {visible.map(({ host, index }) => (
         <HostCard
-          key={`${group.id}-${hostIndex}`}
+          key={`${group.id}-${index}`}
           host={host}
+          query={query}
           cloneOptions={cloneList(cloneOptions, host.clone)}
-          onChange={(patch) => onHost(hostIndex, patch)}
+          onChange={(patch) => onHost(index, patch)}
           onDiskChange={(diskIndex, patch) =>
-            onDisk(hostIndex, diskIndex, patch)
+            onDisk(index, diskIndex, patch)
           }
-          onRemove={() => onRemoveHost(hostIndex)}
+          onRemove={() => onRemoveHost(index)}
         />
       ))}
     </div>
   );
 }
 
+function valueHits(value: string, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  return needle.length > 0 && value.toLowerCase().includes(needle);
+}
+
+function HighlightText({ text, query }: { text: string; query: string }) {
+  const needle = query.trim();
+  if (!needle) return text;
+  const lower = text.toLowerCase();
+  const target = needle.toLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const index = lower.indexOf(target, cursor);
+    if (index < 0) {
+      parts.push(text.slice(cursor));
+      break;
+    }
+    if (index > cursor) parts.push(text.slice(cursor, index));
+    parts.push(
+      <mark
+        key={index}
+        className="rounded-sm bg-amber-400/45 text-foreground"
+      >
+        {text.slice(index, index + target.length)}
+      </mark>,
+    );
+    cursor = index + target.length;
+  }
+  return parts;
+}
+
+function MatchInput({
+  value,
+  query,
+  className,
+  ...props
+}: ComponentProps<typeof Input> & { query: string }) {
+  const text = value == null ? "" : String(value);
+  const hit = valueHits(text, query);
+  const mono = className?.includes("font-mono");
+  return (
+    <div className={cn("relative min-w-0", className)}>
+      <Input
+        {...props}
+        value={text}
+        className={cn(
+          className,
+          "w-full",
+          hit &&
+            "border-amber-400/80 text-transparent caret-foreground ring-2 ring-amber-400/40",
+        )}
+      />
+      {hit ? (
+        <span
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-y-0 right-0 left-0 flex items-center overflow-hidden px-3 text-sm",
+            mono && "font-mono",
+          )}
+        >
+          <span className="truncate">
+            <HighlightText text={text} query={query} />
+          </span>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function HostCard({
   host,
+  query,
   cloneOptions,
   onChange,
   onDiskChange,
   onRemove,
 }: {
   host: HostTopology;
+  query: string;
   cloneOptions: string[];
   onChange: (patch: Partial<HostTopology>) => void;
   onDiskChange: (index: number, patch: Partial<HostDisk>) => void;
   onRemove: () => void;
 }) {
+  const cloneHit = valueHits(host.clone, query);
+  const numaHit = host.numa && valueHits("numa", query);
   return (
     <article className="space-y-3 rounded-xl bg-card p-4">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Server className="size-3.5 text-primary" />
           <p className="truncate font-mono text-xs text-muted-foreground">
-            {host.hostname || host.ip || "New host"}
+            <HighlightText
+              text={host.hostname || host.ip || "New host"}
+              query={query}
+            />
           </p>
         </div>
         <Button
@@ -472,31 +706,35 @@ function HostCard({
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <Field icon={<Network />} label="IP">
-          <Input
+          <MatchInput
             className="h-8 font-mono"
+            query={query}
             value={host.ip}
             onChange={(event) => onChange({ ip: event.target.value })}
           />
         </Field>
         <Field icon={<Server />} label="Hostname">
-          <Input
+          <MatchInput
             className="h-8 font-mono"
+            query={query}
             value={host.hostname}
             onChange={(event) => onChange({ hostname: event.target.value })}
           />
         </Field>
         <Field icon={<Hash />} label="VMID">
-          <Input
+          <MatchInput
             className="h-8 font-mono"
+            query={query}
             value={host.vmid}
             onChange={(event) => onChange({ vmid: event.target.value })}
           />
         </Field>
         <Field icon={<Layers />} label="Sockets">
-          <Input
+          <MatchInput
             className="h-8"
             type="number"
             min={1}
+            query={query}
             value={host.sockets}
             onChange={(event) =>
               onChange({ sockets: Number(event.target.value) || 1 })
@@ -504,10 +742,11 @@ function HostCard({
           />
         </Field>
         <Field icon={<Cpu />} label="Cores">
-          <Input
+          <MatchInput
             className="h-8"
             type="number"
             min={1}
+            query={query}
             value={host.cores}
             onChange={(event) =>
               onChange({ cores: Number(event.target.value) || 1 })
@@ -515,10 +754,11 @@ function HostCard({
           />
         </Field>
         <Field icon={<MemoryStick />} label="Memory (MB)">
-          <Input
+          <MatchInput
             className="h-8"
             type="number"
             min={256}
+            query={query}
             value={host.memory}
             onChange={(event) =>
               onChange({ memory: Number(event.target.value) || 1024 })
@@ -533,17 +773,27 @@ function HostCard({
                 if (typeof value === "string") onChange({ clone: value });
               }}
             >
-              <SelectTrigger className="h-8 w-full rounded-md" size="sm">
+              <SelectTrigger
+                className={cn(
+                  "h-8 w-full rounded-md",
+                  cloneHit && "border-amber-400/80 ring-2 ring-amber-400/40",
+                )}
+                size="sm"
+              >
                 <span className="flex min-w-0 flex-1 items-center gap-1.5">
                   {host.clone ? <DistroIcon name={host.clone} /> : null}
-                  <SelectValue placeholder="Select clone" />
+                  {cloneHit ? (
+                    <HighlightText text={host.clone} query={query} />
+                  ) : (
+                    <SelectValue placeholder="Select clone" />
+                  )}
                 </span>
               </SelectTrigger>
               <SelectContent align="start" alignItemWithTrigger>
                 {cloneOptions.map((name) => (
                   <SelectItem key={name} value={name}>
                     <DistroIcon name={name} className="size-4" />
-                    {name}
+                    <HighlightText text={name} query={query} />
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -551,15 +801,21 @@ function HostCard({
           ) : (
             <div className="flex items-center gap-1.5">
               <DistroIcon name={host.clone} />
-              <Input
+              <MatchInput
                 className="h-8 font-mono"
+                query={query}
                 value={host.clone}
                 onChange={(event) => onChange({ clone: event.target.value })}
               />
             </div>
           )}
         </Field>
-        <label className="flex items-center gap-2 self-end pb-1 text-sm">
+        <label
+          className={cn(
+            "flex items-center gap-2 self-end pb-1 text-sm",
+            numaHit && "rounded-md bg-amber-400/15 px-1 text-foreground",
+          )}
+        >
           <Checkbox
             checked={host.numa}
             onCheckedChange={(value) => onChange({ numa: value === true })}
@@ -567,7 +823,7 @@ function HostCard({
           <FieldIcon>
             <Share2 />
           </FieldIcon>
-          NUMA
+          <HighlightText text="NUMA" query={query} />
         </label>
       </div>
       <div className="space-y-2">
@@ -605,9 +861,10 @@ function HostCard({
               <FieldIcon>
                 <Disc />
               </FieldIcon>
-              <Input
+              <MatchInput
                 className="h-8 min-w-0 flex-1"
                 placeholder="Size GB"
+                query={query}
                 value={disk.size}
                 onChange={(event) =>
                   onDiskChange(diskIndex, { size: event.target.value })
@@ -618,10 +875,11 @@ function HostCard({
               <FieldIcon>
                 <Columns3 />
               </FieldIcon>
-              <Input
+              <MatchInput
                 className="h-8 w-16 shrink-0"
                 type="number"
                 min={0}
+                query={query}
                 value={disk.slot}
                 onChange={(event) =>
                   onDiskChange(diskIndex, {
@@ -634,9 +892,10 @@ function HostCard({
               <FieldIcon>
                 <Database />
               </FieldIcon>
-              <Input
+              <MatchInput
                 className="h-8 min-w-0 flex-1 font-mono"
                 placeholder="Storage"
+                query={query}
                 value={disk.storage}
                 onChange={(event) =>
                   onDiskChange(diskIndex, { storage: event.target.value })

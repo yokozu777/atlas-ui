@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -19,6 +20,7 @@ import {
   fetchClusterctlGit,
   installClusterctlGit,
   listClusterctlRefs,
+  saveClusterctlIgnoreHostKey,
   saveSetup,
   type ClusterctlGitStatus,
 } from "@/lib/api";
@@ -51,8 +53,10 @@ export function SetupForm({
   const router = useRouter();
   const [path, setPath] = useState(defaultPath);
   const [gitUrl, setGitUrl] = useState(defaultGitUrl);
+  const [ignoreHostKey, setIgnoreHostKey] = useState(false);
   const [status, setStatus] = useState<ClusterctlGitStatus | null>(null);
   const [refs, setRefs] = useState<string[]>([]);
+  const [refDates, setRefDates] = useState<Record<string, string>>({});
   const [selectedRef, setSelectedRef] = useState("");
   const [busy, setBusy] = useState<"probe" | "refs" | "install" | "ensure" | null>(
     "ensure",
@@ -65,6 +69,9 @@ export function SetupForm({
     }
     if (next.dest || next.clusterctlRoot) {
       setPath(next.dest || next.clusterctlRoot || "");
+    }
+    if (typeof next.ignoreHostKey === "boolean") {
+      setIgnoreHostKey(next.ignoreHostKey);
     }
   }
 
@@ -124,15 +131,17 @@ export function SetupForm({
   async function onCheckVersion() {
     setBusy("refs");
     try {
-      const data = await listClusterctlRefs({ url: gitUrl });
+      const data = await listClusterctlRefs({ url: gitUrl, ignoreHostKey });
       const next = data.refs ?? [];
       setRefs(next);
+      setRefDates(data.refDates ?? {});
       setSelectedRef((prev) => (prev && next.includes(prev) ? prev : next[0] || ""));
       if (!next.length) {
         toast.error("No main branch or tags on that Git URL");
       }
     } catch (err) {
       setRefs([]);
+      setRefDates({});
       setSelectedRef("");
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -151,6 +160,7 @@ export function SetupForm({
         url: gitUrl,
         dest: path,
         ref: selectedRef,
+        ignoreHostKey,
       });
       applyStatus(result);
       toast.success(result.version || `${selectedRef} ready`);
@@ -162,22 +172,37 @@ export function SetupForm({
     }
   }
 
+  async function onIgnoreHostKey(checked: boolean) {
+    const previous = ignoreHostKey;
+    setIgnoreHostKey(checked);
+    try {
+      await saveClusterctlIgnoreHostKey(checked);
+    } catch (err) {
+      setIgnoreHostKey(previous);
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const installed = Boolean(status?.configured);
   const fetchedAt = formatFetchedAt(status?.fetchedAt);
+  const versionLine = status?.ok ? (status.version || "").trim() : "";
+  const usingRef = (status?.ref || "").trim();
+  const selectedWhen = formatFetchedAt(selectedRef ? refDates[selectedRef] : null);
   const hint = !status
     ? busy === "ensure"
       ? "Installing latest clusterctl…"
       : null
-    : status.error ||
-      (status.ok
-        ? status.version
+    : status.error
+      ? status.error
+      : status.ok
+        ? null
         : status.exists
           ? status.isRepo
             ? "Git checkout present"
             : "Destination exists"
           : busy === "ensure"
             ? "Installing latest clusterctl…"
-            : "Destination is empty — Check version, then Install");
+            : "Destination is empty — Check version, then Install";
 
   return (
     <form onSubmit={onProbe} className="flex max-w-xl flex-col gap-4">
@@ -189,10 +214,27 @@ export function SetupForm({
           onChange={(e) => {
             setGitUrl(e.target.value);
             setRefs([]);
+            setRefDates({});
             setSelectedRef("");
           }}
           placeholder={DEFAULT_CLUSTERCTL_GIT_URL}
         />
+        <label className="flex items-start gap-2 text-sm">
+          <Checkbox
+            checked={ignoreHostKey}
+            disabled={busy !== null}
+            aria-label="Ignore SSH host key"
+            className="mt-0.5"
+            onCheckedChange={(value) => void onIgnoreHostKey(value === true)}
+          />
+          <span>
+            <span className="block">Ignore SSH host key</span>
+            <span className="block text-xs text-muted-foreground">
+              Skip host key verification for git@ URLs. The hub accepts the Git
+              server key without checking known_hosts.
+            </span>
+          </span>
+        </label>
       </div>
       <div className="space-y-2">
         <Label htmlFor="clusterctl-root">Checkout path</Label>
@@ -219,17 +261,46 @@ export function SetupForm({
           disabled={busy !== null || refs.length === 0}
         >
           <SelectTrigger id="clusterctl-ref" className="w-full">
-            <span>{selectedRef || (refs.length ? "Select version" : "Check version first")}</span>
+            <span className="flex min-w-0 flex-1 items-center gap-3">
+              <span className="truncate font-mono">
+                {selectedRef || (refs.length ? "Select version" : "Check version first")}
+              </span>
+              {selectedWhen ? (
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                  {selectedWhen}
+                </span>
+              ) : null}
+            </span>
           </SelectTrigger>
           <SelectContent align="start" alignItemWithTrigger>
-            {refs.map((ref) => (
-              <SelectItem key={ref} value={ref}>
-                {ref}
-              </SelectItem>
-            ))}
+            {refs.map((ref) => {
+              const when = formatFetchedAt(refDates[ref]);
+              return (
+                <SelectItem key={ref} value={ref}>
+                  <span className="flex w-full min-w-0 items-center gap-3 pr-4">
+                    <span className="font-mono">{ref}</span>
+                    {when ? (
+                      <span className="ml-auto shrink-0 text-xs font-normal text-muted-foreground">
+                        {when}
+                      </span>
+                    ) : null}
+                  </span>
+                </SelectItem>
+              );
+            })}
           </SelectContent>
         </Select>
       </div>
+      {versionLine || usingRef ? (
+        <div className="space-y-1">
+          {versionLine ? (
+            <p className="font-mono text-sm text-muted-foreground">{versionLine}</p>
+          ) : null}
+          {usingRef ? (
+            <p className="text-sm text-muted-foreground">Using {usingRef}</p>
+          ) : null}
+        </div>
+      ) : null}
       {hint ? (
         <p
           className={

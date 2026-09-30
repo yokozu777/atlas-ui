@@ -77,6 +77,7 @@ from clusterctl_config import (  # noqa: E402
     clusterctl_root_from_project,
     inspect_run_params_from_project,
     load_path_defaults,
+    resolve_clusterctl_ignore_host_key,
 )
 from clusterctl_git import (  # noqa: E402
     ClusterctlGitError,
@@ -3521,19 +3522,41 @@ def atlas_clusterctl_get(
     return inspect_checkout(url=url, dest=dest)
 
 
+def _ignore_host_key_arg(body: dict[str, Any]) -> Any:
+    if "ignoreHostKey" not in body:
+        return None
+    return body.get("ignoreHostKey")
+
+
 @app.get("/api/atlas/clusterctl/refs")
 def atlas_clusterctl_refs(
     authorization: Optional[str] = Header(None),
     url: Optional[str] = Query(None),
+    ignoreHostKey: Optional[str] = Query(None),
 ):
     _require_perm(authorization, "settings.read")
     try:
-        return list_clusterctl_refs(url=url)
+        return list_clusterctl_refs(url=url, ignore_host_key=ignoreHostKey)
     except ClusterctlGitError as exc:
         return JSONResponse(
             {"success": False, "error": exc.message},
             status_code=exc.status_code,
         )
+
+
+@app.post("/api/atlas/clusterctl/options")
+def atlas_clusterctl_options(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    if "ignoreHostKey" not in body:
+        return JSONResponse(
+            {"success": False, "error": "ignoreHostKey is required"},
+            status_code=400,
+        )
+    enabled = resolve_clusterctl_ignore_host_key(body.get("ignoreHostKey"))
+    return {"success": True, "ignoreHostKey": enabled}
 
 
 @app.post("/api/atlas/clusterctl/install")
@@ -3547,6 +3570,7 @@ def atlas_clusterctl_install(
             url=body.get("url"),
             dest=body.get("dest"),
             ref=body.get("ref"),
+            ignore_host_key=_ignore_host_key_arg(body),
         )
     except ClusterctlGitError as exc:
         return JSONResponse(
@@ -3562,7 +3586,11 @@ def atlas_clusterctl_ensure(
 ):
     _require_perm(authorization, "settings.update")
     try:
-        return ensure_clusterctl(url=body.get("url"), dest=body.get("dest"))
+        return ensure_clusterctl(
+            url=body.get("url"),
+            dest=body.get("dest"),
+            ignore_host_key=_ignore_host_key_arg(body),
+        )
     except ClusterctlGitError as exc:
         return JSONResponse(
             {"success": False, "error": exc.message},
@@ -3577,7 +3605,11 @@ def atlas_clusterctl_clone(
 ):
     _require_perm(authorization, "settings.update")
     try:
-        return clone_clusterctl(url=body.get("url"), dest=body.get("dest"))
+        return clone_clusterctl(
+            url=body.get("url"),
+            dest=body.get("dest"),
+            ignore_host_key=_ignore_host_key_arg(body),
+        )
     except ClusterctlGitError as exc:
         return JSONResponse(
             {"success": False, "error": exc.message},
@@ -3592,7 +3624,11 @@ def atlas_clusterctl_pull(
 ):
     _require_perm(authorization, "settings.update")
     try:
-        return pull_clusterctl(url=body.get("url"), dest=body.get("dest"))
+        return pull_clusterctl(
+            url=body.get("url"),
+            dest=body.get("dest"),
+            ignore_host_key=_ignore_host_key_arg(body),
+        )
     except ClusterctlGitError as exc:
         return JSONResponse(
             {"success": False, "error": exc.message},

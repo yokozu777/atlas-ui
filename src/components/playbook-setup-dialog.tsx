@@ -21,6 +21,7 @@ import {
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
+import { FileFacts, type FileFactsMeta } from "@/components/file-facts";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -72,6 +73,7 @@ import {
   normalizePveTemplatesMap,
   originFromVarsSetupFile,
   generateSetupSecret,
+  generateSetupSecrets,
   parseStringList,
   envScopeLabel,
   ianaTimeZones,
@@ -83,9 +85,13 @@ import {
   setupProgressFromValues,
   setupSchemaForVarsFile,
   setupSearchHaystack,
+  setupSearchHits,
   setupValuesEqual,
   valuesFromVarsSetupFile,
+  type SetupSearchHit,
+  type VarsSetupFileSnapshot,
 } from "@/lib/playbook-setup";
+import { ChangesReviewDialog } from "@/components/changes-review-dialog";
 import { GIT_PULL_NONE } from "@/components/git-pull-secret-select";
 import { useEnsureClusterctlSshKey } from "@/hooks/use-ensure-clusterctl-ssh";
 import {
@@ -103,6 +109,7 @@ type VarsSetupFileResponse = {
   path?: string;
   pveFactory?: boolean;
   hasEnvLayer?: boolean;
+  fileMeta?: FileFactsMeta;
   keys?: Record<string, { origin?: string; value?: unknown; comment?: string }>;
   nested?: Record<
     string,
@@ -114,6 +121,8 @@ export type PlaybookSetupFileTab = {
   name: string;
   path: string;
   missing?: number;
+  filled?: number;
+  total?: number;
 };
 
 type RowFilter = "all" | "required" | "missing" | "modified" | "inherited";
@@ -240,6 +249,7 @@ export function PlaybookSetupDialog({
   fileName,
   path,
   files,
+  sources,
   onFileChange,
   pveFactory,
   hasEnvLayer,
@@ -252,6 +262,7 @@ export function PlaybookSetupDialog({
   fileName: string;
   path: string;
   files?: PlaybookSetupFileTab[];
+  sources?: VarsSetupFileSnapshot[];
   onFileChange?: (file: PlaybookSetupFileTab) => void;
   pveFactory?: boolean;
   hasEnvLayer?: boolean;
@@ -286,6 +297,7 @@ export function PlaybookSetupDialog({
   const [reviewOpen, setReviewOpen] = useState(false);
   const [draftVersion, setDraftVersion] = useState(0);
   const draftsRef = useRef<Record<string, SetupDraft>>({});
+  const searchSessionRef = useRef(false);
 
   const schema = useMemo(
     () =>
@@ -358,6 +370,19 @@ export function PlaybookSetupDialog({
     };
   }, [files]);
 
+  function navProgress(item: PlaybookSetupFileTab) {
+    if (item.path === path) {
+      return { filled: progress.filled, total: progress.total };
+    }
+    if (typeof item.total === "number" && item.total > 0) {
+      return {
+        filled: item.filled ?? Math.max(0, item.total - (item.missing ?? 0)),
+        total: item.total,
+      };
+    }
+    return null;
+  }
+
   function applyFile(
     data: VarsSetupFileResponse,
     keepValues?: Record<string, SetupFieldValue>,
@@ -390,20 +415,27 @@ export function PlaybookSetupDialog({
   }
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      searchSessionRef.current = false;
+      return;
+    }
+    const fresh = !searchSessionRef.current;
+    searchSessionRef.current = true;
     setLoading(true);
     setYamlLoading(true);
-    setQuery("");
-    setFilter("all");
-    setView("variables");
+    if (fresh) {
+      setQuery("");
+      setFilter("all");
+      setView("variables");
+      setCollapsed({});
+      setExpandedMaps({});
+      setSaveFlash("idle");
+    }
     setValues({});
     setBaseline({});
     setOrigins({});
     setComments({});
     setVisible({});
-    setCollapsed({});
-    setExpandedMaps({});
-    setSaveFlash("idle");
     let cancelled = false;
     void (async () => {
       try {
@@ -544,10 +576,92 @@ export function PlaybookSetupDialog({
     });
   }, [schema.fields, values, origins, baseline, filter, query, comments]);
 
+  const searchGroups = useMemo(() => {
+    const needle = query.trim();
+    if (!needle || !sources || sources.length === 0) return null;
+    const overrides: NonNullable<
+      Parameters<typeof setupSearchHits>[2]
+    >["overrides"] = {};
+    const baselines: Record<string, Record<string, SetupFieldValue>> = {};
+    for (const source of sources) {
+      const draft = draftsRef.current[source.path];
+      if (source.path === path) {
+        overrides[source.path] = { values, comments, origins };
+        baselines[source.path] = baseline;
+      } else if (draft) {
+        overrides[source.path] = { values: draft.values };
+        baselines[source.path] = draft.baseline;
+      }
+    }
+    const hits = setupSearchHits(sources, needle, {
+      pveFactory: factory,
+      overrides,
+    });
+    const grouped = new Map<
+      string,
+      { path: string; fileName: string; hits: SetupSearchHit[] }
+    >();
+    for (const hit of hits) {
+      const base = baselines[hit.path]?.[hit.field.key];
+      const modified = baselines[hit.path]
+        ? !setupValuesEqual(hit.value, base)
+        : false;
+      if (filter === "required" && !isSetupFieldRequired(hit.field)) continue;
+      if (filter === "missing" && !isMissingSetupValue(hit.value, hit.field)) {
+        continue;
+      }
+      if (filter === "modified" && !modified) continue;
+      if (
+        filter === "inherited" &&
+        hit.origin !== "env" &&
+        hit.origin !== "org"
+      ) {
+        continue;
+      }
+      const group = grouped.get(hit.path) ?? {
+        path: hit.path,
+        fileName: hit.fileName,
+        hits: [],
+      };
+      group.hits.push(hit);
+      grouped.set(hit.path, group);
+    }
+    return [...grouped.values()];
+  }, [
+    query,
+    sources,
+    path,
+    values,
+    comments,
+    origins,
+    baseline,
+    filter,
+    factory,
+    draftVersion,
+  ]);
+
+  const passwordFields = useMemo(
+    () =>
+      schema.fields.filter(
+        (field) => setupFieldValueType(field) === "password",
+      ),
+    [schema.fields],
+  );
+
   const groups = useMemo(
     () => groupedSetupFields(visibleFields),
     [visibleFields],
   );
+
+  function generateAllSecrets() {
+    const generated = generateSetupSecrets(schema.fields);
+    const keys = Object.keys(generated);
+    if (keys.length === 0) return;
+    setValues((prev) => ({ ...prev, ...generated }));
+    toast.success(
+      keys.length === 1 ? "Generated 1 secret" : `Generated ${keys.length} secrets`,
+    );
+  }
 
   function requestClose() {
     if (pendingCount > 0) {
@@ -722,19 +836,24 @@ export function PlaybookSetupDialog({
     }
   }
 
-  const status = headerStatus(
-    progress.filled,
-    progress.total,
-    progress.missing,
-    invalidCount,
-  );
+  const status = headerStatus(progress.filled, progress.total, invalidCount);
+  const fileMeta = file.path === path ? file.fileMeta : undefined;
   const saveLabel = busy
     ? "Saving…"
-    : reviewOpen
-      ? "Save"
-      : saveFlash === "saved" && pendingCount === 0
-        ? "Saved"
-        : "Save changes";
+    : saveFlash === "saved" && pendingCount === 0
+      ? "Saved"
+      : "Save changes";
+  const reviewGroupsForDialog = reviewGroups.map((group) => ({
+    id: group.path,
+    title: playbookNameFromVarsFile(group.fileName),
+    lines: group.lines.map((line) => ({
+      id: `${line.path}:${line.key}`,
+      label: line.label,
+      from: line.from,
+      to: line.to,
+      secret: line.secret,
+    })),
+  }));
 
   return (
     <>
@@ -742,7 +861,8 @@ export function PlaybookSetupDialog({
         open={open}
         modal={!sshFormOpen}
         onOpenChange={(next) => {
-          if (!next && !sshFormOpen) requestClose();
+          if (!next && (reviewOpen || sshFormOpen)) return;
+          if (!next) requestClose();
         }}
       >
         <DialogContent
@@ -767,6 +887,17 @@ export function PlaybookSetupDialog({
                     items={fileGroups.vars}
                     activePath={path}
                     dirtyPaths={dirtyPaths}
+                    progressFor={navProgress}
+                    matchCounts={
+                      searchGroups
+                        ? new Map(
+                            searchGroups.map((group) => [
+                              group.path,
+                              group.hits.length,
+                            ]),
+                          )
+                        : null
+                    }
                     onSelect={requestFile}
                     labelFor={(item) => playbookNameFromVarsFile(item.name)}
                   />
@@ -776,6 +907,17 @@ export function PlaybookSetupDialog({
                     items={fileGroups.secrets}
                     activePath={path}
                     dirtyPaths={dirtyPaths}
+                    progressFor={navProgress}
+                    matchCounts={
+                      searchGroups
+                        ? new Map(
+                            searchGroups.map((group) => [
+                              group.path,
+                              group.hits.length,
+                            ]),
+                          )
+                        : null
+                    }
                     onSelect={requestFile}
                     labelFor={(item) => playbookNameFromVarsFile(item.name)}
                     className={
@@ -788,16 +930,19 @@ export function PlaybookSetupDialog({
 
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-4 py-3 pr-14">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                    Configuration
-                  </p>
-                  <DialogTitle className="mt-1 truncate font-mono text-sm font-medium">
-                    {fileName}
-                  </DialogTitle>
-                  <DialogDescription className="mt-0.5 text-xs text-muted-foreground">
-                    Configure required variables
-                  </DialogDescription>
+                <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-6 gap-y-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                      Configuration
+                    </p>
+                    <DialogTitle className="mt-1 truncate font-mono text-sm font-medium">
+                      {fileName}
+                    </DialogTitle>
+                    <DialogDescription className="mt-0.5 text-xs text-muted-foreground">
+                      Configure required variables
+                    </DialogDescription>
+                  </div>
+                  <FileFacts meta={fileMeta} />
                 </div>
                 {schema.fields.length > 0 ? (
                   <StatusPill tone={status.tone} label={status.label} />
@@ -810,8 +955,8 @@ export function PlaybookSetupDialog({
                   <Input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Search variables"
-                    aria-label="Search variables"
+                    placeholder="Search all files"
+                    aria-label="Search all files"
                     className="h-8 bg-background pl-8 font-normal"
                   />
                 </div>
@@ -833,6 +978,19 @@ export function PlaybookSetupDialog({
                       </Button>
                     ))}
                   </div>
+                  {view === "variables" && passwordFields.length > 0 ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      disabled={loading}
+                      aria-label="Generate all secrets"
+                      onClick={generateAllSecrets}
+                    >
+                      <Sparkles />
+                      Generate all
+                    </Button>
+                  ) : null}
                   <div className="flex items-center gap-0.5 rounded-lg bg-background/80 p-[3px] ring-1 ring-foreground/10">
                     <Button
                       type="button"
@@ -892,6 +1050,139 @@ export function PlaybookSetupDialog({
                       </Link>
                     </p>
                   </div>
+                ) : searchGroups ? (
+                  searchGroups.length === 0 ? (
+                    <p className="px-4 py-6 text-sm text-muted-foreground">
+                      No matching variables.
+                    </p>
+                  ) : (
+                    <div className="space-y-5 p-4">
+                      {searchGroups.map((fileGroup) => {
+                        const sections = groupedSetupFields(
+                          fileGroup.hits.map((hit) => hit.field),
+                        );
+                        const active = fileGroup.path === path;
+                        return (
+                          <div key={fileGroup.path} className="space-y-2">
+                            <p className="px-1 font-mono text-xs text-muted-foreground">
+                              {playbookNameFromVarsFile(fileGroup.fileName)}
+                            </p>
+                            {sections.map((group) => (
+                              <section
+                                key={`${fileGroup.path}:${group.group}`}
+                                className="overflow-hidden rounded-lg border border-border bg-[#161618]"
+                              >
+                                <div className="flex w-full items-center gap-2 px-3 py-2.5 text-sm font-medium">
+                                  <span>{group.group}</span>
+                                  <span className="font-mono text-xs font-normal tabular-nums text-muted-foreground">
+                                    {group.fields.length}
+                                  </span>
+                                </div>
+                                <div className="divide-y divide-border/70 border-t border-border">
+                                  {group.fields.map((field) => {
+                                    if (!active) {
+                                      const hit = fileGroup.hits.find(
+                                        (item) => item.field.key === field.key,
+                                      );
+                                      return (
+                                        <button
+                                          key={field.key}
+                                          type="button"
+                                          className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-muted/40"
+                                          onClick={() => {
+                                            const tab = (files ?? []).find(
+                                              (item) =>
+                                                item.path === fileGroup.path,
+                                            ) ?? {
+                                              name: fileGroup.fileName,
+                                              path: fileGroup.path,
+                                            };
+                                            requestFile(tab);
+                                          }}
+                                        >
+                                          <span className="min-w-0 flex-1">
+                                            <span className="block text-sm">
+                                              {field.label}
+                                            </span>
+                                            {hit?.description ? (
+                                              <span className="block truncate text-xs text-muted-foreground">
+                                                {hit.description}
+                                              </span>
+                                            ) : null}
+                                          </span>
+                                          <span className="max-w-[45%] truncate font-mono text-xs text-muted-foreground">
+                                            {searchValuePreview(
+                                              field,
+                                              hit?.value,
+                                            )}
+                                          </span>
+                                        </button>
+                                      );
+                                    }
+                                    return (
+                                      <SettingRow
+                                        key={field.key}
+                                        field={field}
+                                        value={values[field.key]}
+                                        origin={origins[field.key] ?? "missing"}
+                                        description={comments[field.key] || ""}
+                                        modified={
+                                          !setupValuesEqual(
+                                            values[field.key],
+                                            baseline[field.key],
+                                          )
+                                        }
+                                        revealed={Boolean(visible[field.key])}
+                                        envLayer={envLayer}
+                                        layerBusy={layerBusy}
+                                        mapOpen={Boolean(expandedMaps[field.key])}
+                                        projectId={projectId}
+                                        clusterId={clusterId}
+                                        onSshFormOpenChange={setSshFormOpen}
+                                        reuseChoices={
+                                          field.input === "password"
+                                            ? secretReuseChoices(
+                                                field.key,
+                                                clusterId,
+                                                reuseHits,
+                                              )
+                                            : []
+                                        }
+                                        onReveal={() =>
+                                          setVisible((prev) => ({
+                                            ...prev,
+                                            [field.key]: !prev[field.key],
+                                          }))
+                                        }
+                                        onChange={(next) =>
+                                          setValues((prev) => ({
+                                            ...prev,
+                                            [field.key]: next,
+                                          }))
+                                        }
+                                        onToggleMap={() =>
+                                          setExpandedMaps((prev) => ({
+                                            ...prev,
+                                            [field.key]: !prev[field.key],
+                                          }))
+                                        }
+                                        onOverride={() =>
+                                          void moveLayer(field, "local")
+                                        }
+                                        onReset={() =>
+                                          void moveLayer(field, "global")
+                                        }
+                                      />
+                                    );
+                                  })}
+                                </div>
+                              </section>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )
                 ) : schema.fields.length === 0 ? (
                   <p className="px-4 py-6 text-sm text-muted-foreground">
                     No scalar fields to edit here. Use the YAML tab for maps and
@@ -994,44 +1285,6 @@ export function PlaybookSetupDialog({
                 )}
               </div>
 
-              {reviewOpen && reviewGroups.length > 0 ? (
-                <div className="max-h-40 shrink-0 overflow-y-auto border-t border-border bg-[#141416] px-4 py-2">
-                  <p className="pb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-                    Changes
-                  </p>
-                  <div className="space-y-2">
-                    {reviewGroups.map((group) => (
-                      <div key={group.path}>
-                        <p className="truncate font-mono text-[11px] text-foreground/80">
-                          {playbookNameFromVarsFile(group.fileName)}
-                        </p>
-                        <ul className="mt-0.5 space-y-0.5">
-                          {group.lines.map((line) => (
-                            <li
-                              key={`${line.path}:${line.key}`}
-                              className="flex min-w-0 items-baseline gap-2 text-[12px]"
-                            >
-                              <span className="w-36 shrink-0 truncate text-muted-foreground sm:w-44">
-                                {line.label}
-                              </span>
-                              {line.secret ? (
-                                <span className="truncate text-foreground">updated</span>
-                              ) : (
-                                <span className="min-w-0 truncate font-mono text-[11px]">
-                                  <span className="text-muted-foreground">{line.from}</span>
-                                  <span className="px-1 text-muted-foreground/70">→</span>
-                                  <span>{line.to}</span>
-                                </span>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
               <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-[#161618] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                 <span className="text-xs text-muted-foreground tabular-nums">
                   {pendingCount
@@ -1051,13 +1304,7 @@ export function PlaybookSetupDialog({
                     Cancel
                   </Button>
                   <Button
-                    onClick={() => {
-                      if (!reviewOpen) {
-                        setReviewOpen(true);
-                        return;
-                      }
-                      void commitSave();
-                    }}
+                    onClick={() => setReviewOpen(true)}
                     disabled={busy || loading || pendingCount === 0 || !canWrite}
                   >
                     {saveLabel}
@@ -1068,6 +1315,13 @@ export function PlaybookSetupDialog({
           </div>
         </DialogContent>
       </Dialog>
+      <ChangesReviewDialog
+        open={reviewOpen && reviewGroupsForDialog.length > 0}
+        onOpenChange={setReviewOpen}
+        groups={reviewGroupsForDialog}
+        busy={busy}
+        onConfirm={() => void commitSave()}
+      />
       <ConfirmAction
         open={discardOpen}
         onOpenChange={setDiscardOpen}
@@ -1084,7 +1338,6 @@ export function PlaybookSetupDialog({
 function headerStatus(
   filled: number,
   total: number,
-  missing: number,
   invalid: number,
 ): { tone: "ready" | "missing" | "invalid"; label: string } {
   if (invalid > 0) {
@@ -1093,16 +1346,40 @@ function headerStatus(
       label: `${invalid} invalid`,
     };
   }
-  if (missing > 0) {
+  if (total > 0 && filled < total) {
     return {
       tone: "missing",
-      label: `${missing} missing`,
+      label: `${filled}/${total}`,
     };
   }
   return {
     tone: "ready",
-    label: `${filled}/${total} Ready`,
+    label: `${filled}/${total}`,
   };
+}
+
+function fileRatioBadge(ratio: { filled: number; total: number } | null) {
+  if (!ratio || ratio.total <= 0) return null;
+  const complete = ratio.filled >= ratio.total;
+  return (
+    <Badge
+      variant={complete ? "success" : "warning"}
+      title={complete ? "All fields filled" : "Fields still empty"}
+    >
+      {ratio.filled}/{ratio.total}
+    </Badge>
+  );
+}
+
+function searchValuePreview(
+  field: PlaybookSetupField,
+  value: SetupFieldValue | undefined,
+): string {
+  if (field.input === "password") {
+    return typeof value === "string" && value.trim() ? "••••••••" : "";
+  }
+  if (typeof value === "string") return value.replaceAll("\n", ", ");
+  return "";
 }
 
 function FileNavGroup({
@@ -1111,6 +1388,8 @@ function FileNavGroup({
   items,
   activePath,
   dirtyPaths,
+  progressFor,
+  matchCounts,
   onSelect,
   labelFor,
   className,
@@ -1120,6 +1399,10 @@ function FileNavGroup({
   items: PlaybookSetupFileTab[];
   activePath: string;
   dirtyPaths?: ReadonlySet<string>;
+  progressFor?: (
+    item: PlaybookSetupFileTab,
+  ) => { filled: number; total: number } | null;
+  matchCounts?: Map<string, number> | null;
   onSelect: (item: PlaybookSetupFileTab) => void;
   labelFor?: (item: PlaybookSetupFileTab) => string;
   className?: string;
@@ -1167,9 +1450,15 @@ function FileNavGroup({
                   title="Unsaved changes"
                 />
               ) : null}
-              {item.missing && item.missing > 0 ? (
-                <Badge variant="warning">{item.missing}</Badge>
-              ) : null}
+              {matchCounts ? (
+                (matchCounts.get(item.path) ?? 0) > 0 ? (
+                  <Badge variant="info" title="Search matches">
+                    {matchCounts.get(item.path)}
+                  </Badge>
+                ) : null
+              ) : (
+                fileRatioBadge(progressFor?.(item) ?? null)
+              )}
             </button>
           );
         })}

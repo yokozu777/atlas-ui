@@ -63,6 +63,7 @@ export function PlaybookSetupCard({
   const searchParams = useSearchParams();
   const q = projectApiQuery(projectId, clusterId);
   const [rows, setRows] = useState<VarsSetupRow[]>([]);
+  const [sources, setSources] = useState<VarsSetupFilePayload[]>([]);
   const [pveFactory, setPveFactory] = useState(false);
   const [hasEnvLayer, setHasEnvLayer] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,31 +86,34 @@ export function PlaybookSetupCard({
       ]);
       const phases = yamlData.phases ?? [];
       const factory = Boolean(setupData.pveFactory);
-      const next = (setupData.files ?? [])
-        .filter((file) => varsFileBaseName(file.name) !== "proxmox.yml")
-        .map((file) => {
-          const schema = setupSchemaForVarsFile(file.name, "", {
-            pveFactory: factory,
-          });
-          const values = valuesFromVarsSetupFile(schema, file);
-          const progress = setupProgressFromValues(schema, values);
-          return {
-            name: file.name,
-            path: file.path,
-            missing: progress.missing,
-            total: progress.total,
-            phaseAlias: phaseAliasForPlaybook(
-              playbookNameFromVarsFile(file.name),
-              phases,
-            ),
-          };
+      const files = (setupData.files ?? []).filter(
+        (file) => varsFileBaseName(file.name) !== "proxmox.yml",
+      );
+      const next = files.map((file) => {
+        const schema = setupSchemaForVarsFile(file.name, "", {
+          pveFactory: factory,
         });
+        const values = valuesFromVarsSetupFile(schema, file);
+        const progress = setupProgressFromValues(schema, values);
+        return {
+          name: file.name,
+          path: file.path,
+          missing: progress.missing,
+          total: progress.total,
+          phaseAlias: phaseAliasForPlaybook(
+            playbookNameFromVarsFile(file.name),
+            phases,
+          ),
+        };
+      });
       setRows(next);
+      setSources(files);
       setPveFactory(factory);
       setHasEnvLayer(Boolean(setupData.hasEnvLayer));
       setError(null);
     } catch (err) {
       setRows([]);
+      setSources([]);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
@@ -160,7 +164,10 @@ export function PlaybookSetupCard({
         name: row.name,
         path: row.path,
         missing: row.missing,
+        filled: Math.max(0, row.total - row.missing),
+        total: row.total,
       }))}
+      sources={sources}
       onFileChange={(file) => {
         const next = rows.find((row) => row.path === file.path);
         if (next) setSelected(next);

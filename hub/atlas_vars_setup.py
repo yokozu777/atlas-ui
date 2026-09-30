@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -558,6 +560,79 @@ def _attach_origin_comments(
             desc["nested"][key]["comment"] = comment
 
 
+def _overlay_file(layers: list[tuple[str, Path]], rel: str) -> Optional[Path]:
+    """Most specific existing copy: leaf, then env, then org."""
+    for origin in ("leaf", "env", "org"):
+        for name, directory in layers:
+            if name != origin:
+                continue
+            path = _file_for(directory, rel)
+            if path.is_file():
+                return path
+    return None
+
+
+def _iso_mtime(path: Path) -> Optional[str]:
+    try:
+        stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+    return stamp.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _git_repo(path: Path) -> Optional[Path]:
+    start = path if path.is_dir() else path.parent
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _git_lines(repo: Path, args: list[str]) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _file_facts(path: Optional[Path]) -> dict[str, Optional[str]]:
+    facts: dict[str, Optional[str]] = {
+        "modifiedAt": None,
+        "createdAt": None,
+        "editedBy": None,
+        "absolutePath": None,
+    }
+    if path is None or not path.is_file():
+        return facts
+    resolved = path.resolve()
+    facts["absolutePath"] = str(resolved)
+    facts["modifiedAt"] = _iso_mtime(resolved)
+    repo = _git_repo(resolved)
+    if repo is None:
+        return facts
+    try:
+        rel = resolved.relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        return facts
+    author = _git_lines(repo, ["log", "-1", "--format=%an", "--", rel])
+    if author:
+        facts["editedBy"] = author[0]
+    created = _git_lines(repo, ["log", "--diff-filter=A", "--format=%aI", "--", rel])
+    if created:
+        facts["createdAt"] = created[-1]
+    return facts
+
+
 def get_vars_setup_file(
     project_id: str, rel_path: str, cluster_id: Optional[str] = None
 ) -> dict[str, Any]:
@@ -571,6 +646,7 @@ def get_vars_setup_file(
         "pveFactory": is_pve_factory_cluster(load_cluster_yaml(leaf)),
         "hasEnvLayer": _has_env_layer(layers),
         "clusterId": cid,
+        "fileMeta": _file_facts(_overlay_file(layers, rel)),
         **desc,
     }
 

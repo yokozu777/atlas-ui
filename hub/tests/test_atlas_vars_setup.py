@@ -270,6 +270,52 @@ class VarsSetupParseOnceTests(unittest.TestCase):
             self.assertEqual(desc["keys"]["key_0"]["comment"], "")
             self.assertEqual(desc["nested"]["bind_options"]["comment"], "")
 
+    def test_borrows_dns_address_from_default_compute_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            env = tmp / "lab" / "default"
+            leaf = tmp / "lab" / "k8s"
+            (env / "group_vars" / "all").mkdir(parents=True)
+            (leaf / "group_vars" / "all").mkdir(parents=True)
+            (env / "group_vars" / "all" / "atlas-compute-provision.yml").write_text(
+                "dns_server_ip: 192.168.1.219\n",
+                encoding="utf-8",
+            )
+            core = leaf / "group_vars" / "all" / "atlas-k8s-core.yml"
+            core.write_text("vip_address: 192.168.1.210\n", encoding="utf-8")
+            (leaf / "cluster.yaml").write_text("id: lab/k8s\n", encoding="utf-8")
+            layers = [("env", env), ("leaf", leaf)]
+            rel = "group_vars/all/atlas-k8s-core.yml"
+            desc = atlas_vars_setup._file_descriptor(rel, layers)
+            self.assertEqual(desc["keys"]["dns_server_ip"]["origin"], "env")
+            self.assertEqual(desc["keys"]["dns_server_ip"]["value"], "192.168.1.219")
+
+            with patch.object(
+                atlas_vars_setup,
+                "_require_leaf",
+                return_value=(leaf, "lab/k8s"),
+            ):
+                atlas_vars_setup.put_vars_setup_file(
+                    "project",
+                    rel,
+                    cluster_id="lab/k8s",
+                    updates={"dns_server_ip": "192.168.1.219"},
+                )
+            self.assertNotIn("dns_server_ip", core.read_text(encoding="utf-8"))
+
+            with patch.object(
+                atlas_vars_setup,
+                "_require_leaf",
+                return_value=(leaf, "lab/k8s"),
+            ):
+                atlas_vars_setup.put_vars_setup_file(
+                    "project",
+                    rel,
+                    cluster_id="lab/k8s",
+                    updates={"dns_server_ip": "192.168.1.50"},
+                )
+            self.assertIn("dns_server_ip: 192.168.1.50", core.read_text(encoding="utf-8"))
+
 
 class VarsSetupHttpTests(unittest.TestCase):
     @classmethod

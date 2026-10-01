@@ -82,6 +82,12 @@ const CLUSTER_DOMAIN_FIELD: PlaybookSetupField = {
 export const PVE_COMPUTE_SETUP_SCHEMA: PlaybookSetupSchema = {
   fields: [
     {
+      key: "provision_pve_host",
+      label: "Proxmox host",
+      group: "Proxmox",
+      valueType: "ipv4",
+    },
+    {
       key: "provision_gateway",
       label: "Gateway",
       group: "Network",
@@ -91,12 +97,6 @@ export const PVE_COMPUTE_SETUP_SCHEMA: PlaybookSetupSchema = {
       key: "provision_proxmox_target_node",
       label: "Proxmox target node",
       group: "Proxmox",
-    },
-    {
-      key: "provision_pve_host",
-      label: "Proxmox host",
-      group: "Proxmox",
-      valueType: "ipv4",
     },
     { key: "provision_pve_user", label: "Proxmox SSH user", group: "Proxmox" },
     {
@@ -165,10 +165,27 @@ export const PVE_COMPUTE_SECRETS_SETUP_SCHEMA: PlaybookSetupSchema = {
     },
     {
       key: "provision_dns_key_secret",
-      label: "DNS key secret",
+      label: "Apex zone TSIG",
       input: "password",
       placeholders: ["CHANGEME"],
       group: "Secrets",
+      hint: "BIND apex key. VM A records and the API VIP use this same value.",
+    },
+    {
+      key: "external_dns_tsig_secret",
+      label: "K8s zone TSIG",
+      input: "password",
+      placeholders: ["CHANGEME"],
+      group: "Secrets",
+      hint: "BIND key name is k8s.<DNS domain>-key.",
+    },
+    {
+      key: "external_dns_istio_tsig_secret",
+      label: "Istio zone TSIG",
+      input: "password",
+      placeholders: ["CHANGEME"],
+      group: "Secrets",
+      hint: "BIND key name is istio.<DNS domain>-key.",
     },
     {
       key: "provision_vm_cipassword",
@@ -223,10 +240,27 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       },
       {
         key: "provision_dns_key_secret",
-        label: "DNS TSIG secret",
+        label: "Apex zone TSIG",
         input: "password",
         placeholders: ["CHANGEME"],
         group: "Secrets",
+        hint: "BIND apex key. VM A records and the API VIP use this same value.",
+      },
+      {
+        key: "external_dns_tsig_secret",
+        label: "K8s zone TSIG",
+        input: "password",
+        placeholders: ["CHANGEME"],
+        group: "Secrets",
+        hint: "BIND key name is k8s.<DNS domain>-key.",
+      },
+      {
+        key: "external_dns_istio_tsig_secret",
+        label: "Istio zone TSIG",
+        input: "password",
+        placeholders: ["CHANGEME"],
+        group: "Secrets",
+        hint: "BIND key name is istio.<DNS domain>-key.",
       },
     ],
   },
@@ -234,14 +268,6 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
     fields: [
       DNS_FIELD,
       CLUSTER_DOMAIN_FIELD,
-      {
-        key: "dns_servers",
-        label: "DNS servers",
-        group: "Network",
-        valueType: "string_list",
-        itemValueType: "ipv4",
-        hint: "Written to /etc/resolv.conf. On an infra node use the BIND address (DNS server IP).",
-      },
       {
         key: "pkg_repo_nginx_domain",
         label: "Package mirror domain",
@@ -286,7 +312,6 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
     fields: [
       DNS_FIELD,
       CLUSTER_DOMAIN_FIELD,
-      { key: "dns_server_ip", label: "DNS server IP", group: "Network" },
       { key: "timezone", label: "Timezone", group: "Time", valueType: "timezone" },
       {
         key: "setup_bind",
@@ -332,22 +357,10 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
         hint: "Tag of the cache seed image. Must not be latest.",
       },
       {
-        key: "helm_repo_nginx_cache_warm_enabled",
-        label: "Warm Helm cache",
-        group: "Cache",
-        valueType: "boolean",
-        hint: "Download chart indexes and packages through the Helm mirror. Leave off when the cache seed already filled the disk.",
-      },
-      {
         key: "bind_forwarders",
         label: "BIND forwarders",
         group: "BIND",
         valueType: "string_list",
-      },
-      {
-        key: "bind_forward_policy",
-        label: "BIND forward policy",
-        group: "BIND",
       },
       {
         key: "bind_allow_query",
@@ -377,30 +390,6 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
   "atlas-infra-edge.secrets.yml": {
     fields: [
       {
-        key: "provision_dns_key_secret",
-        label: "Apex zone TSIG",
-        input: "password",
-        placeholders: ["CHANGEME"],
-        group: "BIND",
-        hint: "BIND key name is the DNS domain. Same bytes as DNS TSIG secret in compute-provision.",
-      },
-      {
-        key: "external_dns_tsig_secret",
-        label: "K8s zone TSIG",
-        input: "password",
-        placeholders: ["CHANGEME"],
-        group: "BIND",
-        hint: "BIND key name is k8s.<DNS domain>-key. cert-manager and external-dns must use this same value.",
-      },
-      {
-        key: "external_dns_istio_tsig_secret",
-        label: "Istio zone TSIG",
-        input: "password",
-        placeholders: ["CHANGEME"],
-        group: "BIND",
-        hint: "BIND key name is istio.<DNS domain>-key.",
-      },
-      {
         key: "stepca_init_password",
         label: "step-ca init password",
         input: "password",
@@ -414,36 +403,14 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
     fields: [
       DNS_FIELD,
       CLUSTER_DOMAIN_FIELD,
-      { key: "k8s_dns_domain", label: "Cluster DNS domain", group: "Network" },
       { key: "k8s_lb_hostname", label: "API load balancer hostname", group: "Network" },
-      { key: "k8s_api_port", label: "API port", group: "Network" },
       { key: "vip_address", label: "API VIP", group: "Network", valueType: "ipv4" },
-      {
-        key: "dns_server_ip",
-        label: "DNS server IP",
-        group: "Network",
-        valueType: "ipv4",
-        hint: "API VIP DNS and NTP use this address.",
-      },
       { key: "pod_subnet", label: "Pod subnet", group: "Network" },
       { key: "service_subnet", label: "Service subnet", group: "Network" },
       { key: "k8s_cluster_name", label: "Cluster name", group: "Identity" },
       { key: "k8s_apt_repo_version", label: "Kubernetes apt repo", group: "Versions" },
       { key: "k8s_version_ubuntu", label: "Kubernetes version (Ubuntu)", group: "Versions" },
       { key: "k8s_version_oracle", label: "Kubernetes version (Oracle)", group: "Versions" },
-      {
-        key: "use_internal_docker_registry",
-        label: "Internal Docker registry",
-        group: "Registry",
-        options: ["none", "registry", "harbor"],
-        hint: "registry pulls through registry.<DNS domain> on the infra node.",
-      },
-      {
-        key: "pkg_repo_nginx_ingress_domain",
-        label: "Package repo nginx domain",
-        group: "Registry",
-        allowEmpty: true,
-      },
       {
         key: "pki_ca_url",
         label: "CA root URLs",
@@ -476,50 +443,18 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
         group: "Load balancer",
         hint: "Keepalived PASS auth. Maximum 8 characters.",
       },
-      {
-        key: "k8s_lb_dns_key_secret",
-        label: "API DNS key secret",
-        input: "password",
-        placeholders: ["CHANGEME"],
-        allowEmpty: true,
-        group: "DNS",
-        hint: "Required only when Manage API DNS with Terraform is on and provision_dns_key_secret is unset.",
-      },
     ],
   },
   "atlas-k8s-addons.yml": {
     fields: [
       DNS_FIELD,
       CLUSTER_DOMAIN_FIELD,
-      { key: "k8s_dns_domain", label: "Cluster DNS domain", group: "Network" },
       { key: "k8s_lb_hostname", label: "API load balancer hostname", group: "Network" },
-      { key: "k8s_api_port", label: "API port", group: "Network" },
       { key: "vip_address", label: "API VIP", group: "Network", valueType: "ipv4" },
       { key: "pod_subnet", label: "Pod subnet", group: "Network" },
       { key: "cluster_dns_ip", label: "Cluster DNS IP", group: "Network", valueType: "ipv4" },
-      { key: "dns_server_ip", label: "DNS server IP", group: "Network", valueType: "ipv4" },
       { key: "k8s_cluster_name", label: "Cluster name", group: "Identity" },
-      { key: "helm_version", label: "Helm archive URL", group: "Helm", valueType: "url" },
-      {
-        key: "use_internal_helm_repo",
-        label: "Internal Helm repo",
-        group: "Helm",
-        options: ["none", "nginx", "nexus"],
-        hint: "nginx pulls charts from helm.<DNS domain> on the infra node.",
-      },
-      {
-        key: "helm_repo_nginx_ingress_domain",
-        label: "Helm repo nginx domain",
-        group: "Helm",
-        allowEmpty: true,
-      },
       { key: "metallb_ip_pool", label: "MetalLB IP pool", group: "Ingress" },
-      {
-        key: "kube_apiserver_oidc_enabled",
-        label: "API server OIDC",
-        group: "OIDC",
-        valueType: "boolean",
-      },
     ],
   },
   "atlas-k8s-addons.secrets.yml": {
@@ -555,15 +490,6 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       ]),
       secretField("mailu_initial_password", "Mailu initial password", "Mail", [
         "CHANGEME_mailu_initial",
-      ]),
-      secretField("external_dns_tsig_secret", "ExternalDNS TSIG", "DNS", [
-        "CHANGEME_external_dns_tsig_secret_base64",
-      ]),
-      secretField("external_dns_apex_tsig_secret", "ExternalDNS apex TSIG", "DNS", [
-        "CHANGEME_external_dns_apex_tsig_secret_base64",
-      ]),
-      secretField("external_dns_istio_tsig_secret", "ExternalDNS Istio TSIG", "DNS", [
-        "CHANGEME_external_dns_istio_tsig_secret_base64",
       ]),
       secretField("elastic_password", "Elastic password", "Elastic", ["CHANGEME_elastic"]),
       secretField("elastic_cert_password", "Elastic cert password", "Elastic", [
@@ -692,6 +618,7 @@ export const SECRET_REUSE_GROUPS: readonly (readonly string[])[] = [
   ],
   ["external_dns_tsig_secret"],
   ["external_dns_istio_tsig_secret"],
+  ["initial_password", "provision_vm_cipassword"],
 ];
 
 export type SecretReuseHit = {
@@ -719,6 +646,10 @@ export function setupFieldLabel(key: string, file = ""): string {
   const direct = fromFile?.fields.find((field) => field.key === key);
   if (direct?.label) return direct.label;
   for (const schema of Object.values(FILE_SETUP_SCHEMAS)) {
+    const field = schema.fields.find((item) => item.key === key);
+    if (field?.label) return field.label;
+  }
+  for (const schema of [PVE_COMPUTE_SETUP_SCHEMA, PVE_COMPUTE_SECRETS_SETUP_SCHEMA]) {
     const field = schema.fields.find((item) => item.key === key);
     if (field?.label) return field.label;
   }

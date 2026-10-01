@@ -17,12 +17,13 @@ export type ProxmoxAssistContextValue = {
   hypervisors: Hypervisor[];
   nodes: string[];
   storages: ProxmoxStorage[];
-  bridges: string[];
+  bridges: Array<ProxmoxBridge | string>;
   groups: string[];
   error: string | null;
   tokenBusy: boolean;
   onHostValue: (value: string, picked: boolean) => void;
   onCreateToken: () => void;
+  onPickToken: (tokenId: string) => void;
 };
 
 export const ProxmoxAssistContext = createContext<ProxmoxAssistContextValue | null>(

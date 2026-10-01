@@ -1,21 +1,23 @@
 # Published images (no build).
 # Required in .env: ATLAS_INVENTORY=/abs/path/to/atlas-inventory
-# Optional: ATLAS_CLUSTER_ROOT  ATLAS_UI_IMAGE_TAG
+# Optional: ATLAS_CLUSTER_ROOT  ATLAS_PROXMOX_LIBRARY_ROOT  ATLAS_UI_IMAGE_TAG
 #
 #   cp .env.example .env
 #   docker compose -f docker-compose.hub.yml pull
 #   docker compose -f docker-compose.hub.yml up -d
 #
-# Inside hub/worker: /atlas/clusterctl  /atlas/clusters  /atlas/workspace
+# Inside hub/worker: /atlas/clusterctl  /atlas/proxmox-library  /atlas/clusters  /atlas/workspace
 # SSH for clusterctl: System / Secrets Manager. Do not set SSH_KEY.
 
 # --- in-container mounts (fixed) ---
 x-in-clusterctl: &in_clusterctl /atlas/clusterctl
+x-in-library: &in_library /atlas/proxmox-library
 x-in-clusters: &in_clusters /atlas/clusters
 x-in-workspace: &in_workspace /atlas/workspace
 
 # --- host bind sources (the only machine-specific values) ---
 x-host-clusterctl: &host_clusterctl ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
+x-host-library: &host_library ${ATLAS_PROXMOX_LIBRARY_ROOT:-${PWD}/../atlas-proxmox-library}
 x-host-clusters: &host_clusters ${ATLAS_INVENTORY:?set ATLAS_INVENTORY in .env}/clusters
 x-host-workspace: &host_workspace ${ATLAS_INVENTORY:?set ATLAS_INVENTORY in .env}/workspace
 
@@ -30,6 +32,10 @@ x-bind-clusterctl: &bind_clusterctl
   type: bind
   source: *host_clusterctl
   target: *in_clusterctl
+x-bind-library: &bind_library
+  type: bind
+  source: *host_library
+  target: *in_library
 x-bind-clusters: &bind_clusters
   type: bind
   source: *host_clusters
@@ -42,12 +48,14 @@ x-bind-workspace: &bind_workspace
 x-hub-volumes: &hub_volumes
   - ./data:/app/data
   - *bind_clusterctl
+  - *bind_library
   - *bind_clusters
   - *bind_workspace
   - /var/run/docker.sock:/var/run/docker.sock
 
 x-path-env: &path_env
   ATLAS_CLUSTER_ROOT: *in_clusterctl
+  ATLAS_PROXMOX_LIBRARY_ROOT: *in_library
   ATLAS_CLUSTERS_ROOT: *in_clusters
   ATLAS_WORKSPACE_ROOT: *in_workspace
   ATLAS_CLUSTER_ROOT_HOST: *host_clusterctl
@@ -76,6 +84,8 @@ services:
     image: *image_hub
     platform: linux/amd64
     container_name: atlas-ui-hub
+    cap_add:
+      - NET_RAW
     ports:
       - "8000:8000"
     volumes: *hub_volumes

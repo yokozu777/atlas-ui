@@ -20,6 +20,16 @@ _SCALAR_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
 _REUSE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CHANGEME = re.compile(r"^changeme(?:\b|_)", re.IGNORECASE)
 LEAF_DNS_SHARED_KEY = "dns_domain_suffix"
+# One lab DNS address and three TSIG keys, owned by the default layer.
+# Other group_vars files reuse them instead of storing a second copy.
+_SHARED_DNS_ADDRESS = frozenset({"dns_server_ip"})
+_SHARED_TSIG_KEYS = frozenset(
+    {
+        "provision_dns_key_secret",
+        "external_dns_tsig_secret",
+        "external_dns_istio_tsig_secret",
+    }
+)
 
 
 def is_pve_factory_cluster(cluster_yaml: dict[str, Any] | None) -> bool:
@@ -506,6 +516,36 @@ def get_vars_setup(project_id: str, cluster_id: Optional[str] = None) -> dict[st
     }
 
 
+def _shared_keys_for(rel: str) -> frozenset[str]:
+    if _is_secrets_rel(rel):
+        return _SHARED_TSIG_KEYS
+    return _SHARED_DNS_ADDRESS
+
+
+def _borrowed_scalar(
+    layers: list[tuple[str, Path]], rel: str, key: str
+) -> tuple[str, Any]:
+    """Same key from another group_vars file. Later cascade layers win."""
+    origin = "missing"
+    value: Any = None
+    for name, directory in layers:
+        all_dir = directory / "group_vars" / "all"
+        if not all_dir.is_dir():
+            continue
+        for path in sorted(all_dir.iterdir()):
+            if not path.is_file() or path.suffix not in {".yml", ".yaml"}:
+                continue
+            if f"group_vars/all/{path.name}" == rel:
+                continue
+            mapping = _load_mapping(path)
+            raw = mapping.get(key, None)
+            if key not in mapping or isinstance(raw, (dict, list)):
+                continue
+            origin = name
+            value = raw
+    return origin, value
+
+
 def _file_descriptor(rel: str, layers: list[tuple[str, Path]]) -> dict[str, Any]:
     maps = _cascade_maps(layers, rel)
     keys: dict[str, Any] = {}
@@ -522,6 +562,16 @@ def _file_descriptor(rel: str, layers: list[tuple[str, Path]]) -> dict[str, Any]
                 "value": stringify_value(value) if origin != "missing" else "",
                 "origin": origin,
             }
+    for key in _shared_keys_for(rel):
+        if key in keys or key in nested:
+            continue
+        origin, value = _borrowed_scalar(layers, rel, key)
+        if origin == "missing":
+            continue
+        keys[key] = {
+            "value": stringify_value(value),
+            "origin": origin,
+        }
     name = Path(rel).name
     return {
         "name": name,
@@ -719,9 +769,14 @@ def put_vars_setup_file(
             value=dns_value,
         )
     for key, value in payload.items():
-        origin, _current, _path = _origin_and_value(layers, rel, str(key))
+        name = str(key)
+        origin, _current, _path = _origin_and_value(layers, rel, name)
+        if origin == "missing" and name in _shared_keys_for(rel):
+            borrowed_origin, borrowed = _borrowed_scalar(layers, rel, name)
+            if borrowed_origin != "missing" and stringify_value(borrowed) == stringify_value(value):
+                continue
         target = _target_origin_for_save(origin)
-        _write_key_to_layer(layers, rel, target, str(key), value)
+        _write_key_to_layer(layers, rel, target, name, value)
     for key, value in (nested or {}).items():
         origin, _current, _path = _origin_and_value(layers, rel, str(key))
         target = _target_origin_for_save(origin)

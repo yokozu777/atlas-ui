@@ -61,7 +61,7 @@ import {
   ProxmoxAssistContext,
   useProxmoxCatalog,
 } from "@/hooks/use-proxmox-assist";
-import { createProxmoxToken } from "@/lib/proxmox";
+import { createProxmoxToken, fetchHypervisorCredentials, storageChoiceLabel, bridgeChoice } from "@/lib/proxmox";
 import type {
   PlaybookSetupField,
   PveTemplatesMap,
@@ -305,6 +305,7 @@ export function PlaybookSetupDialog({
   const [reviewOpen, setReviewOpen] = useState(false);
   const [draftVersion, setDraftVersion] = useState(0);
   const draftsRef = useRef<Record<string, SetupDraft>>({});
+  const autofillHostRef = useRef("");
   const searchSessionRef = useRef(false);
 
   const schema = useMemo(
@@ -317,8 +318,16 @@ export function PlaybookSetupDialog({
   const proxmoxEnabled = schema.fields.some((field) =>
     PROXMOX_SETUP_KEYS.has(field.key),
   );
-  const hostText =
-    typeof values.provision_pve_host === "string" ? values.provision_pve_host : "";
+  const hostText = useMemo(() => {
+    const own =
+      typeof values.provision_pve_host === "string" ? values.provision_pve_host.trim() : "";
+    if (own) return own;
+    for (const draft of Object.values(draftsRef.current)) {
+      const host = draft.values.provision_pve_host;
+      if (typeof host === "string" && host.trim()) return host.trim();
+    }
+    return "";
+  }, [values.provision_pve_host, draftVersion]);
   const nodeText =
     typeof values.provision_proxmox_target_node === "string"
       ? values.provision_proxmox_target_node
@@ -331,6 +340,59 @@ export function PlaybookSetupDialog({
     node: nodeText,
   });
   const [tokenBusy, setTokenBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open || loading) return;
+    const hypervisorId = proxmox.catalog.matched ? proxmox.catalog.hypervisorId || "" : "";
+    if (!hypervisorId) return;
+    const hasUser = schema.fields.some((field) => field.key === "provision_pve_user");
+    const hasPassword = schema.fields.some((field) => field.key === "provision_pve_ssh_password");
+    if (!hasUser && !hasPassword) return;
+    const row = proxmox.hypervisors.find((item) => item.id === hypervisorId);
+    const sshUser = row?.sshUser || proxmox.catalog.sshUser || "";
+    const force = autofillHostRef.current === hypervisorId;
+    if (force && hasPassword) autofillHostRef.current = "";
+    let cancelled = false;
+    void fetchHypervisorCredentials(hypervisorId)
+      .then((creds) => {
+        if (cancelled) return;
+        setValues((prev) => {
+          const next = { ...prev };
+          let changed = false;
+          const user = String(prev.provision_pve_user || "").trim();
+          if (hasUser && sshUser && (force || !user)) {
+            next.provision_pve_user = sshUser;
+            changed = true;
+          }
+          const pass = String(prev.provision_pve_ssh_password || "").trim();
+          const blank = !pass || pass.toUpperCase() === "CHANGEME";
+          if (hasPassword && creds.password && (force || blank)) {
+            next.provision_pve_ssh_password = creds.password;
+            changed = true;
+          }
+          return changed ? next : prev;
+        });
+      })
+      .catch(() => {
+        if (cancelled || !hasUser || !sshUser) return;
+        setValues((prev) => {
+          const user = String(prev.provision_pve_user || "").trim();
+          if (!force && user) return prev;
+          return { ...prev, provision_pve_user: sshUser };
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    open,
+    loading,
+    proxmox.catalog.hypervisorId,
+    proxmox.catalog.matched,
+    proxmox.catalog.sshUser,
+    proxmox.hypervisors,
+    schema.fields,
+  ]);
 
   const envLayer = hasEnvLayer || Boolean(file.hasEnvLayer);
   const progress = setupProgressFromValues(schema, values);
@@ -881,14 +943,25 @@ export function PlaybookSetupDialog({
   }));
 
   function onHostValue(value: string, picked: boolean) {
-    const ssh = picked
-      ? proxmox.hypervisors.find((row) => row.host === value)?.sshUser
+    const row = picked
+      ? proxmox.hypervisors.find((item) => item.host === value)
       : undefined;
+    if (row) autofillHostRef.current = row.id;
     setValues((prev) => ({
       ...prev,
       provision_pve_host: value,
-      ...(ssh ? { provision_pve_user: ssh } : {}),
+      ...(row?.sshUser ? { provision_pve_user: row.sshUser } : {}),
     }));
+    if (!row?.hasPassword) return;
+    if (!schema.fields.some((field) => field.key === "provision_pve_ssh_password")) return;
+    void fetchHypervisorCredentials(row.id)
+      .then((creds) => {
+        if (!creds.password) return;
+        setValues((prev) => ({ ...prev, provision_pve_ssh_password: creds.password }));
+      })
+      .catch((err: unknown) => {
+        toast.error(err instanceof Error ? err.message : String(err));
+      });
   }
 
   async function onCreateToken() {
@@ -917,9 +990,27 @@ export function PlaybookSetupDialog({
     }
   }
 
+  async function onPickToken(tokenId: string) {
+    const row = proxmox.hypervisors.find((item) => item.tokenId === tokenId);
+    if (!row) return;
+    try {
+      const creds = await fetchHypervisorCredentials(row.id);
+      setValues((prev) => ({
+        ...prev,
+        provision_proxmox_token_id: creds.tokenId || tokenId,
+        provision_proxmox_token_secret: creds.secret,
+        ...(creds.password ? { provision_pve_ssh_password: creds.password } : {}),
+      }));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const proxmoxAssist = {
     enabled: proxmoxEnabled,
-    matched: proxmox.catalog.matched && !proxmox.catalog.error,
+    matched:
+      proxmox.catalog.matched &&
+      (!proxmox.catalog.error || proxmox.catalog.nodes.length > 0),
     hasHostField: schema.fields.some((field) => field.key === "provision_pve_host"),
     hypervisors: proxmox.hypervisors,
     nodes: proxmox.catalog.nodes,
@@ -930,6 +1021,7 @@ export function PlaybookSetupDialog({
     tokenBusy,
     onHostValue,
     onCreateToken,
+    onPickToken,
   };
 
   return (
@@ -1863,10 +1955,10 @@ function proxmoxChoices(
   assist: {
     enabled: boolean;
     matched: boolean;
-    hypervisors: { name: string; host: string }[];
+    hypervisors: { name: string; host: string; tokenId?: string }[];
     nodes: string[];
-    storages: { id: string; type: string }[];
-    bridges: string[];
+    storages: { id: string; type: string; avail?: number; used?: number }[];
+    bridges: Array<{ name: string; cidr?: string } | string>;
     groups: string[];
   } | null,
 ): SuggestOption[] | null {
@@ -1884,6 +1976,20 @@ function proxmoxChoices(
     }
     return options;
   }
+  if (key === "provision_proxmox_token_id") {
+    const seen = new Set<string>();
+    const options: SuggestOption[] = [];
+    for (const row of assist.hypervisors) {
+      const tokenId = row.tokenId?.trim();
+      if (!tokenId || seen.has(tokenId)) continue;
+      seen.add(tokenId);
+      options.push({
+        value: tokenId,
+        label: row.name && row.name !== tokenId ? `${row.name} — ${tokenId}` : tokenId,
+      });
+    }
+    return options.length ? options : null;
+  }
   if (!assist.matched) return null;
   if (key === "provision_proxmox_target_node" || key === "provision_pve_inventory_name") {
     return assist.nodes.map((name) => ({ value: name, label: name }));
@@ -1894,11 +2000,11 @@ function proxmoxChoices(
   if (key === "provision_vm_cloudinit_storage") {
     return assist.storages.map((row) => ({
       value: row.id,
-      label: row.type ? `${row.id} (${row.type})` : row.id,
+      label: storageChoiceLabel(row),
     }));
   }
   if (key === "provision_vm_network_bridge") {
-    return assist.bridges.map((name) => ({ value: name, label: name }));
+    return assist.bridges.map((row) => bridgeChoice(row));
   }
   return null;
 }
@@ -2074,6 +2180,9 @@ function SettingRow({
             onPick={(next) => {
               if (field.key === "provision_pve_host" && assist) {
                 assist.onHostValue(next, true);
+              }
+              if (field.key === "provision_proxmox_token_id" && assist) {
+                void assist.onPickToken(next);
               }
             }}
           />

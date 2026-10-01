@@ -70,7 +70,15 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
         "apiUser": row.get("apiUser") or "root@pam",
         "sshUser": row.get("sshUser") or "root",
         "hasPassword": bool(row.get("password")),
+        "hasToken": bool(row.get("tokenSecret")),
+        "tokenId": row.get("tokenId") or "",
     }
+
+
+def _flag(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def list_hypervisors(data_dir: Path) -> dict[str, Any]:
@@ -147,7 +155,7 @@ def create_hypervisor(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
     rows.append(row)
     _write_store(data_dir, rows)
     clear_catalog_cache()
-    return {"hypervisor": _public(row)}
+    return _finish_save(data_dir, rows, row, body, password)
 
 
 def update_hypervisor(data_dir: Path, hypervisor_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -175,7 +183,26 @@ def update_hypervisor(data_dir: Path, hypervisor_id: str, body: dict[str, Any]) 
             raise ProxmoxLibraryError(503, str(exc)) from exc
     _write_store(data_dir, rows)
     clear_catalog_cache()
-    return {"hypervisor": _public(row)}
+    return _finish_save(data_dir, rows, row, body, password)
+
+
+def hypervisor_credentials(data_dir: Path, hypervisor_id: str) -> dict[str, str]:
+    _rows, row = _require_row(data_dir, hypervisor_id)
+    password = _password(row, data_dir) if row.get("password") else ""
+    secret = ""
+    encrypted = str(row.get("tokenSecret") or "")
+    if encrypted:
+        try:
+            secret = get_encryption(data_dir).decrypt(encrypted)
+        except ValueError as exc:
+            raise ProxmoxLibraryError(400, "hypervisor token cannot be decrypted") from exc
+    if not secret and not password:
+        raise ProxmoxLibraryError(404, "hypervisor has no saved credentials")
+    return {
+        "tokenId": str(row.get("tokenId") or ""),
+        "secret": secret,
+        "password": password,
+    }
 
 
 def delete_hypervisor(data_dir: Path, hypervisor_id: str) -> dict[str, Any]:
@@ -365,26 +392,14 @@ def catalog(
     base = _connection_args(row)
     hid = str(row["id"])
     try:
-        nodes = _cached(
-            (hid, "nodes", ""),
-            lambda: list(run_library([*base, "nodes"], password).get("nodes") or []),
-        )
-        selected = node.strip()
-        if selected and selected not in nodes:
-            nodes = [selected, *nodes]
-        if not selected and nodes:
-            selected = str(nodes[0])
-        storages: list[dict[str, Any]] = []
-        bridges: list[str] = []
-        if selected:
-            storages = _cached(
-                (hid, "storages", selected),
-                lambda: list(run_library([*base, "storages", "--node", selected], password).get("storages") or []),
+        nodes = [
+            str(item)
+            for item in _cached(
+                (hid, "nodes", ""),
+                lambda: list(run_library([*base, "nodes"], password).get("nodes") or []),
             )
-            bridges = _cached(
-                (hid, "bridges", selected),
-                lambda: list(run_library([*base, "bridges", "--node", selected], password).get("bridges") or []),
-            )
+            if str(item).strip()
+        ]
     except ProxmoxLibraryError as exc:
         empty.update(
             {
@@ -396,6 +411,27 @@ def catalog(
             }
         )
         return empty
+    requested = node.strip()
+    query_node = requested if requested in nodes else (nodes[0] if nodes else "")
+    storages: list[dict[str, Any]] = []
+    bridges: list[str] = []
+    detail_error = None
+    if query_node:
+        try:
+            storages = _cached(
+                (hid, "storages", query_node),
+                lambda: list(
+                    run_library([*base, "storages", "--node", query_node], password).get("storages") or []
+                ),
+            )
+            bridges = _cached(
+                (hid, "bridges", query_node),
+                lambda: list(
+                    run_library([*base, "bridges", "--node", query_node], password).get("bridges") or []
+                ),
+            )
+        except ProxmoxLibraryError as exc:
+            detail_error = exc.message
     return {
         "matched": True,
         "host": str(row.get("host") or chosen_host),
@@ -405,7 +441,7 @@ def catalog(
         "storages": storages,
         "bridges": bridges,
         "inventoryGroups": _inventory_groups(project_id, cluster_id),
-        "error": None,
+        "error": detail_error,
     }
 
 
@@ -437,6 +473,80 @@ def _token_exists(message: str) -> bool:
     return "exist" in text or "already" in text
 
 
+def _issue_token(connection: list[str], password: str, token_id: str = "") -> dict[str, str]:
+    chosen = token_id.strip() or "atlas-ui"
+    if not _TOKEN_ID.fullmatch(chosen):
+        raise ProxmoxLibraryError(400, "token id is invalid")
+    try:
+        payload = run_library([*connection, "create-token", "--token-id", chosen], password)
+    except ProxmoxLibraryError as exc:
+        if not _token_exists(exc.message):
+            raise
+        chosen = f"atlas-ui-{secrets.token_hex(2)}"
+        payload = run_library(
+            [*connection, "create-token", "--token-id", chosen],
+            password,
+        )
+    secret = str(payload.get("secret") or "")
+    if not secret:
+        raise ProxmoxLibraryError(502, "Proxmox did not return a token secret")
+    return {
+        "tokenId": str(payload.get("token_id") or f"{chosen}"),
+        "secret": secret,
+    }
+
+
+def _probe_host(row: dict[str, Any], password: str) -> dict[str, Any]:
+    base = _connection_args(row)
+    nodes = [
+        str(item)
+        for item in (run_library([*base, "nodes"], password).get("nodes") or [])
+        if str(item).strip()
+    ]
+    query_node = nodes[0] if nodes else ""
+    storages: list[dict[str, Any]] = []
+    bridges: list[str] = []
+    if query_node:
+        storages = list(
+            run_library([*base, "storages", "--node", query_node], password).get("storages") or []
+        )
+        bridges = list(
+            run_library([*base, "bridges", "--node", query_node], password).get("bridges") or []
+        )
+    hid = str(row.get("id") or "")
+    now = time.monotonic()
+    if hid:
+        _cache[(hid, "nodes", "")] = (now, nodes)
+        if query_node:
+            _cache[(hid, "storages", query_node)] = (now, storages)
+            _cache[(hid, "bridges", query_node)] = (now, bridges)
+    return {"nodes": nodes, "storages": storages, "bridges": bridges}
+
+
+def _finish_save(
+    data_dir: Path,
+    rows: list[dict[str, Any]],
+    row: dict[str, Any],
+    body: dict[str, Any],
+    password: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"hypervisor": _public(row)}
+    if not _flag(body.get("createToken")):
+        return result
+    secret_password = password.strip() or _password(row, data_dir)
+    try:
+        issued = _issue_token(_connection_args(row), secret_password)
+        row["tokenId"] = issued["tokenId"]
+        row["tokenSecret"] = get_encryption(data_dir).encrypt(issued["secret"])
+        _write_store(data_dir, rows)
+        result["hypervisor"] = _public(row)
+        result["tokenId"] = issued["tokenId"]
+        result.update(_probe_host(row, secret_password))
+    except ProxmoxLibraryError as exc:
+        result["error"] = exc.message
+    return result
+
+
 def create_api_token(
     data_dir: Path,
     project_id: str,
@@ -465,22 +575,9 @@ def create_api_token(
             400,
             "Select a saved Proxmox host or enter the SSH password",
         )
-    chosen = token_id.strip() or "atlas-ui"
-    if not _TOKEN_ID.fullmatch(chosen):
-        raise ProxmoxLibraryError(400, "token id is invalid")
-    args = [*connection, "create-token", "--token-id", chosen]
-    try:
-        payload = run_library(args, secret_password)
-    except ProxmoxLibraryError as exc:
-        if not _token_exists(exc.message):
-            raise
-        chosen = f"atlas-ui-{secrets.token_hex(2)}"
-        payload = run_library(
-            [*connection, "create-token", "--token-id", chosen],
-            secret_password,
-        )
+    issued = _issue_token(connection, secret_password, token_id)
     api_user = str((row or {}).get("apiUser") or "root@pam")
-    return {
-        "tokenId": payload.get("token_id") or f"{api_user}!{chosen}",
-        "secret": payload.get("secret") or "",
-    }
+    full_id = issued["tokenId"]
+    if "!" not in full_id:
+        full_id = f"{api_user}!{full_id}"
+    return {"tokenId": full_id, "secret": issued["secret"]}

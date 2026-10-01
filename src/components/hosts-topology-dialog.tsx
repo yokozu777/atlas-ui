@@ -62,7 +62,7 @@ import {
   type HostTopology,
 } from "@/lib/atlas-hosts";
 import { projectHref } from "@/lib/project-href";
-import { fetchProxmoxCatalog, fetchProxmoxVmid, type ProxmoxStorage } from "@/lib/proxmox";
+import { fetchProxmoxCatalog, fetchProxmoxVmid, probeHostAddress, storageChoiceLabel, type ProxmoxStorage } from "@/lib/proxmox";
 import { useCan } from "@/lib/authz";
 import { cn } from "@/lib/utils";
 
@@ -213,7 +213,6 @@ export function HostsTopologyDialog({
   const [query, setQuery] = useState("");
   const [fileMeta, setFileMeta] = useState<FileFactsMeta | undefined>();
   const [storages, setStorages] = useState<ProxmoxStorage[]>([]);
-  const [vmidReady, setVmidReady] = useState(false);
 
   const changeGroups = useMemo(
     () => hostTopologyChanges(parseGroups(baseline), groups),
@@ -276,12 +275,10 @@ export function HostsTopologyDialog({
       .then((data) => {
         if (cancelled) return;
         const ready = Boolean(data.matched && !data.error);
-        setVmidReady(ready);
         setStorages(ready ? data.storages : []);
       })
       .catch(() => {
         if (cancelled) return;
-        setVmidReady(false);
         setStorages([]);
       });
     return () => {
@@ -432,10 +429,17 @@ export function HostsTopologyDialog({
                 ) : (
                   <GroupEditor
                     group={selected}
+                    peers={groups.flatMap((item) =>
+                      item.hosts.map((host, index) => ({
+                        key: `${item.id}:${index}`,
+                        ip: host.ip,
+                        hostname: host.hostname,
+                        vmid: host.vmid,
+                      })),
+                    )}
                     query={query}
                     cloneOptions={cloneOptions}
                     storages={storages}
-                    vmidReady={vmidReady}
                     projectId={projectId}
                     clusterId={clusterId}
                     onCount={(count) =>
@@ -526,10 +530,10 @@ export function HostsTopologyDialog({
 
 function GroupEditor({
   group,
+  peers,
   query,
   cloneOptions,
   storages,
-  vmidReady,
   projectId,
   clusterId,
   onCount,
@@ -538,10 +542,10 @@ function GroupEditor({
   onRemoveHost,
 }: {
   group: HostGroup;
+  peers: HostPeer[];
   query: string;
   cloneOptions: string[];
   storages: ProxmoxStorage[];
-  vmidReady: boolean;
   projectId: string;
   clusterId: string;
   onCount: (count: number) => void;
@@ -617,10 +621,11 @@ function GroupEditor({
         <HostCard
           key={`${group.id}-${index}`}
           host={host}
+          selfKey={`${group.id}:${index}`}
+          peers={peers}
           query={query}
           cloneOptions={cloneList(cloneOptions, host.clone)}
           storages={storages}
-          vmidReady={vmidReady}
           projectId={projectId}
           clusterId={clusterId}
           onChange={(patch) => onHost(index, patch)}
@@ -704,12 +709,25 @@ function MatchInput({
   );
 }
 
+type HostPeer = {
+  key: string;
+  ip: string;
+  hostname: string;
+  vmid: string;
+};
+
+type CheckNote = {
+  tone: "ok" | "bad" | "warn";
+  text: string;
+};
+
 function HostCard({
   host,
+  selfKey,
+  peers,
   query,
   cloneOptions,
   storages,
-  vmidReady,
   projectId,
   clusterId,
   onChange,
@@ -717,10 +735,11 @@ function HostCard({
   onRemove,
 }: {
   host: HostTopology;
+  selfKey: string;
+  peers: HostPeer[];
   query: string;
   cloneOptions: string[];
   storages: ProxmoxStorage[];
-  vmidReady: boolean;
   projectId: string;
   clusterId: string;
   onChange: (patch: Partial<HostTopology>) => void;
@@ -729,7 +748,99 @@ function HostCard({
 }) {
   const cloneHit = valueHits(host.clone, query);
   const numaHit = host.numa && valueHits("numa", query);
-  const vmidMessage = useVmidMessage(vmidReady, projectId, clusterId, host.vmid);
+  const [ipNote, setIpNote] = useState<CheckNote | null>(null);
+  const [ipBusy, setIpBusy] = useState(false);
+  const [vmidNote, setVmidNote] = useState<CheckNote | null>(null);
+  const [vmidBusy, setVmidBusy] = useState(false);
+
+  async function checkIp() {
+    const ip = host.ip.trim();
+    if (!ip) {
+      setIpNote({ tone: "warn", text: "Enter an IP address" });
+      return;
+    }
+    const duplicate = peers.find(
+      (peer) => peer.key !== selfKey && peer.ip.trim() === ip,
+    );
+    if (duplicate) {
+      const name = duplicate.hostname.trim() || "another host";
+      setIpNote({
+        tone: "bad",
+        text: `${ip} is already assigned to ${name}`,
+      });
+      return;
+    }
+    setIpBusy(true);
+    try {
+      const result = await probeHostAddress({ projectId, ip });
+      if (!result.checked) {
+        setIpNote({
+          tone: "warn",
+          text: result.error || "Could not ping this address",
+        });
+        return;
+      }
+      setIpNote(
+        result.reachable
+          ? { tone: "bad", text: `${ip} answers. The address is in use.` }
+          : { tone: "ok", text: `${ip} does not answer. The address looks free.` },
+      );
+    } catch (err) {
+      setIpNote({
+        tone: "warn",
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIpBusy(false);
+    }
+  }
+
+  async function checkVmid() {
+    const trimmed = host.vmid.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      setVmidNote({ tone: "warn", text: "Enter a numeric VMID" });
+      return;
+    }
+    const duplicate = peers.find(
+      (peer) => peer.key !== selfKey && peer.vmid.trim() === trimmed,
+    );
+    if (duplicate) {
+      const name = duplicate.hostname.trim() || duplicate.ip.trim() || "another host";
+      setVmidNote({
+        tone: "bad",
+        text: `VMID ${trimmed} is already used by ${name}`,
+      });
+      return;
+    }
+    setVmidBusy(true);
+    try {
+      const result = await fetchProxmoxVmid({
+        projectId,
+        clusterId,
+        vmid: trimmed,
+      });
+      if (!result.checked) {
+        setVmidNote({
+          tone: "warn",
+          text: result.error || "Could not check this VMID",
+        });
+        return;
+      }
+      setVmidNote(
+        result.free
+          ? { tone: "ok", text: `VMID ${trimmed} is free` }
+          : { tone: "bad", text: `VMID ${trimmed} is already used` },
+      );
+    } catch (err) {
+      setVmidNote({
+        tone: "warn",
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setVmidBusy(false);
+    }
+  }
+
   return (
     <article className="space-y-3 rounded-xl bg-card p-4">
       <div className="flex items-center justify-between gap-2">
@@ -755,12 +866,28 @@ function HostCard({
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <Field icon={<Network />} label="IP">
-          <MatchInput
-            className="h-8 font-mono"
-            query={query}
-            value={host.ip}
-            onChange={(event) => onChange({ ip: event.target.value })}
-          />
+          <div className="flex items-center gap-1.5">
+            <MatchInput
+              className="h-8 min-w-0 flex-1 font-mono"
+              query={query}
+              value={host.ip}
+              onChange={(event) => {
+                setIpNote(null);
+                onChange({ ip: event.target.value });
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={ipBusy}
+              aria-label="Check whether this IP address is free"
+              onClick={() => void checkIp()}
+            >
+              {ipBusy ? "Checking…" : "Check"}
+            </Button>
+          </div>
+          <CheckLine note={ipNote} />
         </Field>
         <Field icon={<Server />} label="Hostname">
           <MatchInput
@@ -771,15 +898,28 @@ function HostCard({
           />
         </Field>
         <Field icon={<Hash />} label="VMID">
-          <MatchInput
-            className="h-8 font-mono"
-            query={query}
-            value={host.vmid}
-            onChange={(event) => onChange({ vmid: event.target.value })}
-          />
-          {vmidMessage ? (
-            <p className="text-xs text-red-500">{vmidMessage}</p>
-          ) : null}
+          <div className="flex items-center gap-1.5">
+            <MatchInput
+              className="h-8 min-w-0 flex-1 font-mono"
+              query={query}
+              value={host.vmid}
+              onChange={(event) => {
+                setVmidNote(null);
+                onChange({ vmid: event.target.value });
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={vmidBusy}
+              aria-label="Check whether this VMID is free"
+              onClick={() => void checkVmid()}
+            >
+              {vmidBusy ? "Checking…" : "Check"}
+            </Button>
+          </div>
+          <CheckLine note={vmidNote} />
         </Field>
         <Field icon={<Layers />} label="Sockets">
           <MatchInput
@@ -950,7 +1090,7 @@ function HostCard({
                     value={disk.storage}
                     options={storages.map((row) => ({
                       value: row.id,
-                      label: row.type ? `${row.id} (${row.type})` : row.id,
+                      label: storageChoiceLabel(row),
                     }))}
                     highlight={valueHits(disk.storage, query)}
                     ariaLabel="Storage"
@@ -995,40 +1135,20 @@ function HostCard({
   );
 }
 
-function useVmidMessage(
-  enabled: boolean,
-  projectId: string,
-  clusterId: string,
-  vmid: string,
-): string | null {
-  const [message, setMessage] = useState<string | null>(null);
-  const trimmed = vmid.trim();
-  const numeric = /^\d+$/.test(trimmed);
-  useEffect(() => {
-    if (!enabled || !numeric) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void fetchProxmoxVmid({ projectId, clusterId, vmid: trimmed })
-        .then((result) => {
-          if (cancelled) return;
-          if (!result.checked) {
-            setMessage(result.error);
-            return;
-          }
-          setMessage(result.free ? null : `VMID ${trimmed} is already used`);
-        })
-        .catch((err: unknown) => {
-          if (!cancelled) {
-            setMessage(err instanceof Error ? err.message : String(err));
-          }
-        });
-    }, 400);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [clusterId, enabled, numeric, projectId, trimmed]);
-  return enabled && numeric ? message : null;
+function CheckLine({ note }: { note: CheckNote | null }) {
+  if (!note) return null;
+  return (
+    <p
+      className={cn(
+        "text-xs",
+        note.tone === "ok" && "text-emerald-500",
+        note.tone === "bad" && "text-red-500",
+        note.tone === "warn" && "text-amber-500",
+      )}
+    >
+      {note.text}
+    </p>
+  );
 }
 
 function Field({

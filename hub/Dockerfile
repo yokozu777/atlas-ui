@@ -17,6 +17,7 @@ WORKDIR /app
 RUN apk add --no-cache \
       bash \
       git \
+      iputils \
       openssh-client \
       ca-certificates \
       curl \

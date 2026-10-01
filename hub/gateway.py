@@ -89,10 +89,12 @@ from clusterctl_git import (  # noqa: E402
     list_clusterctl_refs,
     pull_clusterctl,
 )
+from address_probe import AddressProbeError, probe_ipv4  # noqa: E402
 from proxmox_hypervisors import (  # noqa: E402
     ProxmoxLibraryError,
     catalog as proxmox_catalog,
     create_api_token,
+    hypervisor_credentials,
     create_hypervisor,
     delete_hypervisor,
     list_hypervisors,
@@ -4009,6 +4011,15 @@ def hypervisors_update(
         return _domain_error(exc)
 
 
+@app.get("/api/hypervisors/{hypervisor_id}/credentials")
+def hypervisors_credentials(hypervisor_id: str, authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "inventory.update", "settings.update")
+    try:
+        return hypervisor_credentials(DATA_DIR, hypervisor_id)
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
 @app.delete("/api/hypervisors/{hypervisor_id}")
 def hypervisors_delete(hypervisor_id: str, authorization: Optional[str] = Header(None)):
     _require_perm(authorization, "settings.update")
@@ -4046,6 +4057,23 @@ def proxmox_catalog_get(
         )
     except ProxmoxLibraryError as exc:
         return _domain_error(exc)
+
+
+@app.get("/api/projects/{project_id}/address-probe")
+def address_probe_get(
+    project_id: str,
+    ip: str = Query(""),
+    authorization: Optional[str] = Header(None),
+):
+    del project_id
+    _require_perm(authorization, "inventory.read", "inventory.update")
+    try:
+        return probe_ipv4(ip)
+    except AddressProbeError as exc:
+        return JSONResponse(
+            {"success": False, "error": exc.message},
+            status_code=exc.status_code,
+        )
 
 
 @app.get("/api/projects/{project_id}/proxmox/vmid")

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { ConfirmAction } from "@/components/confirm-action";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -33,6 +34,7 @@ type Draft = {
   apiUser: string;
   sshUser: string;
   password: string;
+  createToken: boolean;
 };
 
 const EMPTY_DRAFT: Draft = {
@@ -42,6 +44,7 @@ const EMPTY_DRAFT: Draft = {
   apiUser: "root@pam",
   sshUser: "root",
   password: "",
+  createToken: true,
 };
 
 export function HypervisorsPage() {
@@ -88,28 +91,33 @@ export function HypervisorsPage() {
     }
     setBusy(true);
     try {
-      if (draft.id) {
-        await updateHypervisor(draft.id, {
-          name: draft.name.trim(),
-          host: draft.host.trim(),
-          port,
-          apiUser: draft.apiUser.trim(),
-          sshUser: draft.sshUser.trim(),
-          password: draft.password,
-        });
-      } else {
-        await createHypervisor({
-          name: draft.name.trim(),
-          host: draft.host.trim(),
-          port,
-          apiUser: draft.apiUser.trim(),
-          sshUser: draft.sshUser.trim(),
-          password: draft.password,
-        });
+      const payload = {
+        name: draft.name.trim(),
+        host: draft.host.trim(),
+        port,
+        apiUser: draft.apiUser.trim(),
+        sshUser: draft.sshUser.trim(),
+        password: draft.password,
+        createToken: draft.createToken,
+      };
+      const saved = draft.id
+        ? await updateHypervisor(draft.id, payload)
+        : await createHypervisor(payload);
+      await reload();
+      if (saved.error) {
+        if (saved.hypervisor?.id) {
+          setDraft({ ...draft, id: saved.hypervisor.id, password: "" });
+        }
+        toast.error(saved.error);
+        return;
       }
       setDraft(null);
-      await reload();
-      toast.success("Saved");
+      const nodes = (saved.nodes ?? []).filter(Boolean).join(", ");
+      toast.success(
+        saved.tokenId
+          ? `Token ${saved.tokenId} created${nodes ? `. Nodes: ${nodes}` : ""}`
+          : "Saved",
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -219,6 +227,7 @@ export function HypervisorsPage() {
                             apiUser: row.apiUser,
                             sshUser: row.sshUser,
                             password: "",
+                            createToken: true,
                           })
                         }
                       >
@@ -246,7 +255,8 @@ export function HypervisorsPage() {
         <DialogContent className="max-w-md">
           <DialogTitle>{draft?.id ? "Edit Proxmox server" : "Add Proxmox server"}</DialogTitle>
           <DialogDescription>
-            The password is stored encrypted and is used only to query this host.
+            The password is stored encrypted. With the token option on, it is used once
+            to create an API token and load nodes, storages, and bridges.
           </DialogDescription>
           {draft ? (
             <form className="mt-4 space-y-3" onSubmit={onSave}>
@@ -274,12 +284,30 @@ export function HypervisorsPage() {
                   onChange={(event) => setDraft({ ...draft, password: event.target.value })}
                 />
               </div>
+              <label className="flex items-start gap-2 pt-1 text-sm">
+                <Checkbox
+                  checked={draft.createToken}
+                  disabled={busy}
+                  aria-label="Create API token"
+                  className="mt-0.5"
+                  onCheckedChange={(value) =>
+                    setDraft({ ...draft, createToken: value === true })
+                  }
+                />
+                <span>
+                  <span className="block">Create API token</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Creates the token without privilege separation, then loads nodes,
+                    storages, and bridges for the setup lists.
+                  </span>
+                </span>
+              </label>
               <div className="flex justify-end gap-2 pt-2">
                 <Button type="button" variant="ghost" onClick={() => setDraft(null)}>
                   Cancel
                 </Button>
                 <Button type="submit" disabled={busy}>
-                  {busy ? "Saving…" : "Save"}
+                  {busy ? (draft.createToken ? "Creating token…" : "Saving…") : "Save"}
                 </Button>
               </div>
             </form>

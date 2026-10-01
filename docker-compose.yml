@@ -3,13 +3,14 @@
 #
 # .env holds host paths only (Linux /home, macOS /Users, Windows C:\Users\…).
 # Compose bind-mounts them at POSIX targets inside hub/worker:
-#   /atlas/clusterctl  /atlas/clusters  /atlas/workspace
+#   /atlas/clusterctl  /atlas/proxmox-library  /atlas/clusters  /atlas/workspace
 # clusterctl SSH comes from System / Secrets Manager (injected as SSH_KEY at
 # claim). Do not set SSH_KEY in .env.
 # clusterctl docker executor talks to the host daemon via /var/run/docker.sock
 # and remaps those container paths to the daemon Source (inspect or *_HOST).
 # Hub mounts the same socket to check whether the executor image is already local.
 # Unset ATLAS_CLUSTER_ROOT → ${PWD}/atlas-clusterctl on the host.
+# Unset ATLAS_PROXMOX_LIBRARY_ROOT → sibling ../atlas-proxmox-library.
 # Empty dest: hub clones the latest clusterctl tag on first start.
 #
 # Do not set CLUSTER_EXECUTOR_FORCE_LOCAL on hub or worker — that flag is only
@@ -23,6 +24,11 @@ x-atlas-clusterctl-bind: &atlas-clusterctl-bind
   source: ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
   target: /atlas/clusterctl
 
+x-atlas-library-bind: &atlas-library-bind
+  type: bind
+  source: ${ATLAS_PROXMOX_LIBRARY_ROOT:-${PWD}/../atlas-proxmox-library}
+  target: /atlas/proxmox-library
+
 x-atlas-clusters-bind: &atlas-clusters-bind
   type: bind
   source: ${ATLAS_CLUSTERS_ROOT}
@@ -35,6 +41,7 @@ x-atlas-workspace-bind: &atlas-workspace-bind
 
 x-atlas-path-env: &atlas-path-env
   ATLAS_CLUSTER_ROOT: /atlas/clusterctl
+  ATLAS_PROXMOX_LIBRARY_ROOT: /atlas/proxmox-library
   ATLAS_CLUSTERS_ROOT: /atlas/clusters
   ATLAS_WORKSPACE_ROOT: /atlas/workspace
   ATLAS_CLUSTER_ROOT_HOST: ${ATLAS_CLUSTER_ROOT:-${PWD}/atlas-clusterctl}
@@ -48,11 +55,14 @@ services:
       dockerfile: hub/Dockerfile
     image: atlas-ui-hub
     container_name: atlas-ui-hub
+    cap_add:
+      - NET_RAW
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
       - *atlas-clusterctl-bind
+      - *atlas-library-bind
       - *atlas-clusters-bind
       - *atlas-workspace-bind
       - /var/run/docker.sock:/var/run/docker.sock
@@ -106,6 +116,7 @@ services:
     volumes:
       - ./data:/app/data
       - *atlas-clusterctl-bind
+      - *atlas-library-bind
       - *atlas-clusters-bind
       - *atlas-workspace-bind
       - /var/run/docker.sock:/var/run/docker.sock

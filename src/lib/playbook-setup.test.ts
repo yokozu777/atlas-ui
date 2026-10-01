@@ -18,15 +18,19 @@ import {
 } from "./playbook-setup.ts";
 
 describe("atlas-infra-edge.secrets.yml setup schema", () => {
-  it("exposes BIND TSIG and step-ca secrets", () => {
+  it("exposes step-ca and leaves TSIG on compute-provision", () => {
     const schema = setupSchemaForVarsFile("atlas-infra-edge.secrets.yml", "");
     const keys = schema.fields.map((field) => field.key);
-    assert.deepEqual(keys, [
-      "provision_dns_key_secret",
-      "external_dns_tsig_secret",
-      "external_dns_istio_tsig_secret",
-      "stepca_init_password",
-    ]);
+    assert.deepEqual(keys, ["stepca_init_password"]);
+    const compute = setupSchemaForVarsFile("atlas-compute-provision.secrets.yml", "");
+    assert.deepEqual(
+      compute.fields.map((field) => field.key).filter((key) => key.includes("dns") || key.includes("tsig")),
+      [
+        "provision_dns_key_secret",
+        "external_dns_tsig_secret",
+        "external_dns_istio_tsig_secret",
+      ],
+    );
     for (const key of keys) {
       const field = schema.fields.find((item) => item.key === key);
       assert.equal(field?.input, "password");
@@ -35,7 +39,7 @@ describe("atlas-infra-edge.secrets.yml setup schema", () => {
   });
 
   it("counts empty TSIG secrets as missing", () => {
-    const schema = setupSchemaForVarsFile("atlas-infra-edge.secrets.yml", "");
+    const schema = setupSchemaForVarsFile("atlas-compute-provision.secrets.yml", "");
     const k8s = schema.fields.find(
       (field) => field.key === "external_dns_tsig_secret",
     );
@@ -45,12 +49,12 @@ describe("atlas-infra-edge.secrets.yml setup schema", () => {
     assert.equal(isMissingSetupValue("example.com", k8s), false);
     assert.equal(isMissingSetupValue("real-secret", k8s), false);
     const progress = setupProgressFromValues(schema, {
+      provision_pve_ssh_password: "secret",
       provision_dns_key_secret: "",
       external_dns_tsig_secret: "",
       external_dns_istio_tsig_secret: "",
-      stepca_init_password: "",
     });
-    assert.equal(progress.missing, 4);
+    assert.equal(progress.missing, 3);
   });
 });
 
@@ -76,6 +80,13 @@ describe("saved secret reuse", () => {
     assert.equal(
       addons.fields.some(
         (field) => field.key === "external_dns_apex_tsig_secret",
+      ),
+      false,
+    );
+    assert.equal(
+      ["atlas-k8s-core.yml", "atlas-k8s-addons.yml", "atlas-infra-edge.yml", "atlas-node-foundation.yml"].every(
+        (name) =>
+          !setupSchemaForVarsFile(name, "").fields.some((field) => field.key === "dns_server_ip"),
       ),
       true,
     );
@@ -109,10 +120,34 @@ describe("saved secret reuse", () => {
     assert.equal(choices.length, 1);
     assert.equal(
       choices[0].label,
-      "build31/k8s, build32/infra · Apex zone TSIG / ExternalDNS apex TSIG",
+      "build31/k8s, build32/infra · Apex zone TSIG / external_dns_apex_tsig_secret",
     );
     assert.equal(choices[0].value, "same-bytes");
     assert.equal(choices[0].label.includes("build32/k8s"), false);
+  });
+
+  it("offers the saved Cloud-init password for Initial SSH password", () => {
+    const keys = reuseKeysFor("initial_password");
+    assert.deepEqual(keys, ["initial_password", "provision_vm_cipassword"]);
+    const choices = secretReuseChoices("initial_password", "build37/default", [
+      {
+        key: "provision_vm_cipassword",
+        clusterId: "build37/default",
+        file: "group_vars/all/atlas-compute-provision.secrets.yml",
+        origin: "env",
+        value: "guest-pass",
+      },
+      {
+        key: "initial_password",
+        clusterId: "build37/default",
+        file: "group_vars/all/atlas-node-foundation.secrets.yml",
+        origin: "env",
+        value: "old-ssh",
+      },
+    ]);
+    assert.equal(choices.length, 1);
+    assert.equal(choices[0].value, "guest-pass");
+    assert.match(choices[0].label, /Cloud-init password/);
   });
 });
 
@@ -122,17 +157,16 @@ describe("atlas-infra-edge.yml setup schema", () => {
     const load = fields.find((field) => field.key === "infra_cache_seed_load_enabled");
     const image = fields.find((field) => field.key === "infra_cache_seed_load_image");
     const tag = fields.find((field) => field.key === "infra_cache_seed_load_tag");
-    const warm = fields.find((field) => field.key === "helm_repo_nginx_cache_warm_enabled");
     assert.equal(load?.valueType, "boolean");
     assert.equal(image?.group, "Cache");
     assert.equal(tag?.group, "Cache");
-    assert.equal(warm?.valueType, "boolean");
-    assert.equal(warm?.group, "Cache");
     const keys = fields.map((field) => field.key);
     for (const key of [
       "infra_cache_seed_registry_tls_ca_enabled",
       "infra_cache_seed_registry_tls_ca_src",
       "nginx_cache_sync_enabled",
+      "helm_repo_nginx_cache_warm_enabled",
+      "bind_forward_policy",
     ]) {
       assert.equal(keys.includes(key), false);
     }
@@ -235,17 +269,29 @@ describe("k8s overlay setup schemas", () => {
     assert.equal(isMissingSetupValue("real-openbao-secret", openbaoOidc), false);
   });
 
-  it("treats optional DNS key and empty helm nginx domain as present", () => {
-    const dnsKey = setupSchemaForVarsFile("atlas-k8s-core.secrets.yml", "").fields.find(
-      (field) => field.key === "k8s_lb_dns_key_secret",
+  it("hides API port, cluster DNS, OIDC, Helm, and Registry", () => {
+    const coreSecrets = setupSchemaForVarsFile("atlas-k8s-core.secrets.yml", "").fields.map(
+      (field) => field.key,
     );
-    const helmDomain = setupSchemaForVarsFile("atlas-k8s-addons.yml", "").fields.find(
-      (field) => field.key === "helm_repo_nginx_ingress_domain",
-    );
-    assert.equal(dnsKey?.allowEmpty, true);
-    assert.equal(helmDomain?.allowEmpty, true);
-    assert.equal(isMissingSetupValue("", dnsKey), false);
-    assert.equal(isMissingSetupValue("", helmDomain), false);
+    assert.equal(coreSecrets.includes("k8s_lb_dns_key_secret"), false);
+    const hidden = [
+      "k8s_api_port",
+      "k8s_dns_domain",
+      "kube_apiserver_oidc_enabled",
+      "helm_version",
+      "use_internal_helm_repo",
+      "helm_repo_nginx_ingress_domain",
+      "use_internal_docker_registry",
+      "pkg_repo_nginx_ingress_domain",
+      "setup_helm_repo_nginx",
+      "setup_custom_nginx",
+    ];
+    for (const name of ["atlas-k8s-core.yml", "atlas-k8s-addons.yml"]) {
+      const keys = setupSchemaForVarsFile(name, "").fields.map((field) => field.key);
+      for (const key of hidden) {
+        assert.equal(keys.includes(key), false, `${name} ${key}`);
+      }
+    }
   });
 
   it("names the environment scope with the env id", () => {
@@ -255,31 +301,26 @@ describe("k8s overlay setup schemas", () => {
     assert.equal(envScopeLabel("build31/k8s1", "org"), "Default");
   });
 
-  it("exposes DNS servers on node foundation", () => {
-    const field = setupSchemaForVarsFile("atlas-node-foundation.yml", "").fields.find(
-      (item) => item.key === "dns_servers",
+  it("does not ask for a second DNS server list on node foundation", () => {
+    const keys = setupSchemaForVarsFile("atlas-node-foundation.yml", "").fields.map(
+      (item) => item.key,
     );
-    assert.equal(field?.label, "DNS servers");
-    assert.equal(field?.valueType, "string_list");
-    assert.equal(field?.itemValueType, "ipv4");
+    assert.equal(keys.includes("dns_servers"), false);
+    assert.equal(keys.includes("dns_server_ip"), false);
+  });
+
+  it("exposes the BIND address only on compute-provision", () => {
+    const field = setupSchemaForVarsFile("atlas-compute-provision.yml", "").fields.find(
+      (item) => item.key === "dns_server_ip",
+    );
+    assert.equal(field?.label, "DNS server IP");
+    assert.equal(field?.valueType, "ipv4");
     assert.equal(isMissingSetupValue("", field), true);
     assert.equal(isMissingSetupValue("192.168.1.218", field), false);
     assert.equal(
-      setupFieldInvalidMessage(field!, "192.168.1.218\nexample.com"),
+      setupFieldInvalidMessage(field!, "example.com"),
       "Invalid IPv4 address",
     );
-  });
-
-  it("exposes the BIND address on compute-provision and k8s-core", () => {
-    for (const file of ["atlas-compute-provision.yml", "atlas-k8s-core.yml"]) {
-      const field = setupSchemaForVarsFile(file, "").fields.find(
-        (item) => item.key === "dns_server_ip",
-      );
-      assert.equal(field?.label, "DNS server IP");
-      assert.equal(field?.valueType, "ipv4");
-      assert.equal(isMissingSetupValue("", field), true);
-      assert.equal(isMissingSetupValue("192.168.1.218", field), false);
-    }
   });
 
   it("exposes the package mirror domain on node foundation", () => {
@@ -314,23 +355,6 @@ describe("k8s overlay setup schemas", () => {
         assert.equal(keys.includes(key), false, `${name} ${key}`);
       }
     }
-  });
-
-  it("offers a registry mode list", () => {
-    const field = setupSchemaForVarsFile("atlas-k8s-core.yml", "").fields.find(
-      (item) => item.key === "use_internal_docker_registry",
-    );
-    assert.deepEqual(field?.options, ["none", "registry", "harbor"]);
-  });
-
-  it("offers a helm repo mode list", () => {
-    const field = setupSchemaForVarsFile("atlas-k8s-addons.yml", "").fields.find(
-      (item) => item.key === "use_internal_helm_repo",
-    );
-    assert.deepEqual(field?.options, ["none", "nginx", "nexus"]);
-    const keys = setupSchemaForVarsFile("atlas-k8s-addons.yml", "").fields.map((item) => item.key);
-    assert.equal(keys.includes("setup_helm_repo_nginx"), false);
-    assert.equal(keys.includes("setup_custom_nginx"), false);
   });
 
   it("exposes CA root URLs as a string list", () => {
@@ -395,10 +419,7 @@ describe("setup search across files", () => {
     );
     assert.deepEqual(
       hits.map((hit) => [hit.fileName, hit.field.key]),
-      [
-        ["atlas-compute-provision.yml", "dns_server_ip"],
-        ["atlas-k8s-core.yml", "dns_server_ip"],
-      ],
+      [["atlas-compute-provision.yml", "dns_server_ip"]],
     );
   });
 

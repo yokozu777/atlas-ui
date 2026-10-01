@@ -23,7 +23,13 @@ from proxmox_hypervisors import (  # noqa: E402
     update_hypervisor,
     vmid_status,
 )
-from proxmox_library_git import install_library, inspect_checkout  # noqa: E402
+from proxmox_library_git import (  # noqa: E402
+    ProxmoxLibraryGitError,
+    ensure_library,
+    install_library,
+    inspect_checkout,
+    latest_ref,
+)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -283,6 +289,101 @@ class LibraryGitTests(unittest.TestCase):
                 os.environ["ATLAS_UI_CONFIG"] = previous
             tmp.cleanup()
         self.assertFalse(payload["configured"])
+
+    def test_latest_ref_prefers_newest_tag(self):
+        self.assertEqual(latest_ref(["main", "0.0.9", "0.0.10"]), "0.0.10")
+        self.assertEqual(latest_ref(["main"]), "main")
+        with self.assertRaises(ProxmoxLibraryGitError):
+            latest_ref([])
+
+    def test_ensure_installs_latest_tag_when_empty(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        source = _init_library_repo(root / "source")
+        _tag_library_repo(source)
+        dest = root / "checkout"
+        dest.mkdir()
+        previous = os.environ.get("ATLAS_UI_CONFIG")
+        os.environ["ATLAS_UI_CONFIG"] = str(root / "config.json")
+        try:
+            got = ensure_library(url=str(source), dest=str(dest))
+        finally:
+            if previous is None:
+                os.environ.pop("ATLAS_UI_CONFIG", None)
+            else:
+                os.environ["ATLAS_UI_CONFIG"] = previous
+            tmp.cleanup()
+        self.assertTrue(got["ok"])
+        self.assertIn("library 0.0.2-test", got["version"])
+        self.assertTrue(got.get("fetchedAt"))
+
+    def test_ensure_skips_existing_checkout(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        source = _init_library_repo(root / "source")
+        _tag_library_repo(source)
+        dest = root / "checkout"
+        dest.mkdir()
+        previous = os.environ.get("ATLAS_UI_CONFIG")
+        os.environ["ATLAS_UI_CONFIG"] = str(root / "config.json")
+        try:
+            install_library(url=str(source), dest=str(dest), ref="0.0.1")
+            got = ensure_library(url=str(source), dest=str(dest))
+            text = (dest / "proxmox-library").read_text(encoding="utf-8")
+        finally:
+            if previous is None:
+                os.environ.pop("ATLAS_UI_CONFIG", None)
+            else:
+                os.environ["ATLAS_UI_CONFIG"] = previous
+            tmp.cleanup()
+        self.assertIn("library 0.0-test", got["version"])
+        self.assertNotIn("0.0.2-test", text)
+
+    def test_ensure_skips_occupied_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        dest = root / "occupied"
+        dest.mkdir()
+        (dest / "noise.txt").write_text("nope\n", encoding="utf-8")
+        previous = os.environ.get("ATLAS_UI_CONFIG")
+        os.environ["ATLAS_UI_CONFIG"] = str(root / "config.json")
+        try:
+            got = ensure_library(url=str(root / "missing.git"), dest=str(dest))
+            noise = (dest / "noise.txt").read_text(encoding="utf-8")
+        finally:
+            if previous is None:
+                os.environ.pop("ATLAS_UI_CONFIG", None)
+            else:
+                os.environ["ATLAS_UI_CONFIG"] = previous
+            tmp.cleanup()
+        self.assertFalse(got["configured"])
+        self.assertIn("not empty", got["error"] or "")
+        self.assertEqual(noise, "nope\n")
+
+
+def _library_script(version: str) -> str:
+    return f"#!/usr/bin/env python3\nprint({version!r})\n"
+
+
+def _init_library_repo(root: Path) -> Path:
+    root.mkdir(parents=True)
+    (root / "proxmoxlib").mkdir()
+    (root / "proxmox-library").write_text(_library_script("library 0.0-test"), encoding="utf-8")
+    (root / "proxmoxlib" / "__main__.py").write_text("print('no')\n", encoding="utf-8")
+    _git(root, "init")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "init")
+    _git(root, "branch", "-M", "main")
+    return root
+
+
+def _tag_library_repo(root: Path) -> Path:
+    _git(root, "tag", "0.0.1")
+    (root / "proxmox-library").write_text(_library_script("library 0.0.2-test"), encoding="utf-8")
+    _git(root, "add", "proxmox-library")
+    _git(root, "commit", "-m", "0.0.2")
+    _git(root, "tag", "0.0.2")
+    return root
 
 
 if __name__ == "__main__":

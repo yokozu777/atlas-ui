@@ -166,6 +166,18 @@ def _validate_ref(ref: Optional[str]) -> str:
     return chosen
 
 
+def _version_sort_key(name: str) -> list[tuple[int, int | str]]:
+    key: list[tuple[int, int | str]] = []
+    for part in re.split(r"(\d+)", name):
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part.lower()))
+    return key
+
+
 def parse_ls_remote(stdout: str) -> list[str]:
     has_main = False
     tags: list[str] = []
@@ -177,6 +189,16 @@ def parse_ls_remote(stdout: str) -> list[str]:
             tags.append(name[len("refs/tags/") :])
     tags.sort(key=lambda item: item, reverse=True)
     return [*(["main"] if has_main else []), *tags]
+
+
+def latest_ref(refs: list[str]) -> str:
+    tags = [item for item in refs if item != "main"]
+    if tags:
+        tags.sort(key=_version_sort_key, reverse=True)
+        return tags[0]
+    if "main" in refs:
+        return "main"
+    raise ProxmoxLibraryGitError(400, "no main branch or tags on that Git URL")
 
 
 def _checkout_ref(path: Path, ignore_host_key: bool) -> str:
@@ -357,3 +379,38 @@ def install_library(
     payload = inspect_checkout(url=git_url, dest=str(path))
     payload["ignoreHostKey"] = enabled
     return payload
+
+
+def ensure_library(
+    *,
+    url: Optional[str] = None,
+    dest: Optional[str] = None,
+    ignore_host_key: Any = None,
+) -> dict[str, Any]:
+    """Clone the newest tag (else main) when the checkout is missing or empty."""
+    payload = inspect_checkout(url=url, dest=dest)
+    dest_text = str(payload.get("dest") or "")
+    if payload.get("configured"):
+        print(f"proxmox-library: checkout ready at {dest_text}", flush=True)
+        return payload
+    if payload.get("error"):
+        print(f"proxmox-library: {payload['error']}", flush=True)
+        return payload
+    git_url = str(payload.get("gitUrl") or "")
+    print(f"proxmox-library: downloading {git_url} into {dest_text}", flush=True)
+    enabled = resolve_library_ignore_host_key(ignore_host_key)
+    listed = list_refs(url=url or git_url, ignore_host_key=enabled)
+    chosen = latest_ref(listed.get("refs") or [])
+    print(f"proxmox-library: using {chosen}", flush=True)
+    result = install_library(
+        url=listed.get("gitUrl"),
+        dest=payload.get("dest"),
+        ref=chosen,
+        ignore_host_key=enabled,
+    )
+    if result.get("ok"):
+        version = str(result.get("version") or "").splitlines()
+        print(f"proxmox-library: ready {version[0] if version else dest_text}", flush=True)
+    elif result.get("error"):
+        print(f"proxmox-library: {result['error']}", flush=True)
+    return result

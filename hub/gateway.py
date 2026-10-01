@@ -104,6 +104,7 @@ from proxmox_hypervisors import (  # noqa: E402
 )
 from proxmox_library_git import (  # noqa: E402
     ProxmoxLibraryGitError,
+    ensure_library,
     inspect_checkout as inspect_library_checkout,
     install_library,
     list_refs as list_library_refs,
@@ -377,6 +378,18 @@ async def _hub_lifespan(_app: FastAPI):
                 logger.warning("clusterctl bootstrap: %s", result["error"])
         except Exception:
             logger.exception("clusterctl bootstrap failed")
+        try:
+            result = ensure_library()
+            if result.get("ok"):
+                logger.info(
+                    "proxmox-library ready: %s (fetched %s)",
+                    result.get("version") or result.get("dest"),
+                    result.get("fetchedAt"),
+                )
+            elif result.get("error"):
+                logger.warning("proxmox-library bootstrap: %s", result["error"])
+        except Exception:
+            logger.exception("proxmox-library bootstrap failed")
     yield
 
 

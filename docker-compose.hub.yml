@@ -74,10 +74,10 @@ x-healthcheck: &hub_health
   interval: 5s
   timeout: 5s
   retries: 12
-  # Hub clones clusterctl before it listens. ls-remote and clone each may take
-  # GIT_TIMEOUT_SEC (180s). Stay "starting" until that finishes so Compose does
-  # not mark the hub unhealthy. Clone progress is printed to the hub logs.
-  start_period: 420s
+  # Hub clones clusterctl, then proxmox-library, before it listens.
+  # Each ls-remote and clone may take GIT_TIMEOUT_SEC (180s). Stay "starting"
+  # until both finish so Compose does not mark the hub unhealthy.
+  start_period: 840s
 
 services:
   hub:

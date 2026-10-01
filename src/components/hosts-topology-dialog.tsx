@@ -31,6 +31,7 @@ import { toast } from "sonner";
 import { ConfirmAction } from "@/components/confirm-action";
 import { ChangesReviewDialog } from "@/components/changes-review-dialog";
 import { FileFacts, type FileFactsMeta } from "@/components/file-facts";
+import { SuggestInput } from "@/components/suggest-input";
 import { DistroIcon } from "@/components/distro-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -61,6 +62,7 @@ import {
   type HostTopology,
 } from "@/lib/atlas-hosts";
 import { projectHref } from "@/lib/project-href";
+import { fetchProxmoxCatalog, fetchProxmoxVmid, type ProxmoxStorage } from "@/lib/proxmox";
 import { useCan } from "@/lib/authz";
 import { cn } from "@/lib/utils";
 
@@ -210,6 +212,8 @@ export function HostsTopologyDialog({
   const [reviewOpen, setReviewOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [fileMeta, setFileMeta] = useState<FileFactsMeta | undefined>();
+  const [storages, setStorages] = useState<ProxmoxStorage[]>([]);
+  const [vmidReady, setVmidReady] = useState(false);
 
   const changeGroups = useMemo(
     () => hostTopologyChanges(parseGroups(baseline), groups),
@@ -259,6 +263,26 @@ export function HostsTopologyDialog({
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectId, clusterId]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void fetchProxmoxCatalog({ projectId, clusterId })
+      .then((data) => {
+        if (cancelled) return;
+        const ready = Boolean(data.matched && !data.error);
+        setVmidReady(ready);
+        setStorages(ready ? data.storages : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setVmidReady(false);
+        setStorages([]);
       });
     return () => {
       cancelled = true;
@@ -410,6 +434,10 @@ export function HostsTopologyDialog({
                     group={selected}
                     query={query}
                     cloneOptions={cloneOptions}
+                    storages={storages}
+                    vmidReady={vmidReady}
+                    projectId={projectId}
+                    clusterId={clusterId}
                     onCount={(count) =>
                       setGroups(
                         setGroupCount(groups, selected.id, count, fallbackClone),
@@ -500,6 +528,10 @@ function GroupEditor({
   group,
   query,
   cloneOptions,
+  storages,
+  vmidReady,
+  projectId,
+  clusterId,
   onCount,
   onHost,
   onDisk,
@@ -508,6 +540,10 @@ function GroupEditor({
   group: HostGroup;
   query: string;
   cloneOptions: string[];
+  storages: ProxmoxStorage[];
+  vmidReady: boolean;
+  projectId: string;
+  clusterId: string;
   onCount: (count: number) => void;
   onHost: (index: number, patch: Partial<HostTopology>) => void;
   onDisk: (
@@ -583,6 +619,10 @@ function GroupEditor({
           host={host}
           query={query}
           cloneOptions={cloneList(cloneOptions, host.clone)}
+          storages={storages}
+          vmidReady={vmidReady}
+          projectId={projectId}
+          clusterId={clusterId}
           onChange={(patch) => onHost(index, patch)}
           onDiskChange={(diskIndex, patch) =>
             onDisk(index, diskIndex, patch)
@@ -668,6 +708,10 @@ function HostCard({
   host,
   query,
   cloneOptions,
+  storages,
+  vmidReady,
+  projectId,
+  clusterId,
   onChange,
   onDiskChange,
   onRemove,
@@ -675,12 +719,17 @@ function HostCard({
   host: HostTopology;
   query: string;
   cloneOptions: string[];
+  storages: ProxmoxStorage[];
+  vmidReady: boolean;
+  projectId: string;
+  clusterId: string;
   onChange: (patch: Partial<HostTopology>) => void;
   onDiskChange: (index: number, patch: Partial<HostDisk>) => void;
   onRemove: () => void;
 }) {
   const cloneHit = valueHits(host.clone, query);
   const numaHit = host.numa && valueHits("numa", query);
+  const vmidMessage = useVmidMessage(vmidReady, projectId, clusterId, host.vmid);
   return (
     <article className="space-y-3 rounded-xl bg-card p-4">
       <div className="flex items-center justify-between gap-2">
@@ -728,6 +777,9 @@ function HostCard({
             value={host.vmid}
             onChange={(event) => onChange({ vmid: event.target.value })}
           />
+          {vmidMessage ? (
+            <p className="text-xs text-red-500">{vmidMessage}</p>
+          ) : null}
         </Field>
         <Field icon={<Layers />} label="Sockets">
           <MatchInput
@@ -892,15 +944,33 @@ function HostCard({
               <FieldIcon>
                 <Database />
               </FieldIcon>
-              <MatchInput
-                className="h-8 min-w-0 flex-1 font-mono"
-                placeholder="Storage"
-                query={query}
-                value={disk.storage}
-                onChange={(event) =>
-                  onDiskChange(diskIndex, { storage: event.target.value })
-                }
-              />
+              {storages.length > 0 ? (
+                <div className="min-w-0 flex-1">
+                  <SuggestInput
+                    value={disk.storage}
+                    options={storages.map((row) => ({
+                      value: row.id,
+                      label: row.type ? `${row.id} (${row.type})` : row.id,
+                    }))}
+                    highlight={valueHits(disk.storage, query)}
+                    ariaLabel="Storage"
+                    placeholder="Storage"
+                    onChange={(next) =>
+                      onDiskChange(diskIndex, { storage: next })
+                    }
+                  />
+                </div>
+              ) : (
+                <MatchInput
+                  className="h-8 min-w-0 flex-1 font-mono"
+                  placeholder="Storage"
+                  query={query}
+                  value={disk.storage}
+                  onChange={(event) =>
+                    onDiskChange(diskIndex, { storage: event.target.value })
+                  }
+                />
+              )}
             </span>
             <Button
               type="button"
@@ -923,6 +993,42 @@ function HostCard({
       </div>
     </article>
   );
+}
+
+function useVmidMessage(
+  enabled: boolean,
+  projectId: string,
+  clusterId: string,
+  vmid: string,
+): string | null {
+  const [message, setMessage] = useState<string | null>(null);
+  const trimmed = vmid.trim();
+  const numeric = /^\d+$/.test(trimmed);
+  useEffect(() => {
+    if (!enabled || !numeric) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void fetchProxmoxVmid({ projectId, clusterId, vmid: trimmed })
+        .then((result) => {
+          if (cancelled) return;
+          if (!result.checked) {
+            setMessage(result.error);
+            return;
+          }
+          setMessage(result.free ? null : `VMID ${trimmed} is already used`);
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) {
+            setMessage(err instanceof Error ? err.message : String(err));
+          }
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [clusterId, enabled, numeric, projectId, trimmed]);
+  return enabled && numeric ? message : null;
 }
 
 function Field({

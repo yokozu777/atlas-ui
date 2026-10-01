@@ -8,6 +8,7 @@ import {
 } from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import Link from "next/link";
+import { useContext } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -22,6 +23,7 @@ import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
 import { FileFacts, type FileFactsMeta } from "@/components/file-facts";
+import { SuggestInput, type SuggestOption } from "@/components/suggest-input";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -54,6 +56,12 @@ import {
   withClusterId,
 } from "@/components/hosts-groups/helpers";
 import { projectHref } from "@/lib/project-href";
+import {
+  PROXMOX_SETUP_KEYS,
+  ProxmoxAssistContext,
+  useProxmoxCatalog,
+} from "@/hooks/use-proxmox-assist";
+import { createProxmoxToken } from "@/lib/proxmox";
 import type {
   PlaybookSetupField,
   PveTemplatesMap,
@@ -306,6 +314,23 @@ export function PlaybookSetupDialog({
       }),
     [fileName, pveFactory, file.pveFactory],
   );
+  const proxmoxEnabled = schema.fields.some((field) =>
+    PROXMOX_SETUP_KEYS.has(field.key),
+  );
+  const hostText =
+    typeof values.provision_pve_host === "string" ? values.provision_pve_host : "";
+  const nodeText =
+    typeof values.provision_proxmox_target_node === "string"
+      ? values.provision_proxmox_target_node
+      : "";
+  const proxmox = useProxmoxCatalog({
+    enabled: open && proxmoxEnabled,
+    projectId,
+    clusterId,
+    host: hostText,
+    node: nodeText,
+  });
+  const [tokenBusy, setTokenBusy] = useState(false);
 
   const envLayer = hasEnvLayer || Boolean(file.hasEnvLayer);
   const progress = setupProgressFromValues(schema, values);
@@ -855,7 +880,60 @@ export function PlaybookSetupDialog({
     })),
   }));
 
+  function onHostValue(value: string, picked: boolean) {
+    const ssh = picked
+      ? proxmox.hypervisors.find((row) => row.host === value)?.sshUser
+      : undefined;
+    setValues((prev) => ({
+      ...prev,
+      provision_pve_host: value,
+      ...(ssh ? { provision_pve_user: ssh } : {}),
+    }));
+  }
+
+  async function onCreateToken() {
+    setTokenBusy(true);
+    try {
+      const password =
+        typeof values.provision_pve_ssh_password === "string"
+          ? values.provision_pve_ssh_password
+          : "";
+      const created = await createProxmoxToken({
+        projectId,
+        clusterId,
+        host: hostText,
+        password,
+      });
+      setValues((prev) => ({
+        ...prev,
+        provision_proxmox_token_id: created.tokenId,
+        provision_proxmox_token_secret: created.secret,
+      }));
+      toast.success("Token created");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
+  const proxmoxAssist = {
+    enabled: proxmoxEnabled,
+    matched: proxmox.catalog.matched && !proxmox.catalog.error,
+    hasHostField: schema.fields.some((field) => field.key === "provision_pve_host"),
+    hypervisors: proxmox.hypervisors,
+    nodes: proxmox.catalog.nodes,
+    storages: proxmox.catalog.storages,
+    bridges: proxmox.catalog.bridges,
+    groups: proxmox.catalog.inventoryGroups,
+    error: proxmox.catalog.error,
+    tokenBusy,
+    onHostValue,
+    onCreateToken,
+  };
+
   return (
+    <ProxmoxAssistContext.Provider value={proxmoxAssist}>
     <>
       <Dialog
         open={open}
@@ -1332,6 +1410,7 @@ export function PlaybookSetupDialog({
         onConfirm={confirmDiscard}
       />
     </>
+    </ProxmoxAssistContext.Provider>
   );
 }
 
@@ -1779,6 +1858,51 @@ function ScopeToggle({
   );
 }
 
+function proxmoxChoices(
+  key: string,
+  assist: {
+    enabled: boolean;
+    matched: boolean;
+    hypervisors: { name: string; host: string }[];
+    nodes: string[];
+    storages: { id: string; type: string }[];
+    bridges: string[];
+    groups: string[];
+  } | null,
+): SuggestOption[] | null {
+  if (!assist?.enabled) return null;
+  if (key === "provision_pve_host") {
+    const seen = new Set<string>();
+    const options: SuggestOption[] = [];
+    for (const row of assist.hypervisors) {
+      if (!row.host || seen.has(row.host)) continue;
+      seen.add(row.host);
+      options.push({
+        value: row.host,
+        label: row.name && row.name !== row.host ? `${row.name} — ${row.host}` : row.host,
+      });
+    }
+    return options;
+  }
+  if (!assist.matched) return null;
+  if (key === "provision_proxmox_target_node" || key === "provision_pve_inventory_name") {
+    return assist.nodes.map((name) => ({ value: name, label: name }));
+  }
+  if (key === "provision_pve_inventory_group") {
+    return assist.groups.map((name) => ({ value: name, label: name }));
+  }
+  if (key === "provision_vm_cloudinit_storage") {
+    return assist.storages.map((row) => ({
+      value: row.id,
+      label: row.type ? `${row.id} (${row.type})` : row.id,
+    }));
+  }
+  if (key === "provision_vm_network_bridge") {
+    return assist.bridges.map((name) => ({ value: name, label: name }));
+  }
+  return null;
+}
+
 function SettingRow({
   field,
   value,
@@ -1822,6 +1946,13 @@ function SettingRow({
   const invalid = setupFieldInvalidMessage(field, value);
   const type = setupFieldValueType(field);
   const busy = Boolean(layerBusy);
+  const assist = useContext(ProxmoxAssistContext);
+  const textValue = typeof value === "string" ? value : "";
+  const proxmoxOptions = proxmoxChoices(field.key, assist);
+  const showProxmoxError =
+    Boolean(assist?.error) &&
+    (field.key === "provision_pve_host" ||
+      (field.key === "provision_proxmox_token_id" && !assist?.hasHostField));
 
   return (
     <div
@@ -1853,6 +1984,9 @@ function SettingRow({
         ) : null}
         {invalid ? (
           <p className="mt-0.5 text-xs text-red-500">{invalid}</p>
+        ) : null}
+        {showProxmoxError ? (
+          <p className="mt-0.5 text-xs text-red-500">{assist?.error}</p>
         ) : null}
       </div>
 
@@ -1923,12 +2057,32 @@ function SettingRow({
               {revealed ? <EyeOff /> : <Eye />}
             </Button>
           </div>
+        ) : proxmoxOptions ? (
+          <SuggestInput
+            id={`setup-${field.key}`}
+            value={textValue}
+            options={proxmoxOptions}
+            invalid={Boolean(invalid)}
+            ariaLabel={field.label || field.key}
+            onChange={(next) => {
+              if (field.key === "provision_pve_host" && assist) {
+                assist.onHostValue(next, false);
+                return;
+              }
+              onChange(next);
+            }}
+            onPick={(next) => {
+              if (field.key === "provision_pve_host" && assist) {
+                assist.onHostValue(next, true);
+              }
+            }}
+          />
         ) : (
           <Input
             id={`setup-${field.key}`}
             type="text"
             className="h-8 border-foreground/20 bg-background font-mono text-[13px]"
-            value={typeof value === "string" ? value : ""}
+            value={textValue}
             autoComplete="off"
             aria-invalid={Boolean(invalid)}
             onChange={(event) => onChange(event.target.value)}
@@ -1936,6 +2090,17 @@ function SettingRow({
         )}
         </div>
         <div className="flex shrink-0 items-center gap-0.5 pt-0.5">
+          {field.key === "provision_proxmox_token_id" && assist?.enabled ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={assist.tokenBusy}
+              onClick={() => void assist.onCreateToken()}
+            >
+              {assist.tokenBusy ? "Creating…" : "Create token"}
+            </Button>
+          ) : null}
           {type === "password" ? (
             <>
               <DropdownMenu>

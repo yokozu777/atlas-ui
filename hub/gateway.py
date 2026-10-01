@@ -89,6 +89,24 @@ from clusterctl_git import (  # noqa: E402
     list_clusterctl_refs,
     pull_clusterctl,
 )
+from proxmox_hypervisors import (  # noqa: E402
+    ProxmoxLibraryError,
+    catalog as proxmox_catalog,
+    create_api_token,
+    create_hypervisor,
+    delete_hypervisor,
+    list_hypervisors,
+    test_hypervisor,
+    update_hypervisor,
+    vmid_status,
+)
+from proxmox_library_git import (  # noqa: E402
+    ProxmoxLibraryGitError,
+    inspect_checkout as inspect_library_checkout,
+    install_library,
+    list_refs as list_library_refs,
+    probe_checkout as probe_library_checkout,
+)
 from auth_avatar import (  # noqa: E402
     AvatarError,
     delete_avatar,
@@ -611,7 +629,8 @@ def _domain_error(
     | AtlasClusterFsError
     | AtlasClustersError
     | AtlasHostsError
-    | AtlasOperatorSshError,
+    | AtlasOperatorSshError
+    | ProxmoxLibraryError,
 ) -> JSONResponse:
     payload: dict[str, Any] = {"success": False, "error": exc.message}
     code = getattr(exc, "error_code", None)
@@ -3883,6 +3902,184 @@ def global_secrets_delete(
     try:
         return delete_global_secret(DATA_DIR, secret_id)
     except GlobalSecretsHttpError as exc:
+        return _domain_error(exc)
+
+
+def _library_git_error(exc: ProxmoxLibraryGitError) -> JSONResponse:
+    return JSONResponse({"success": False, "error": exc.message}, status_code=exc.status_code)
+
+
+@app.get("/api/atlas/library")
+def atlas_library_get(
+    authorization: Optional[str] = Header(None),
+    url: Optional[str] = Query(None),
+    dest: Optional[str] = Query(None),
+):
+    _require_perm(authorization, "settings.read")
+    return inspect_library_checkout(url=url, dest=dest)
+
+
+@app.get("/api/atlas/library/refs")
+def atlas_library_refs(
+    authorization: Optional[str] = Header(None),
+    url: Optional[str] = Query(None),
+    ignoreHostKey: Optional[str] = Query(None),
+):
+    _require_perm(authorization, "settings.read")
+    try:
+        return list_library_refs(url=url, ignore_host_key=ignoreHostKey)
+    except ProxmoxLibraryGitError as exc:
+        return _library_git_error(exc)
+
+
+@app.post("/api/atlas/library/options")
+def atlas_library_options(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    if "ignoreHostKey" not in body:
+        return JSONResponse(
+            {"success": False, "error": "ignoreHostKey is required"},
+            status_code=400,
+        )
+    from proxmox_library_config import resolve_library_ignore_host_key
+
+    enabled = resolve_library_ignore_host_key(body.get("ignoreHostKey"))
+    return {"success": True, "ignoreHostKey": enabled}
+
+
+@app.post("/api/atlas/library/install")
+def atlas_library_install(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    try:
+        return install_library(
+            url=body.get("url"),
+            dest=body.get("dest"),
+            ref=body.get("ref"),
+            ignore_host_key=body.get("ignoreHostKey") if "ignoreHostKey" in body else None,
+        )
+    except ProxmoxLibraryGitError as exc:
+        return _library_git_error(exc)
+
+
+@app.post("/api/atlas/library/probe")
+def atlas_library_probe(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    try:
+        return probe_library_checkout(url=body.get("url"), dest=body.get("dest") or body.get("path"))
+    except ProxmoxLibraryGitError as exc:
+        return _library_git_error(exc)
+
+
+@app.get("/api/hypervisors")
+def hypervisors_list(authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "settings.read", "inventory.read")
+    return list_hypervisors(DATA_DIR)
+
+
+@app.post("/api/hypervisors")
+def hypervisors_create(
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    try:
+        return JSONResponse(create_hypervisor(DATA_DIR, body or {}), status_code=201)
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
+@app.put("/api/hypervisors/{hypervisor_id}")
+def hypervisors_update(
+    hypervisor_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "settings.update")
+    try:
+        return update_hypervisor(DATA_DIR, hypervisor_id, body or {})
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
+@app.delete("/api/hypervisors/{hypervisor_id}")
+def hypervisors_delete(hypervisor_id: str, authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "settings.update")
+    try:
+        return delete_hypervisor(DATA_DIR, hypervisor_id)
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
+@app.post("/api/hypervisors/{hypervisor_id}/test")
+def hypervisors_test(hypervisor_id: str, authorization: Optional[str] = Header(None)):
+    _require_perm(authorization, "settings.update")
+    try:
+        return test_hypervisor(DATA_DIR, hypervisor_id)
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/projects/{project_id}/proxmox/catalog")
+def proxmox_catalog_get(
+    project_id: str,
+    cluster_id: Optional[str] = Query(None),
+    host: str = Query(""),
+    node: str = Query(""),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.read", "settings.read")
+    try:
+        return proxmox_catalog(
+            DATA_DIR,
+            project_id,
+            cluster_id,
+            host=host,
+            node=node,
+        )
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
+@app.get("/api/projects/{project_id}/proxmox/vmid")
+def proxmox_vmid_get(
+    project_id: str,
+    vmid: int = Query(...),
+    cluster_id: Optional[str] = Query(None),
+    host: str = Query(""),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.read", "settings.read")
+    try:
+        return vmid_status(DATA_DIR, project_id, cluster_id, vmid, host=host)
+    except ProxmoxLibraryError as exc:
+        return _domain_error(exc)
+
+
+@app.post("/api/projects/{project_id}/proxmox/token")
+def proxmox_token_create(
+    project_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.update", "settings.update")
+    try:
+        return create_api_token(
+            DATA_DIR,
+            project_id,
+            body.get("cluster_id"),
+            host=str(body.get("host") or ""),
+            token_id=str(body.get("tokenId") or body.get("token_id") or ""),
+            password=str(body.get("password") or ""),
+        )
+    except ProxmoxLibraryError as exc:
         return _domain_error(exc)
 
 

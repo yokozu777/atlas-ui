@@ -249,3 +249,26 @@
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
+
+@keyframes atlas-map-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.atlas-map-marquee {
+  animation: atlas-map-marquee 28s linear infinite;
+}
+
+.atlas-map-marquee-hover:hover .atlas-map-marquee {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atlas-map-marquee {
+    animation: none;
+  }
+}

@@ -6,6 +6,7 @@ import { parseLogText } from "./execution-log/ingest.ts";
 import {
   atlasRunProgress,
   atlasRunProgressFromText,
+  formatPackMapDuration,
   logPhaseSlices,
   matchPhaseIndex,
   packMapFocusFromProgress,
@@ -13,6 +14,8 @@ import {
   packMapRoleMarks,
   packMapRoleProgress,
   packMapRoleProgressByPhase,
+  logRoleFocusIndex,
+  packMapRunTiming,
   phaseStepLabel,
 } from "./atlas-run-progress.ts";
 
@@ -272,5 +275,90 @@ describe("atlasRunProgress", () => {
     assert.deepEqual(packMapPhaseAliases(
       "--- phase atlas-compute-provision/templates (playbooks/build_templates.yaml) ---\n",
     ), ["templates"]);
+  });
+});
+
+describe("packMapRunTiming", () => {
+  const templates = [
+    "--- phase atlas-compute-provision/templates (playbooks/build_templates.yaml) ---",
+    "TASK [00_check_pve_templates : Check Proxmox template] ***",
+    "Wednesday 30 September 2026  20:32:24 +0000 (0:00:00.050)       0:00:00.100 ***",
+    "TASK [04_upload_images : Upload template images to Proxmox upload directory] ***",
+    "Wednesday 30 September 2026  20:32:27 +0000 (0:00:02.641)       0:00:25.095 ***",
+    "Wednesday 30 September 2026  20:32:27 +0000 (0:01:00.000)       0:01:25.095 ***",
+  ].join("\n");
+
+  it("sums task deltas onto the previous role and keeps the first stamp", () => {
+    const run = packMapRunTiming(templates);
+    const timing = run.byPhase.templates;
+    assert.ok(timing);
+    assert.equal(timing.byTag["00_check_pve_templates"], 2641);
+    assert.equal(timing.byTag["04_upload_images"], undefined);
+    assert.equal(timing.totalMs, 25095);
+    assert.equal(
+      timing.currentTask,
+      "04_upload_images : Upload template images to Proxmox upload directory",
+    );
+    assert.equal(timing.currentRole, "04_upload_images");
+    assert.equal(
+      timing.stampMs,
+      Date.parse("30 September 2026 20:32:27 +00:00"),
+    );
+    assert.equal(run.byPhase["compute-provision"], timing);
+  });
+
+  it("adds every delta for the same role and ignores a repeated banner", () => {
+    const timing = packMapRunTiming(
+      [
+        "TASK [00_check : one] ***",
+        "Wednesday 30 September 2026  20:32:24 +0000 (0:00:01.000)       0:00:01.000 ***",
+        "TASK [00_check : one] ***",
+        "TASK [00_check : two] ***",
+        "Wednesday 30 September 2026  20:32:27 +0000 (0:00:02.500)       0:00:03.500 ***",
+        "TASK [01_next : three] ***",
+        "Wednesday 30 September 2026  20:32:31 +0000 (0:00:04.000)       0:00:07.500 ***",
+      ].join("\n"),
+    ).overall;
+    assert.equal(timing.byTag["00_check"], 6500);
+    assert.equal(timing.byTag["01_next"], undefined);
+    assert.equal(timing.totalMs, 7500);
+    assert.equal(timing.currentRole, "01_next");
+  });
+
+  it("keeps each phase slice on its own clock", () => {
+    const timing = packMapRunTiming(
+      [
+        templates,
+        "--- phase atlas-compute-provision/guests (playbooks/build_guests.yaml) ---",
+        "TASK [10_clone : Clone guests] ***",
+        "Wednesday 30 September 2026  20:40:00 +0000 (0:00:03.000)       0:00:03.000 ***",
+      ].join("\n"),
+    );
+    assert.equal(timing.byPhase.templates?.totalMs, 25095);
+    assert.equal(timing.byPhase.templates?.byTag["10_clone"], undefined);
+    assert.equal(timing.byPhase.guests?.totalMs, 3000);
+    assert.equal(timing.byPhase.guests?.byTag["04_upload_images"], undefined);
+    assert.equal(timing.byPhase.guests?.currentRole, "10_clone");
+  });
+
+  it("formats short and long durations", () => {
+    assert.equal(formatPackMapDuration(2641), "2.6s");
+    assert.equal(formatPackMapDuration(25095), "25s");
+    assert.equal(formatPackMapDuration(72000), "1m 12s");
+    assert.equal(formatPackMapDuration(3_720_000), "1h 02m");
+  });
+});
+
+describe("logRoleFocusIndex", () => {
+  it("lands on the failure inside the clicked role", () => {
+    const lines = [
+      { plain: "TASK [00_ensure_workspace : Ensure workspace] ***", kind: "task" },
+      { plain: "ok: [pve]", kind: "ok" },
+      { plain: "TASK [00_check_pve_templates : Check Proxmox template] ***", kind: "task" },
+      { plain: "fatal: [pve]: FAILED! => missing template", kind: "fatal", severity: "error" },
+      { plain: "TASK [01_prepare_system : Prepare] ***", kind: "task" },
+    ];
+    assert.equal(logRoleFocusIndex(lines, "00_check_pve_templates"), 3);
+    assert.equal(logRoleFocusIndex(lines, "01_prepare_system"), 4);
   });
 });

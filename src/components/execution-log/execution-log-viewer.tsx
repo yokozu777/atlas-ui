@@ -16,6 +16,7 @@ import {
   logCountsFor,
   logErrorIndexes,
   logPhaseSlices,
+  logRoleFocusIndex,
   phasesFromRunParams,
 } from "@/lib/atlas-run-progress";
 import { joinPlainLines } from "@/lib/execution-log";
@@ -63,6 +64,7 @@ export function ExecutionLogViewer({
   const status = log.status || record.record?.status || null;
   const failed = status === "FAILED";
   const phaseFromUrl = useSearchParams()?.get("phase") ?? null;
+  const taskFromUrl = useSearchParams()?.get("task") ?? null;
   const [logOpen, setLogOpen] = useState<boolean | null>(null);
   const [userPhase, setUserPhase] = useState<string | null>(null);
   const slices = useMemo(() => logPhaseSlices(log.lines), [log.lines]);
@@ -82,16 +84,22 @@ export function ExecutionLogViewer({
   const failedLabel = failedPhase ? failedPhase.id.slice("phase:".length) : null;
 
   const pickedPhase = userPhase ?? phaseFromUrl ?? (failed ? failedLabel : null);
-  const showLog = logOpen ?? (failed || Boolean(phaseFromUrl));
+  const showLog = logOpen ?? (failed || Boolean(phaseFromUrl) || Boolean(taskFromUrl));
 
   const visibleLines = useMemo(() => {
     if (!pickedPhase) {
       return log.lines;
     }
+    const wanted = pickedPhase.toLowerCase();
     return (
-      slices.find((slice) => slice.label === pickedPhase)?.lines ?? log.lines
+      slices.find((slice) => slice.label.toLowerCase() === wanted)?.lines ??
+      log.lines
     );
   }, [log.lines, pickedPhase, slices]);
+  const focusIndex = useMemo(
+    () => (taskFromUrl ? logRoleFocusIndex(visibleLines, taskFromUrl) : -1),
+    [taskFromUrl, visibleLines],
+  );
   const fullBody = joinPlainLines(log.lines);
   const body = joinPlainLines(visibleLines);
 
@@ -146,10 +154,12 @@ export function ExecutionLogViewer({
       </Button>
       {showLog ? (
         <LogPane
-          key={pickedPhase ?? "all"}
+          key={`${pickedPhase ?? "all"}:${taskFromUrl ?? ""}`}
           lines={visibleLines}
           counts={logCountsFor(visibleLines)}
           errorIndexes={logErrorIndexes(visibleLines)}
+          initialQuery={taskFromUrl ?? ""}
+          focusIndex={focusIndex >= 0 ? focusIndex : null}
           running={log.running}
           ready={log.ready}
           fill

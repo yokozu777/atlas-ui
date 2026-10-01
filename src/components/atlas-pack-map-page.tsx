@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Map as MapIcon, RefreshCw } from "lucide-react";
 
 import { useAtlasClusterSelection } from "@/components/atlas-cluster-selection";
@@ -12,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAtlasMapLiveFocus } from "@/hooks/use-atlas-map-live-focus";
 import { useAtlasPackMap } from "@/hooks/use-atlas-pack-map";
+import { executionLogHref } from "@/lib/project-href";
 
 function LegendChip({
   label,
@@ -36,7 +38,15 @@ export function AtlasPackMapPage({ projectId }: { projectId: string }) {
     clusterId,
   );
   const live = useAtlasMapLiveFocus(projectId, clusterId);
+  const router = useRouter();
   const [refreshing, setRefreshing] = useState(false);
+  const openRoleLog = useCallback(
+    (phase: string, role: string) => {
+      if (!live.executionId) return;
+      router.push(executionLogHref(projectId, live.executionId, phase, role));
+    },
+    [live.executionId, projectId, router],
+  );
 
   async function refresh() {
     setRefreshing(true);
@@ -145,6 +155,9 @@ export function AtlasPackMapPage({ projectId }: { projectId: string }) {
             activeState={live.state}
             activeRoles={live.roles}
             rolesByPhase={live.rolesByPhase}
+            timing={live.timing}
+            runStatus={live.status}
+            onRoleClick={live.executionId ? openRoleLog : undefined}
           />
         ) : (
           <EmptyState

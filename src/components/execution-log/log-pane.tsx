@@ -56,6 +56,8 @@ export function LogPane({
   ready = true,
   error = null,
   onRetry,
+  initialQuery = "",
+  focusIndex = null,
   downloadName = "log.txt",
   compact = false,
   fill = false,
@@ -72,6 +74,8 @@ export function LogPane({
   ready?: boolean;
   error?: string | null;
   onRetry?: () => void;
+  initialQuery?: string;
+  focusIndex?: number | null;
   downloadName?: string;
   compact?: boolean;
   fill?: boolean;
@@ -82,7 +86,7 @@ export function LogPane({
   header?: (actions: LogPaneActions) => ReactNode;
 }) {
   const [filter, setFilter] = useState<LogFilter>("all");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [atBottom, setAtBottom] = useState(true);
   const follow = atBottom;
@@ -101,6 +105,7 @@ export function LogPane({
   const queryKey = useRef("");
   const matchesRef = useRef<number[]>([]);
   const [matches, setMatches] = useState<number[]>([]);
+  const didFocus = useRef(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 200);
@@ -182,6 +187,18 @@ export function LogPane({
     },
     [view],
   );
+
+  useEffect(() => {
+    if (didFocus.current || focusIndex == null || focusIndex < 0) return;
+    const line = lines[focusIndex];
+    if (!line) return;
+    const handle = window.setTimeout(() => {
+      didFocus.current = true;
+      setAtBottom(false);
+      scrollToLineId(line.id);
+    }, 80);
+    return () => window.clearTimeout(handle);
+  }, [focusIndex, lines, scrollToLineId]);
 
   useEffect(() => {
     if (pendingScrollId.current == null) {

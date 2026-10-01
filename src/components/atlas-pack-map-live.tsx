@@ -15,6 +15,7 @@ import {
   packMapPhaseAliases,
   packMapRoleProgress,
   packMapRoleProgressByPhase,
+  packMapRunTiming,
 } from "@/lib/atlas-run-progress";
 import { projectHref, executionLogHref } from "@/lib/project-href";
 import { cn } from "@/lib/utils";
@@ -48,6 +49,13 @@ export function AtlasPackMapLive({
     },
     [executionId, projectId, router],
   );
+  const openRoleLog = useCallback(
+    (phase: string, role: string) => {
+      if (!executionId) return;
+      router.push(executionLogHref(projectId, executionId, phase, role));
+    },
+    [executionId, projectId, router],
+  );
   const loggedPhases = useMemo(() => packMapPhaseAliases(text), [text]);
   const mapPhases = phases && phases.length > 0 ? phases : loggedPhases;
   const progress = useMemo(
@@ -71,6 +79,7 @@ export function AtlasPackMapLive({
     () => packMapRoleProgressByPhase(text, status ?? null),
     [status, text],
   );
+  const timing = useMemo(() => (text ? packMapRunTiming(text) : null), [text]);
   const ready =
     graph &&
     graph.nodes.some((node) => node.kind === "pack" || node.kind === "phase");
@@ -109,7 +118,10 @@ export function AtlasPackMapLive({
             activeState={focus.state}
             activeRoles={roles}
             rolesByPhase={rolesByPhase}
+            timing={timing}
+            runStatus={status}
             onPhaseClick={executionId ? openPhaseLog : undefined}
+            onRoleClick={executionId ? openRoleLog : undefined}
           />
         ) : (
           <p className="p-4 text-sm text-muted-foreground">No packs declared.</p>

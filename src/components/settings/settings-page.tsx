@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Folder, Layers, Settings as SettingsIcon } from "lucide-react";
+import { Folder, Layers, Library, Settings as SettingsIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { BackupSection } from "@/components/settings/backup-section";
@@ -10,6 +10,7 @@ import { DebugLoggingSection } from "@/components/settings/debug-logging-section
 import { EncryptionKeySection } from "@/components/settings/encryption-key-section";
 import { ExecutionHistorySection } from "@/components/settings/execution-history-section";
 import { LocalClusterctlSection } from "@/components/settings/local-clusterctl-section";
+import { LocalLibrarySection } from "@/components/settings/local-library-section";
 import { ClusterctlSshKeySection } from "@/components/settings/clusterctl-ssh-key-section";
 import { WorkersTab } from "@/components/settings/workers-tab";
 import type { HubSettings, HubStats, SettingsResponse } from "@/components/settings/types";
@@ -20,10 +21,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { stargateJson } from "@/lib/stargate";
 import { useAuthz } from "@/lib/authz";
 
-type SettingsTab = "general" | "workers" | "atlas-clusterctl";
+type SettingsTab = "general" | "workers" | "atlas-clusterctl" | "library";
 
 function parseTab(value: string | null): SettingsTab {
-  if (value === "workers" || value === "atlas-clusterctl") {
+  if (value === "workers" || value === "atlas-clusterctl" || value === "library") {
     return value;
   }
   return "general";
@@ -137,6 +138,10 @@ function SettingsScreenInner({
             <Folder />
             atlas-clusterctl
           </TabsTrigger>
+          <TabsTrigger value="library">
+            <Library />
+            library
+          </TabsTrigger>
           <TabsTrigger value="workers">
             <Layers />
             Workers
@@ -171,6 +176,11 @@ function SettingsScreenInner({
             defaultGitUrl={defaultGitUrl}
           />
           <ClusterctlSshKeySection />
+          </div>
+        </TabsContent>
+        <TabsContent value="library" className="mt-6 space-y-6">
+          <div className={can("settings.update") ? undefined : "pointer-events-none opacity-70"}>
+            <LocalLibrarySection />
           </div>
         </TabsContent>
         <TabsContent value="workers" className="mt-6">

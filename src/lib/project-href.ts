@@ -9,16 +9,19 @@ export function executionLogHref(
   projectId: string,
   executionId: string,
   phase?: string | null,
+  task?: string | null,
 ): string {
   const base = projectHref(
     projectId,
     `/executions/${encodeURIComponent(executionId)}`,
   );
-  const name = (phase || "").trim();
-  if (!name) {
-    return base;
-  }
-  return `${base}?phase=${encodeURIComponent(name)}`;
+  const params = new URLSearchParams();
+  const phaseName = (phase || "").trim();
+  const taskName = (task || "").trim();
+  if (phaseName) params.set("phase", phaseName);
+  if (taskName) params.set("task", taskName);
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
 }
 
 export const LAST_PROJECT_STORAGE_KEY = "atlas-ui:last-project-id";

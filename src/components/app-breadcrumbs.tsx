@@ -100,6 +100,8 @@ export function AppBreadcrumbs({ kind }: { kind: ProjectKind | null }) {
           ? "Setup"
           : pathname === "/settings"
             ? "Console"
+            : pathname === "/hypervisors"
+              ? "Hypervisors"
             : pathname === "/workers"
               ? "Workers"
               : pathname === "/users"

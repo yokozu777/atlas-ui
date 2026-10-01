@@ -375,6 +375,14 @@ function SystemNav({ pathname }: { pathname: string }) {
           ) : null}
           {can("settings.read") ? (
             <NavItem
+              href="/hypervisors"
+              pathname={pathname}
+              icon={<Server />}
+              label="Hypervisors"
+            />
+          ) : null}
+          {can("settings.read") ? (
+            <NavItem
               href="/settings"
               pathname={pathname}
               icon={<Shield />}

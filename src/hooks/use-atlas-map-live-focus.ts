@@ -14,8 +14,10 @@ import {
   packMapPhaseAliases,
   packMapRoleProgress,
   packMapRoleProgressByPhase,
+  packMapRunTiming,
   type PackMapRoleProgress,
   type PackMapRunFocus,
+  type PackMapRunTiming,
 } from "@/lib/atlas-run-progress";
 import { executionIdOf } from "@/lib/project-dashboard";
 import { stargateJson } from "@/lib/stargate";
@@ -26,8 +28,11 @@ export function useAtlasMapLiveFocus(
   projectId: string,
   clusterId: string | null,
 ): PackMapRunFocus & {
+  status: string | null;
+  executionId: string | null;
   roles: PackMapRoleProgress | null;
   rolesByPhase: Record<string, PackMapRoleProgress> | null;
+  timing: PackMapRunTiming | null;
 } {
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -39,14 +44,13 @@ export function useAtlasMapLiveFocus(
   );
 
   useEffect(() => {
+    setExecutionId(null);
+    setStatus(null);
+    setPhases([]);
+    if (!clusterId) return;
     const selected = clusterId;
-    if (!selected) {
-      setExecutionId(null);
-      setStatus(null);
-      setPhases([]);
-      return;
-    }
     let stopped = false;
+    let heldId: string | null = null;
     async function poll() {
       const mine = ++ticket.current;
       try {
@@ -54,20 +58,22 @@ export function useAtlasMapLiveFocus(
           `/executions?project_id=${encodeURIComponent(projectId)}`,
         );
         if (stopped || mine !== ticket.current) return;
-        const active = (data.executions ?? []).find(
-          (row) =>
-            isClusterAtlasRun(row, selected) &&
-            isActiveExecutionStatus(row.status),
+        const rows = (data.executions ?? []).filter((row) =>
+          isClusterAtlasRun(row, selected),
         );
-        if (!active) {
-          setExecutionId(null);
-          setStatus(null);
-          setPhases([]);
+        const active = rows.find((row) => isActiveExecutionStatus(row.status));
+        if (active) {
+          heldId = executionIdOf(active) || null;
+          setExecutionId(heldId);
+          setStatus(active.status ?? null);
+          setPhases(active.runParams?.phases ?? []);
           return;
         }
-        setExecutionId(executionIdOf(active) || null);
-        setStatus(active.status ?? null);
-        setPhases(active.runParams?.phases ?? []);
+        if (!heldId) return;
+        const held = rows.find((row) => executionIdOf(row) === heldId);
+        if (!held) return;
+        setStatus(held.status ?? null);
+        setPhases(held.runParams?.phases ?? []);
       } catch {
         // Keep the phase already on screen if the list request fails.
       }
@@ -105,6 +111,10 @@ export function useAtlasMapLiveFocus(
     () => (executionId ? packMapRoleProgressByPhase(text, status) : null),
     [executionId, status, text],
   );
+  const timing = useMemo(
+    () => (executionId ? packMapRunTiming(text) : null),
+    [executionId, text],
+  );
 
-  return { ...focus, roles, rolesByPhase };
+  return { ...focus, status, executionId, roles, rolesByPhase, timing };
 }

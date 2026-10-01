@@ -156,7 +156,16 @@ export function consolePages(): SearchHit[] {
       kind: "page",
       title: "Console",
       href: "/settings",
-      keywords: "settings system clusterctl workers console",
+      keywords: "settings system clusterctl workers console library",
+      permission: "settings.read",
+    },
+    {
+      id: "page:hypervisors",
+      kind: "page",
+      title: "Hypervisors",
+      subtitle: "Proxmox servers",
+      href: "/hypervisors",
+      keywords: "hypervisors proxmox pve servers",
       permission: "settings.read",
     },
     {

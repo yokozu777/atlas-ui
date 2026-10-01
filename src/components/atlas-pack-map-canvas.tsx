@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import {
   Background,
   BaseEdge,
@@ -24,7 +25,16 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { FileDown, Loader2, LocateFixed, Scan, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  FileDown,
+  Loader2,
+  LocateFixed,
+  Maximize2,
+  Minimize2,
+  Scan,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -47,10 +57,14 @@ import {
   type PackMapStatus,
 } from "@/lib/atlas-pack-map";
 import { packMapEdgeRoute } from "@/lib/pack-map-edges";
+import { isActiveExecutionStatus } from "@/lib/atlas-run";
 import {
+  formatPackMapDuration,
   packMapRoleMarks,
+  type PackMapPhaseTiming,
   type PackMapRoleMark,
   type PackMapRoleProgress,
+  type PackMapRunTiming,
 } from "@/lib/atlas-run-progress";
 
 export type PackMapLiveState = "running" | "fail" | "done";
@@ -59,8 +73,103 @@ type FlowData = PackMapNode & {
   href: string | null;
   live: PackMapLiveState | null;
   roleMarks: PackMapRoleMark[] | null;
+  roleTiming: PackMapPhaseTiming | null;
+  runLive: boolean;
+  logPhase: string | null;
   onPhaseClick?: (alias: string) => void;
+  onRoleClick?: (phase: string, role: string) => void;
 };
+
+let mapClockMs = 0;
+const mapClockListeners = new Set<() => void>();
+let mapClockTimer: number | null = null;
+
+function idleSubscribe() {
+  return () => {};
+}
+
+function idleClock() {
+  return 0;
+}
+
+function mapClockSnapshot() {
+  return mapClockMs;
+}
+
+function publishMapClock() {
+  mapClockMs = Date.now();
+  for (const listener of mapClockListeners) listener();
+}
+
+function subscribeMapClock(onChange: () => void) {
+  mapClockListeners.add(onChange);
+  if (mapClockTimer == null) {
+    mapClockTimer = window.setInterval(publishMapClock, 1000);
+    queueMicrotask(publishMapClock);
+  }
+  return () => {
+    mapClockListeners.delete(onChange);
+    if (mapClockListeners.size === 0 && mapClockTimer != null) {
+      window.clearInterval(mapClockTimer);
+      mapClockTimer = null;
+    }
+  };
+}
+
+function useMapClock(enabled: boolean): number {
+  return useSyncExternalStore(
+    enabled ? subscribeMapClock : idleSubscribe,
+    enabled ? mapClockSnapshot : idleClock,
+    idleClock,
+  );
+}
+
+function useHeldOffset(stampMs: number | null, live: boolean, now: number): number {
+  const held = useRef({ stampMs: null as number | null, offset: 0 });
+  const liveOffset =
+    live && stampMs != null && now > 0 ? Math.max(0, now - stampMs) : 0;
+  if (held.current.stampMs !== stampMs) {
+    held.current = { stampMs, offset: liveOffset };
+  } else if (live) {
+    held.current.offset = liveOffset;
+  }
+  return live ? liveOffset : held.current.offset;
+}
+
+function lookupTiming(
+  timing: PackMapRunTiming | null,
+  alias: string | null | undefined,
+): PackMapPhaseTiming | null {
+  if (!timing || !alias) return null;
+  const direct = timing.byPhase[alias];
+  if (direct) return direct;
+  const key = Object.keys(timing.byPhase).find(
+    (item) => item.toLowerCase() === alias.toLowerCase(),
+  );
+  return key ? (timing.byPhase[key] ?? null) : null;
+}
+
+function entryElapsed(
+  timing: PackMapPhaseTiming | null,
+  offset: number,
+): number | null {
+  if (!timing || timing.totalMs == null) return null;
+  return timing.totalMs + offset;
+}
+
+function roleElapsed(
+  timing: PackMapPhaseTiming | null,
+  tag: string,
+  offset: number,
+): number | null {
+  if (!timing) return null;
+  const completed = timing.byTag[tag];
+  const ticking = timing.currentRole === tag && offset > 0;
+  if (completed == null && !ticking) return null;
+  const base = completed ?? 0;
+  if (timing.currentRole !== tag) return base;
+  return base + offset;
+}
 type FlowNode = Node<FlowData, "packMap">;
 
 function phaseKey(value: string): string {
@@ -164,6 +273,9 @@ function ChipRow({
 }
 
 function PackMapFlowNode({ data }: NodeProps<FlowNode>) {
+  const now = useMapClock(Boolean(data.runLive && data.roleTiming?.stampMs != null));
+  const offset = useHeldOffset(data.roleTiming?.stampMs ?? null, data.runLive, now);
+  const total = entryElapsed(data.roleTiming, offset);
   return (
     <div
       className={cn(
@@ -217,6 +329,14 @@ function PackMapFlowNode({ data }: NodeProps<FlowNode>) {
               {data.live === "fail" ? "Failed" : data.live === "done" ? "Done" : "Running"}
             </Badge>
           ) : null}
+          {data.kind === "entry" && total != null ? (
+            <span
+              className="font-mono text-[10px] tabular-nums text-muted-foreground"
+              data-entry-duration={formatPackMapDuration(total)}
+            >
+              {formatPackMapDuration(total)}
+            </span>
+          ) : null}
           <Badge variant={statusVariant(data.status)}>
             {packMapStatusLabel(data.status)}
           </Badge>
@@ -244,6 +364,13 @@ function PackMapFlowNode({ data }: NodeProps<FlowNode>) {
         tags={data.tags ?? []}
         tagsMore={data.tagsMore}
         marks={data.roleMarks}
+        timing={data.roleTiming}
+        offset={offset}
+        onFailClick={
+          data.onRoleClick && data.logPhase
+            ? (role) => data.onRoleClick?.(data.logPhase as string, role)
+            : undefined
+        }
       />
       <Handle
         type="source"
@@ -278,25 +405,61 @@ function RoleChips({
   tags,
   tagsMore,
   marks,
+  timing,
+  offset,
+  onFailClick,
 }: {
   tags: string[];
   tagsMore?: number;
   marks: PackMapRoleMark[] | null;
+  timing: PackMapPhaseTiming | null;
+  offset: number;
+  onFailClick?: (role: string) => void;
 }) {
   if (!tags.length) return null;
   return (
     <div className="mt-1.5 flex flex-wrap gap-1">
-      {tags.map((tag, index) => (
-        <span
-          key={tag}
-          className={cn(
-            "rounded-md px-1.5 py-px font-mono text-[10px]",
-            roleChipClass(marks?.[index]),
-          )}
-        >
-          {tag}
-        </span>
-      ))}
+      {tags.map((tag, index) => {
+        const elapsed = roleElapsed(timing, tag, offset);
+        const duration = elapsed == null ? null : formatPackMapDuration(elapsed);
+        const failed = marks?.[index] === "fail" && onFailClick;
+        const className = cn(
+          "inline-flex items-center gap-1 rounded-md px-1.5 py-px font-mono text-[10px]",
+          roleChipClass(marks?.[index]),
+          failed && "nopan nodrag relative z-20 cursor-pointer",
+        );
+        const body = (
+          <>
+            <span>{tag}</span>
+            {duration ? (
+              <span className="tabular-nums opacity-80">{duration}</span>
+            ) : null}
+          </>
+        );
+        if (!failed) {
+          return (
+            <span key={tag} className={className} data-role-duration={duration ?? undefined}>
+              {body}
+            </span>
+          );
+        }
+        return (
+          <button
+            key={tag}
+            type="button"
+            className={className}
+            aria-label={`Open log for ${tag}`}
+            data-role-duration={duration ?? undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onFailClick(tag);
+            }}
+          >
+            {body}
+          </button>
+        );
+      })}
       {tagsMore ? (
         <span
           className={cn(
@@ -378,7 +541,10 @@ function toFlow(
   live: { ids: string[]; state: PackMapLiveState | null },
   roles: PackMapRoleProgress | null,
   rolesByPhase: Record<string, PackMapRoleProgress> | null,
+  timing: PackMapRunTiming | null,
+  runStatus: string | null,
   onPhaseClick?: (alias: string) => void,
+  onRoleClick?: (phase: string, role: string) => void,
 ): { nodes: FlowNode[]; edges: Edge[] } {
   const columnOf = Object.fromEntries(
     graph.nodes.map((node) => [node.id, node.column] as const),
@@ -409,6 +575,14 @@ function toFlow(
           : null;
       const progress =
         node.kind === "entry" ? (phaseRoles ?? (highlighted ? roles : null)) : null;
+      const phaseTiming = lookupTiming(timing, alias);
+      const roleTiming =
+        node.kind === "entry"
+          ? (phaseTiming ?? (highlighted ? (timing?.overall ?? null) : null))
+          : null;
+      const runLive = Boolean(
+        highlighted && node.kind === "entry" && isActiveExecutionStatus(runStatus),
+      );
       const expand = Boolean(highlighted && progress);
       return {
         id: node.id,
@@ -421,12 +595,16 @@ function toFlow(
           href: onPhaseClick && node.kind === "phase" ? null : packMapHref(projectId, node.hrefKind),
           onPhaseClick,
           live: highlighted ? live.state : null,
+          logPhase: node.kind === "entry" ? (alias ?? null) : null,
+          onRoleClick,
           roleMarks: progress
             ? packMapRoleMarks(
                 expand ? (node.tagsAll ?? node.tags ?? []) : (node.tags ?? []),
                 progress,
               )
             : null,
+          roleTiming,
+          runLive,
           tagsMore: expand ? 0 : node.tagsMore,
           tags: expand ? (node.tagsAll ?? node.tags) : node.tags,
         },
@@ -466,12 +644,14 @@ function MapControlButton({
   label,
   className,
   disabled,
+  pressed,
   onClick,
   children,
 }: {
   label: string;
   className: string;
   disabled?: boolean;
+  pressed?: boolean;
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
 }) {
@@ -482,6 +662,7 @@ function MapControlButton({
           <button
             type="button"
             aria-label={label}
+            aria-pressed={pressed}
             className={className}
             disabled={disabled}
             onClick={onClick}
@@ -498,9 +679,13 @@ function MapControlButton({
 function PackMapControls({
   downloadName,
   focusEntryId,
+  fullscreen,
+  onFullscreen,
 }: {
   downloadName: string;
   focusEntryId: string | null;
+  fullscreen: boolean;
+  onFullscreen: () => void;
 }) {
   const { zoomIn, zoomOut, fitView, getNodes } = useReactFlow();
   const [saving, setSaving] = useState(false);
@@ -586,6 +771,18 @@ function PackMapControls({
           )}
           PDF
         </MapControlButton>
+        <MapControlButton
+          label={fullscreen ? "Exit full screen" : "Full screen"}
+          className={`${iconButton} border-l border-border`}
+          pressed={fullscreen}
+          onClick={onFullscreen}
+        >
+          {fullscreen ? (
+            <Minimize2 className="size-4" />
+          ) : (
+            <Maximize2 className="size-4" />
+          )}
+        </MapControlButton>
       </div>
     </Panel>
   );
@@ -633,10 +830,16 @@ function PackMapMeasuredLayout({
   return null;
 }
 
-function PackMapFocus({ ids }: { ids: string[] }) {
+function PackMapFocus({
+  ids,
+  fullscreen,
+}: {
+  ids: string[];
+  fullscreen: boolean;
+}) {
   const { fitView } = useReactFlow();
   const initialized = useNodesInitialized();
-  const signature = ids.join("|");
+  const signature = fullscreen ? "fullscreen" : ids.join("|");
   const idsRef = useRef(ids);
   const fitted = useRef<string | null>(null);
   idsRef.current = ids;
@@ -647,6 +850,10 @@ function PackMapFocus({ ids }: { ids: string[] }) {
     const target = idsRef.current;
     const handle = window.setTimeout(() => {
       fitted.current = signature;
+      if (fullscreen) {
+        void fitView({ padding: 0.18, duration: 320 });
+        return;
+      }
       void fitView({
         nodes: target.length ? target.map((id) => ({ id })) : undefined,
         padding: target.length ? 0.45 : 0.18,
@@ -655,9 +862,64 @@ function PackMapFocus({ ids }: { ids: string[] }) {
       });
     }, 80);
     return () => window.clearTimeout(handle);
-  }, [fitView, initialized, signature]);
+  }, [fitView, fullscreen, initialized, signature]);
 
   return null;
+}
+
+function MapRunDock({
+  done,
+  total,
+  label,
+}: {
+  done: number;
+  total: number;
+  label: string;
+}) {
+  const width = total > 0 ? Math.min(100, (done / total) * 100) : 0;
+  return (
+    <div className="shrink-0 border-t border-border bg-card px-4 py-3">
+      <div className="mb-2 flex items-center gap-3">
+        <div
+          className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={total}
+          aria-valuenow={done}
+          aria-label="Role progress"
+        >
+          <div
+            className="h-full rounded-full bg-info transition-[width] duration-500"
+            style={{ width: `${width}%` }}
+          />
+        </div>
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+          {done}/{total}
+        </span>
+      </div>
+      <div className="atlas-map-marquee-hover overflow-hidden">
+        <div className="atlas-map-marquee flex w-max">
+          <span className="px-6 font-mono text-xs text-foreground">{label}</span>
+          <span className="px-6 font-mono text-xs text-foreground" aria-hidden>
+            {label}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function lookupRoles(
+  rolesByPhase: Record<string, PackMapRoleProgress> | null,
+  alias: string | null,
+): PackMapRoleProgress | null {
+  if (!rolesByPhase || !alias) return null;
+  const direct = rolesByPhase[alias];
+  if (direct) return direct;
+  const key = Object.keys(rolesByPhase).find(
+    (item) => item.toLowerCase() === alias.toLowerCase(),
+  );
+  return key ? (rolesByPhase[key] ?? null) : null;
 }
 
 export function AtlasPackMapCanvas({
@@ -667,8 +929,11 @@ export function AtlasPackMapCanvas({
   activeState = null,
   activeRoles = null,
   rolesByPhase = null,
+  timing = null,
+  runStatus = null,
   downloadName = "pack-map",
   onPhaseClick,
+  onRoleClick,
 }: {
   graph: PackMapGraph;
   projectId: string;
@@ -676,9 +941,13 @@ export function AtlasPackMapCanvas({
   activeState?: PackMapLiveState | null;
   activeRoles?: PackMapRoleProgress | null;
   rolesByPhase?: Record<string, PackMapRoleProgress> | null;
+  timing?: PackMapRunTiming | null;
+  runStatus?: string | null;
   downloadName?: string;
   onPhaseClick?: (alias: string) => void;
+  onRoleClick?: (phase: string, role: string) => void;
 }) {
+  const [fullscreen, setFullscreen] = useState(false);
   const liveIds = useMemo(
     () => packMapLiveIds(graph, activeState ? activeAlias : null),
     [activeAlias, activeState, graph],
@@ -691,12 +960,44 @@ export function AtlasPackMapCanvas({
         { ids: liveIds, state: activeState },
         activeRoles,
         rolesByPhase,
+        timing,
+        runStatus,
         onPhaseClick,
+        onRoleClick,
       ),
-    [activeRoles, activeState, graph, liveIds, onPhaseClick, projectId, rolesByPhase],
+    [
+      activeRoles,
+      activeState,
+      graph,
+      liveIds,
+      onPhaseClick,
+      onRoleClick,
+      projectId,
+      rolesByPhase,
+      runStatus,
+      timing,
+    ],
   );
   const [nodes, setNodes, onNodesChange] = useNodesState(flow.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(flow.edges);
+  const showDock = fullscreen && isActiveExecutionStatus(runStatus);
+  const dock = useMemo(() => {
+    if (!showDock) return null;
+    const entryId = packMapActiveEntryId(graph.nodes, liveIds);
+    const entry = graph.nodes.find((node) => node.id === entryId);
+    const progress = lookupRoles(rolesByPhase, activeAlias) ?? activeRoles;
+    const tags = entry?.tagsAll ?? entry?.tags ?? [];
+    const done = progress
+      ? packMapRoleMarks(tags, progress).filter((mark) => mark === "done").length
+      : 0;
+    const phaseTiming = lookupTiming(timing, activeAlias) ?? timing?.overall ?? null;
+    const label =
+      phaseTiming?.currentTask ||
+      phaseTiming?.currentRole ||
+      progress?.running[0] ||
+      "Waiting for the first task";
+    return { done, total: tags.length, label };
+  }, [activeAlias, activeRoles, graph.nodes, liveIds, rolesByPhase, showDock, timing]);
 
   useEffect(() => {
     setNodes((current) => {
@@ -716,7 +1017,23 @@ export function AtlasPackMapCanvas({
     setEdges(flow.edges);
   }, [flow, setEdges, setNodes]);
 
-  return (
+  useEffect(() => {
+    if (!fullscreen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setFullscreen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previous;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [fullscreen]);
+
+  const map = (
     <ReactFlow
       nodes={nodes}
       edges={edges}
@@ -733,15 +1050,17 @@ export function AtlasPackMapCanvas({
       zoomOnScroll
       panOnScroll={false}
       colorMode="dark"
-      className="atlas-pack-map bg-transparent"
+      className="atlas-pack-map h-full bg-transparent"
       proOptions={{ hideAttribution: true }}
     >
       <PackMapMeasuredLayout graph={graph} nodes={nodes} setNodes={setNodes} />
-      <PackMapFocus ids={liveIds} />
+      <PackMapFocus ids={liveIds} fullscreen={fullscreen} />
       <Background gap={22} size={1} color="oklch(1 0 0 / 8%)" />
       <PackMapControls
         downloadName={downloadName}
         focusEntryId={packMapActiveEntryId(graph.nodes, liveIds)}
+        fullscreen={fullscreen}
+        onFullscreen={() => setFullscreen((current) => !current)}
       />
       <MiniMap
         pannable
@@ -751,4 +1070,22 @@ export function AtlasPackMapCanvas({
       />
     </ReactFlow>
   );
+
+  if (fullscreen && typeof document !== "undefined") {
+    return createPortal(
+      <div
+        className="fixed inset-0 z-[80] flex flex-col bg-background"
+        role="region"
+        aria-label="Pack map full screen"
+      >
+        <div className="min-h-0 flex-1">{map}</div>
+        {dock ? (
+          <MapRunDock done={dock.done} total={dock.total} label={dock.label} />
+        ) : null}
+      </div>,
+      document.body,
+    );
+  }
+
+  return map;
 }

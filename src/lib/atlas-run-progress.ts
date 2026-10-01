@@ -545,3 +545,175 @@ export function packMapFocusFromProgress(
   if (!last) return { alias: null, state: null };
   return { alias: last, state: status === "FAILED" ? "fail" : "done" };
 }
+
+export type PackMapPhaseTiming = {
+  totalMs: number | null;
+  stampMs: number | null;
+  byTag: Record<string, number>;
+  currentRole: string | null;
+  currentTask: string | null;
+};
+
+export type PackMapRunTiming = {
+  byPhase: Record<string, PackMapPhaseTiming>;
+  overall: PackMapPhaseTiming;
+};
+
+const TASK_BANNER = /^TASK \[(.+?)\]/;
+const TIMING_CLOCK = /(\d+:\d{2}:\d{2}(?:\.\d+)?)\s*(?:\*+)?\s*$/;
+const TIMING_PAIR =
+  /\((\d+:\d{2}:\d{2}(?:\.\d+)?)\)\s+(\d+:\d{2}:\d{2}(?:\.\d+)?)/;
+const TIMING_STAMP =
+  /(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+(\d{2}:\d{2}:\d{2})\s+([+-]\d{4})/;
+
+function emptyPhaseTiming(): PackMapPhaseTiming {
+  return {
+    totalMs: null,
+    stampMs: null,
+    byTag: {},
+    currentRole: null,
+    currentTask: null,
+  };
+}
+
+function parseAnsibleClock(value: string): number | null {
+  const match = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(value);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  if (minutes > 59 || seconds >= 60) return null;
+  return Math.round((hours * 3600 + minutes * 60 + seconds) * 1000);
+}
+
+function splitTaskBanner(raw: string): { role: string; label: string } {
+  const name = raw.trim();
+  const sep = name.indexOf(" : ");
+  if (sep < 0) return { role: name, label: name };
+  const role = name.slice(0, sep).trim();
+  const title = name.slice(sep + 3).trim();
+  return { role, label: title ? `${role} : ${title}` : role };
+}
+
+function readTimingLine(line: string): {
+  deltaMs: number;
+  elapsedMs: number;
+  stampMs: number | null;
+} | null {
+  const pair = TIMING_PAIR.exec(line);
+  if (!pair?.[1] || !pair[2] || !TIMING_CLOCK.test(line)) return null;
+  const deltaMs = parseAnsibleClock(pair[1]);
+  const elapsedMs = parseAnsibleClock(pair[2]);
+  if (deltaMs == null || elapsedMs == null) return null;
+  const stamp = TIMING_STAMP.exec(line);
+  let stampMs: number | null = null;
+  if (stamp) {
+    const offset = `${stamp[5].slice(0, 3)}:${stamp[5].slice(3)}`;
+    const parsed = Date.parse(
+      `${stamp[1]} ${stamp[2]} ${stamp[3]} ${stamp[4]} ${offset}`,
+    );
+    stampMs = Number.isNaN(parsed) ? null : parsed;
+  }
+  return { deltaMs, elapsedMs, stampMs };
+}
+
+function timingFromLines(lines: ParsedLogLine[]): PackMapPhaseTiming {
+  const timing = emptyPhaseTiming();
+  let previous: { role: string; label: string } | null = null;
+  let current: { role: string; label: string } | null = null;
+  let timingSeen = true;
+  for (const line of lines) {
+    const plain = line.plain.trim();
+    const banner = TASK_BANNER.exec(plain);
+    if (banner?.[1]) {
+      const task = splitTaskBanner(banner[1]);
+      if (current?.label === task.label) continue;
+      previous = current;
+      current = task;
+      timing.currentRole = task.role;
+      timing.currentTask = task.label;
+      timingSeen = false;
+      continue;
+    }
+    if (timingSeen) continue;
+    const stamp = readTimingLine(plain);
+    if (!stamp) continue;
+    timingSeen = true;
+    if (previous) {
+      timing.byTag[previous.role] =
+        (timing.byTag[previous.role] ?? 0) + stamp.deltaMs;
+    }
+    timing.totalMs = stamp.elapsedMs;
+    timing.stampMs = stamp.stampMs;
+  }
+  return timing;
+}
+
+export function packMapRunTiming(text: string): PackMapRunTiming {
+  const lines = parseLogText(text);
+  const slices = logPhaseSlices(lines);
+  const byPhase: Record<string, PackMapPhaseTiming> = {};
+  for (const slice of slices) {
+    const timing = timingFromLines(slice.lines);
+    const header = PHASE_HEADER.exec(slice.lines[0]?.plain.trim() ?? "");
+    const ref = header?.[1] ?? "";
+    const keys = [slice.label, phaseAliasOf(ref), phaseRepoAlias(ref)];
+    for (const key of keys) {
+      if (key) byPhase[key] = timing;
+    }
+  }
+  return { byPhase, overall: timingFromLines(lines) };
+}
+
+export function formatPackMapDuration(ms: number): string {
+  const safe = Math.max(0, ms);
+  const seconds = safe / 1000;
+  if (seconds < 10) {
+    return `${(Math.round(seconds * 10) / 10).toFixed(1)}s`;
+  }
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  return `${minutes}m ${String(secs).padStart(2, "0")}s`;
+}
+
+export function logRoleFocusIndex(
+  lines: { plain: string; kind?: string; severity?: string; task?: string | null }[],
+  role: string,
+): number {
+  const wanted = role.trim().toLowerCase();
+  if (!wanted) return -1;
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const named = lines[index].task?.trim() || "";
+    const banner = TASK_BANNER.exec(lines[index].plain.trim());
+    const raw = named || banner?.[1] || "";
+    if (!raw || splitTaskBanner(raw).role.toLowerCase() !== wanted) continue;
+    if (lines[index].kind === "task" || banner) {
+      start = index;
+      break;
+    }
+  }
+  if (start < 0) {
+    return lines.findIndex((line) => line.plain.toLowerCase().includes(wanted));
+  }
+  let failAt = -1;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const banner = TASK_BANNER.exec(lines[index].plain.trim());
+    if (lines[index].kind === "task" || banner) break;
+    if (
+      lines[index].severity === "error" ||
+      lines[index].kind === "fatal" ||
+      lines[index].kind === "failed" ||
+      lines[index].kind === "unreachable"
+    ) {
+      failAt = index;
+    }
+  }
+  return failAt >= 0 ? failAt : start;
+}

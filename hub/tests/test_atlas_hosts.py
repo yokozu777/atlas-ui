@@ -243,3 +243,237 @@ class AtlasHostsHttpTests(unittest.TestCase):
                 headers=limited,
             )
             self.assertEqual(denied.status_code, 403, denied.text)
+
+    def _own(self, project_id: str, ids: list[str], archived: list[str]) -> None:
+        from projects_store import load_projects, save_projects
+
+        projects = load_projects(gateway.PROJECTS_CONFIG_FILE)
+        for project in projects:
+            if project.get("id") == project_id:
+                project["clusterIds"] = ids
+                project["archivedClusterIds"] = archived
+        save_projects(gateway.PROJECTS_CONFIG_FILE, projects)
+
+    def _peer(self, leaf: Path, name: str, hosts: str, dns: str) -> Path:
+        peer = leaf.parent / name
+        peer.mkdir(parents=True)
+        (peer / "cluster.yaml").write_text(f"id: lab/{name}\n", encoding="utf-8")
+        (peer / "hosts").write_text(hosts, encoding="utf-8")
+        gv = peer / "group_vars" / "all"
+        gv.mkdir(parents=True)
+        (gv / "atlas-node-foundation.yml").write_text(dns, encoding="utf-8")
+        return peer
+
+    def test_domain_on_one_leaf_leaves_neighbors_alone(self):
+        headers = self._login()
+        dns = (
+            "dns_domain_suffix: example.com\n"
+            'cluster_domain: "infra.{{ dns_domain_suffix }}"\n'
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            project_id, leaf = self._fixture(Path(raw), HOSTS_K8S)
+            infra = self._peer(
+                leaf,
+                "infra",
+                HOSTS_NESTED.replace("pgsql-etcd01.example.com", "edge.example.com"),
+                dns,
+            )
+            gv = leaf / "group_vars" / "all"
+            (gv / "atlas-node-foundation.yml").write_text(dns, encoding="utf-8")
+            (gv / "atlas-k8s-addons.secrets.yml").write_text(
+                "dns_domain_suffix: example.com\n", encoding="utf-8"
+            )
+            self._own(project_id, ["lab/k8s", "lab/infra"], [])
+            listed = self.client.get(
+                f"/api/projects/{project_id}/atlas/hosts",
+                params={"cluster_id": "lab/k8s"},
+                headers=headers,
+            )
+            groups = listed.json()["groups"]
+            res = self.client.post(
+                f"/api/projects/{project_id}/atlas/hosts/domain",
+                json={
+                    "cluster_id": "lab/k8s",
+                    "from": "example.com",
+                    "to": "lab.example",
+                    "scope": "leaf",
+                    "groups": groups,
+                },
+                headers=headers,
+            )
+            self.assertEqual(res.status_code, 200, res.text)
+            body = res.json()
+            self.assertEqual(body["scope"], "leaf")
+            self.assertEqual(
+                [row["clusterId"] for row in body["clusters"]], ["lab/k8s"]
+            )
+            k8s_hosts = (leaf / "hosts").read_text(encoding="utf-8")
+            self.assertIn("lb1.example.com", k8s_hosts)
+            self.assertNotIn("lab.example", k8s_hosts)
+            infra_hosts = (infra / "hosts").read_text(encoding="utf-8")
+            self.assertIn("edge.example.com", infra_hosts)
+            written = (gv / "atlas-node-foundation.yml").read_text(encoding="utf-8")
+            self.assertIn("dns_domain_suffix: lab.example", written)
+            self.assertIn('cluster_domain: "infra.{{ dns_domain_suffix }}"', written)
+            self.assertIn(
+                "dns_domain_suffix: example.com",
+                (gv / "atlas-k8s-addons.secrets.yml").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "dns_domain_suffix: example.com",
+                (infra / "group_vars" / "all" / "atlas-node-foundation.yml").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            changes = body["clusters"][0]["changes"]
+            self.assertIn(
+                {"from": "lb1.example.com", "to": "lb1.lab.example"}, changes
+            )
+            self.assertTrue(
+                all(row["to"] != "edge.lab.example" for row in changes)
+            )
+
+    def test_domain_on_all_clusters_keeps_other_suffix_and_archived(self):
+        headers = self._login()
+        dns = (
+            "dns_domain_suffix: example.com\n"
+            'cluster_domain: "infra.{{ dns_domain_suffix }}"\n'
+        )
+        infra_hosts = """\
+all:
+  children:
+    edge:
+      hosts:
+        192.168.1.10:
+          hostname: edge.example.com
+          provision:
+            vmid: '10'
+            sockets: 1
+            cores: 1
+            memory: 1024
+            numa: false
+            clone: ubuntu-base
+            disks:
+            - size: '20'
+              slot: 0
+              storage: local-zfs
+        192.168.1.11:
+          hostname: other.other.test
+          provision:
+            vmid: '11'
+            sockets: 1
+            cores: 1
+            memory: 1024
+            numa: false
+            clone: ubuntu-base
+            disks:
+            - size: '20'
+              slot: 0
+              storage: local-zfs
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            project_id, leaf = self._fixture(Path(raw), HOSTS_K8S)
+            infra = self._peer(leaf, "infra", infra_hosts, dns)
+            old = self._peer(
+                leaf,
+                "old",
+                infra_hosts.replace("edge.example.com", "db.example.com").replace(
+                    "192.168.1.10", "192.168.1.12"
+                ).replace("vmid: '10'", "vmid: '12'"),
+                dns,
+            )
+            gv = leaf / "group_vars" / "all"
+            (gv / "atlas-node-foundation.yml").write_text(dns, encoding="utf-8")
+            (gv / "atlas-k8s-addons.secrets.yml").write_text(
+                "dns_domain_suffix: example.com\n", encoding="utf-8"
+            )
+            self._own(project_id, ["lab/k8s", "lab/infra", "lab/old"], ["lab/old"])
+            listed = self.client.get(
+                f"/api/projects/{project_id}/atlas/hosts",
+                params={"cluster_id": "lab/k8s"},
+                headers=headers,
+            )
+            groups = listed.json()["groups"]
+            preview = self.client.post(
+                f"/api/projects/{project_id}/atlas/hosts/domain",
+                json={
+                    "cluster_id": "lab/k8s",
+                    "from": "example.com",
+                    "to": "not a domain",
+                    "scope": "all",
+                    "dry_run": True,
+                    "groups": groups,
+                },
+                headers=headers,
+            )
+            self.assertEqual(preview.status_code, 400, preview.text)
+            before = (leaf / "hosts").read_text(encoding="utf-8")
+            dry = self.client.post(
+                f"/api/projects/{project_id}/atlas/hosts/domain",
+                json={
+                    "cluster_id": "lab/k8s",
+                    "from": "example.com",
+                    "to": "lab.example",
+                    "scope": "all",
+                    "dry_run": True,
+                    "groups": groups,
+                },
+                headers=headers,
+            )
+            self.assertEqual(dry.status_code, 200, dry.text)
+            self.assertTrue(dry.json()["dryRun"])
+            self.assertEqual((leaf / "hosts").read_text(encoding="utf-8"), before)
+            saved = self.client.post(
+                f"/api/projects/{project_id}/atlas/hosts/domain",
+                json={
+                    "cluster_id": "lab/k8s",
+                    "from": "example.com",
+                    "to": "lab.example",
+                    "scope": "all",
+                    "groups": groups,
+                },
+                headers=headers,
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            text = (leaf / "hosts").read_text(encoding="utf-8")
+            self.assertIn("lb1.lab.example", text)
+            self.assertIn("kubemaster01.lab.example", text)
+            self.assertIn("0x5000c500c35cd220", text)
+            self.assertNotIn("lb1.example.com", text)
+            infra_text = (infra / "hosts").read_text(encoding="utf-8")
+            self.assertIn("edge.lab.example", infra_text)
+            self.assertIn("other.other.test", infra_text)
+            old_text = (old / "hosts").read_text(encoding="utf-8")
+            self.assertIn("db.example.com", old_text)
+            self.assertNotIn("lab.example", old_text)
+            written = (gv / "atlas-node-foundation.yml").read_text(encoding="utf-8")
+            self.assertIn("dns_domain_suffix: lab.example", written)
+            self.assertIn('cluster_domain: "infra.{{ dns_domain_suffix }}"', written)
+            self.assertIn(
+                "dns_domain_suffix: example.com",
+                (gv / "atlas-k8s-addons.secrets.yml").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "dns_domain_suffix: lab.example",
+                (infra / "group_vars" / "all" / "atlas-node-foundation.yml").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertIn(
+                "dns_domain_suffix: example.com",
+                (old / "group_vars" / "all" / "atlas-node-foundation.yml").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            ids = [row["clusterId"] for row in saved.json()["clusters"]]
+            self.assertEqual(ids, ["lab/k8s", "lab/infra"])
+            infra_changes = next(
+                row["changes"] for row in saved.json()["clusters"] if row["clusterId"] == "lab/infra"
+            )
+            self.assertIn(
+                {"from": "edge.example.com", "to": "edge.lab.example"}, infra_changes
+            )
+            self.assertNotIn("other.other.test", [row["from"] for row in infra_changes])
+            self.assertIn("other.other.test", next(
+                row["skipped"] for row in saved.json()["clusters"] if row["clusterId"] == "lab/infra"
+            ))

@@ -209,6 +209,15 @@ describe("setup secret helpers", () => {
     }
     const again = generateSetupSecrets(schema.fields);
     assert.notEqual(again.grafana_admin_password, generated.grafana_admin_password);
+    const opensearchPassword = /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$/;
+    for (const key of [
+      "opensearch_admin_password",
+      "opensearch_logger_password",
+      "opensearch_jaeger_password",
+    ]) {
+      assert.match(generated[key], opensearchPassword);
+    }
+    assert.match(generated.grafana_admin_password, /^[A-Za-z0-9]+$/);
     const vars = setupSchemaForVarsFile("atlas-k8s-addons.yml", "");
     assert.deepEqual(generateSetupSecrets(vars.fields), {});
   });
@@ -267,6 +276,32 @@ describe("k8s overlay setup schemas", () => {
     assert.equal(isMissingSetupValue("example.com", domain), false);
     assert.equal(isMissingSetupValue("", domain), true);
     assert.equal(isMissingSetupValue("real-openbao-secret", openbaoOidc), false);
+  });
+
+  it("offers chart_state present, skip, and absent for optional addons", () => {
+    const fields = setupSchemaForVarsFile("atlas-k8s-addons.yml", "").fields;
+    const keys = [
+      "trivy_chart_state",
+      "falco_chart_state",
+      "kyverno_chart_state",
+      "policy_reporter_chart_state",
+      "chaos_mesh_chart_state",
+      "argocd_chart_state",
+      "argo_rollouts_chart_state",
+      "opencost_chart_state",
+      "mailu_chart_state",
+      "sentry_chart_state",
+    ];
+    for (const key of keys) {
+      const field = fields.find((item) => item.key === key);
+      assert.ok(field, key);
+      assert.equal(field.group, "Charts");
+      assert.deepEqual(field.options, ["present", "skip", "absent"]);
+      assert.equal(setupFieldInvalidMessage(field, "skip"), null);
+      assert.equal(setupFieldInvalidMessage(field, "present"), null);
+      assert.equal(setupFieldInvalidMessage(field, "absent"), null);
+      assert.equal(setupFieldInvalidMessage(field, "enabled"), "Use present, skip, absent");
+    }
   });
 
   it("hides API port, cluster DNS, OIDC, Helm, and Registry", () => {

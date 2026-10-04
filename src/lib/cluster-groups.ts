@@ -1,3 +1,18 @@
+/** Distinct environment names from cluster ids such as `build33/k8s`. */
+export function environmentNames(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const id of ids) {
+    const group = splitClusterId(id).group;
+    if (!group) continue;
+    const key = group.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(group);
+  }
+  return names.sort((a, b) => a.localeCompare(b));
+}
+
 export function splitClusterId(id: string): { group: string | null; name: string } {
   const trimmed = id.trim();
   const slash = trimmed.indexOf("/");

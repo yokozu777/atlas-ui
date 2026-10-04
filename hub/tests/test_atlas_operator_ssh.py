@@ -1,4 +1,5 @@
 import sys
+from unittest.mock import patch
 from pathlib import Path as _AuthEnvPath
 
 sys.path.insert(0, str(_AuthEnvPath(__file__).resolve().parent))
@@ -233,6 +234,92 @@ class AtlasOperatorSshTests(unittest.TestCase):
                 ansible_id, {}, dest, data_dir=gateway.DATA_DIR
             )
         )
+
+    def test_bootstrap_lists_ssh_key_and_operator_pub(self):
+        from playbooks_http import inspect_atlas_bootstrap
+
+        with tempfile.TemporaryDirectory() as raw:
+            ctl, clusters = self._inventory(Path(raw))
+            pub = clusters / "lab" / "infra" / "pub_keys" / "localuser.pub"
+            pub.unlink()
+            project = {
+                "kind": "atlas",
+                "cluster_id": "lab/infra",
+                "clusterctlRoot": str(ctl),
+                "clustersRoot": str(clusters),
+            }
+
+            def fake_inspect(argv, cluster_id, run_params=None):
+                del cluster_id, run_params
+                if argv[:2] == ["repos", "status"]:
+                    return {
+                        "success": True,
+                        "return_code": 0,
+                        "json": {
+                            "workspace_root": str(Path(raw) / "workspace"),
+                            "lock": {"path": "playbooks.lock"},
+                            "repos": [{"name": "atlas-compute-provision", "state": "ready"}],
+                        },
+                        "log": "{}",
+                    }
+                if argv[:2] == ["config", "effective"]:
+                    return {
+                        "success": True,
+                        "return_code": 0,
+                        "json": {"effective": {"execution": {"mode": "local"}}},
+                        "log": "{}",
+                    }
+                raise AssertionError(argv)
+
+            (Path(raw) / "workspace").mkdir()
+            with patch("playbooks_http.inspect_atlas", side_effect=fake_inspect):
+                before = inspect_atlas_bootstrap(project, cluster_id="lab/infra")
+            kinds = {item.get("kind") for item in before.get("missing") or []}
+            self.assertIn("ssh_key", kinds)
+            self.assertIn("operator_pub", kinds)
+
+            headers = self._login()
+            created = self.client.post(
+                "/api/global/secrets",
+                headers=headers,
+                json={
+                    "name": "atlas-bootstrap-key",
+                    "type": "git_ssh_key",
+                    "generate": True,
+                    "useAsClusterctlSsh": True,
+                },
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            saved = self.client.post(
+                "/api/projects",
+                json={
+                    "name": "bootstrap-ssh-gaps",
+                    "kind": "atlas",
+                    "cluster_id": "lab/infra",
+                    "clusterctlRoot": str(ctl),
+                },
+                headers=headers,
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            project_id = saved.json()["project"]["id"]
+            updated = self.client.put(
+                f"/api/projects/{project_id}",
+                json={"clustersRoot": str(clusters)},
+                headers=headers,
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            written = self.client.post(
+                f"/api/projects/{project_id}/atlas/operator-ssh",
+                json={"cluster_id": "lab/infra"},
+                headers=headers,
+            )
+            self.assertEqual(written.status_code, 200, written.text)
+            self.assertTrue(pub.is_file())
+            with patch("playbooks_http.inspect_atlas", side_effect=fake_inspect):
+                after = inspect_atlas_bootstrap(project, cluster_id="lab/infra")
+            after_kinds = {item.get("kind") for item in after.get("missing") or []}
+            self.assertNotIn("operator_pub", after_kinds)
+            self.assertNotIn("ssh_key", after_kinds)
 
 
 def json_blob(payload: dict) -> str:

@@ -48,6 +48,7 @@ from atlas_clusters import (  # noqa: E402
 from atlas_hosts import (  # noqa: E402
     AtlasHostsError,
     list_hosts_topology,
+    rename_hosts_domain,
     save_hosts_topology,
 )
 from atlas_operator_ssh import (  # noqa: E402
@@ -1190,6 +1191,31 @@ def atlas_hosts_put_route(
             project_id,
             _cluster_id_arg(cluster_id, payload),
             payload.get("groups"),
+        )
+    except AtlasHostsError as exc:
+        return _domain_error(exc)
+    return {"success": True, **listed}
+
+
+@app.post("/api/projects/{project_id}/atlas/hosts/domain")
+def atlas_hosts_domain_route(
+    project_id: str,
+    body: Optional[dict[str, Any]] = Body(default=None),
+    cluster_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    _require_perm(authorization, "inventory.update")
+    _require_atlas_project(project_id)
+    payload = body or {}
+    try:
+        listed = rename_hosts_domain(
+            project_id,
+            _cluster_id_arg(cluster_id, payload),
+            source=str(payload.get("from") or ""),
+            target=str(payload.get("to") or ""),
+            scope=str(payload.get("scope") or ""),
+            groups=payload.get("groups"),
+            dry_run=bool(payload.get("dry_run") or payload.get("dryRun")),
         )
     except AtlasHostsError as exc:
         return _domain_error(exc)

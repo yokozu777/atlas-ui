@@ -164,3 +164,85 @@ export async function saveHostsTopology(
     cloneOptions: (data.cloneOptions ?? []).map(String).filter(Boolean),
   };
 }
+
+export type HostDomainCluster = {
+  clusterId: string;
+  changes: { from: string; to: string }[];
+  skipped: string[];
+  dnsFiles: string[];
+};
+
+export type HostDomainResult = {
+  scope: "leaf" | "all";
+  from: string;
+  to: string;
+  dryRun: boolean;
+  clusters: HostDomainCluster[];
+  topology?: HostsTopology;
+};
+
+export async function renameHostsDomain(
+  projectId: string,
+  clusterId: string,
+  body: {
+    from: string;
+    to: string;
+    scope: "leaf" | "all";
+    dryRun?: boolean;
+    groups?: HostGroup[];
+  },
+): Promise<HostDomainResult> {
+  const data = await stargateJson<
+    Partial<HostsTopology> & {
+      scope?: string;
+      from?: string;
+      to?: string;
+      dryRun?: boolean;
+      clusters?: Partial<HostDomainCluster>[];
+    }
+  >(`/projects/${encodeURIComponent(projectId)}/atlas/hosts/domain`, {
+    method: "POST",
+    body: JSON.stringify(
+      withClusterId(
+        {
+          from: body.from,
+          to: body.to,
+          scope: body.scope,
+          dry_run: Boolean(body.dryRun),
+          groups: body.groups,
+        },
+        clusterId,
+      ),
+    ),
+  });
+  const wroteHosts = body.scope === "all" && !body.dryRun && Array.isArray(data.groups);
+  return {
+    scope: data.scope === "all" ? "all" : "leaf",
+    from: String(data.from || body.from),
+    to: String(data.to || body.to),
+    dryRun: Boolean(data.dryRun),
+    clusters: (data.clusters ?? []).map((row) => ({
+      clusterId: String(row.clusterId || ""),
+      changes: (row.changes ?? []).map((change) => ({
+        from: String(change.from || ""),
+        to: String(change.to || ""),
+      })),
+      skipped: (row.skipped ?? []).map(String),
+      dnsFiles: (row.dnsFiles ?? []).map(String),
+    })),
+    topology: wroteHosts
+      ? {
+          clusterId: String(data.clusterId || clusterId),
+          file: String(data.file || "hosts"),
+          fileMeta: data.fileMeta,
+          groups: (data.groups ?? []).map((group) => ({
+            id: String(group.id),
+            name: String(group.name || group.id),
+            path: Array.isArray(group.path) ? group.path.map(String) : [String(group.id)],
+            hosts: (group.hosts ?? []).map((host) => asHost(host)),
+          })),
+          cloneOptions: (data.cloneOptions ?? []).map(String).filter(Boolean),
+        }
+      : undefined,
+  };
+}

@@ -6,6 +6,7 @@ import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { writeAtlasOperatorPubkey } from "@/lib/clusterctl-ssh";
 import {
   fetchBootstrapStatus,
   fetchExecutionLogExcerpt,
@@ -69,44 +70,51 @@ function useRuntimePieces(
     const timeoutTitle =
       kind === "sync" ? "Repos sync timed out" : "Docker pull timed out";
     try {
-      const queued =
-        kind === "sync"
-          ? await queueReposSync({ clusterId, projectId })
-          : await queueDockerPull({ clusterId, projectId });
-      if (queued.executionId) {
-        const status = await waitHubExecution(
-          projectId,
-          queued.executionId,
-          ACTION_WAIT_MS,
-        );
-        if (status !== "SUCCESS") {
-          let excerpt: string | null = null;
-          try {
-            excerpt =
-              formatLogExcerpt(
-                await fetchExecutionLogExcerpt(projectId, queued.executionId),
-              ) || null;
-          } catch {
-            excerpt = null;
+      const syncedRepos = kind === "sync" && Boolean(model?.sync);
+      const restoredPub = kind === "sync" && Boolean(model?.restorePub);
+      if (kind === "pull" || syncedRepos) {
+        const queued =
+          kind === "sync"
+            ? await queueReposSync({ clusterId, projectId })
+            : await queueDockerPull({ clusterId, projectId });
+        if (queued.executionId) {
+          const status = await waitHubExecution(
+            projectId,
+            queued.executionId,
+            ACTION_WAIT_MS,
+          );
+          if (status !== "SUCCESS") {
+            let excerpt: string | null = null;
+            try {
+              excerpt =
+                formatLogExcerpt(
+                  await fetchExecutionLogExcerpt(projectId, queued.executionId),
+                ) || null;
+            } catch {
+              excerpt = null;
+            }
+            const title = status === "TIMEOUT" ? timeoutTitle : failedTitle;
+            setActionError({
+              title,
+              excerpt,
+              href: executionLogHref(projectId, queued.executionId),
+            });
+            toast.error(title);
+            return;
           }
-          const title = status === "TIMEOUT" ? timeoutTitle : failedTitle;
+        } else if (queued.exitCode) {
+          const title = failedTitle;
           setActionError({
             title,
-            excerpt,
-            href: executionLogHref(projectId, queued.executionId),
+            excerpt: queued.log?.trim() || null,
+            href: null,
           });
           toast.error(title);
           return;
         }
-      } else if (queued.exitCode) {
-        const title = failedTitle;
-        setActionError({
-          title,
-          excerpt: queued.log?.trim() || null,
-          href: null,
-        });
-        toast.error(title);
-        return;
+      }
+      if (restoredPub) {
+        await writeAtlasOperatorPubkey(projectId, clusterId);
       }
       const status = await fetchBootstrapStatus(clusterId, projectId);
       const next = overviewReadiness(status);
@@ -114,7 +122,11 @@ function useRuntimePieces(
       setLoadError(null);
       if (next.ready) {
         toast.success(
-          kind === "pull" ? "Executor image pulled" : "Playbooks synced",
+          kind === "pull"
+            ? "Executor image pulled"
+            : restoredPub && !syncedRepos
+              ? "Operator public key written"
+              : "Playbooks synced",
         );
       } else {
         toast.message("Some runtime pieces are still missing");
@@ -164,16 +176,23 @@ function MissingRuntimeBox({
               </li>
             ))}
           </ul>
-          {model.sync ? (
-            <Button
-              type="button"
-              size="sm"
-              disabled={busy !== null}
-              onClick={() => onAction("sync")}
-            >
-              {busy === "sync" ? "Syncing…" : "Sync"}
-            </Button>
-          ) : null}
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {model.sync || model.restorePub ? (
+              <Button
+                type="button"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() => onAction("sync")}
+              >
+                {busy === "sync" ? "Syncing…" : "Sync"}
+              </Button>
+            ) : null}
+            {model.selectKey ? (
+              <Button size="sm" variant="outline" render={<Link href="/secrets" />}>
+                Select key
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
       {model.image ? (

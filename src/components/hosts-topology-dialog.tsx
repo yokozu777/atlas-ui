@@ -14,6 +14,7 @@ import {
   Columns3,
   Database,
   Disc,
+  Globe,
   HardDrive,
   Hash,
   Layers,
@@ -29,6 +30,7 @@ import {
 import { toast } from "sonner";
 
 import { ConfirmAction } from "@/components/confirm-action";
+import { HostDomainDialog } from "@/components/host-domain-dialog";
 import { ChangesReviewDialog } from "@/components/changes-review-dialog";
 import { FileFacts, type FileFactsMeta } from "@/components/file-facts";
 import { SuggestInput } from "@/components/suggest-input";
@@ -56,6 +58,7 @@ import {
   cloneNextHost,
   fetchHostsTopology,
   hostTopologyChanges,
+  renameHostsDomain,
   saveHostsTopology,
   type HostDisk,
   type HostGroup,
@@ -213,16 +216,46 @@ export function HostsTopologyDialog({
   const [query, setQuery] = useState("");
   const [fileMeta, setFileMeta] = useState<FileFactsMeta | undefined>();
   const [storages, setStorages] = useState<ProxmoxStorage[]>([]);
+  const [domainOpen, setDomainOpen] = useState(false);
+  const [pendingDns, setPendingDns] = useState<{ from: string; to: string } | null>(
+    null,
+  );
+  const [trackedOpen, setTrackedOpen] = useState(open);
+  if (open !== trackedOpen) {
+    setTrackedOpen(open);
+    if (!open) {
+      setDomainOpen(false);
+      setPendingDns(null);
+    }
+  }
 
   const changeGroups = useMemo(
     () => hostTopologyChanges(parseGroups(baseline), groups),
     [baseline, groups],
   );
+  const reviewGroups = useMemo(() => {
+    if (!pendingDns) return changeGroups;
+    return [
+      ...changeGroups,
+      {
+        id: "dns-domain-suffix",
+        title: "DNS suffix",
+        lines: [
+          {
+            id: "dns_domain_suffix",
+            label: "dns_domain_suffix",
+            from: pendingDns.from,
+            to: pendingDns.to,
+          },
+        ],
+      },
+    ];
+  }, [changeGroups, pendingDns]);
   const pendingCount = changeGroups.reduce(
     (sum, group) => sum + group.lines.length,
     0,
   );
-  const dirty = pendingCount > 0;
+  const dirty = pendingCount > 0 || pendingDns != null;
   const selected =
     groups.find((group) => group.id === groupId) ?? groups[0] ?? null;
   const fallbackClone = cloneOptions[0] || "";
@@ -251,6 +284,7 @@ export function HostsTopologyDialog({
         setBaseline(JSON.stringify(data.groups));
         setCloneOptions(data.cloneOptions);
         setFileMeta(data.fileMeta);
+        setPendingDns(null);
         setGroupId(data.groups[0]?.id ?? null);
       })
       .catch((err: unknown) => {
@@ -287,6 +321,10 @@ export function HostsTopologyDialog({
   }, [open, projectId, clusterId]);
 
   function requestClose() {
+    if (domainOpen) {
+      setDomainOpen(false);
+      return;
+    }
     if (reviewOpen) {
       setReviewOpen(false);
       return;
@@ -300,6 +338,7 @@ export function HostsTopologyDialog({
 
   function resetAll() {
     setGroups(parseGroups(baseline));
+    setPendingDns(null);
     setReviewOpen(false);
   }
 
@@ -307,10 +346,19 @@ export function HostsTopologyDialog({
     setBusy(true);
     try {
       const data = await saveHostsTopology(projectId, clusterId, groups);
+      if (pendingDns) {
+        await renameHostsDomain(projectId, clusterId, {
+          from: pendingDns.from,
+          to: pendingDns.to,
+          scope: "leaf",
+          groups: data.groups,
+        });
+      }
       setGroups(data.groups);
       setBaseline(JSON.stringify(data.groups));
       setCloneOptions(data.cloneOptions);
       setFileMeta(data.fileMeta);
+      setPendingDns(null);
       toast.success("Hosts saved");
       setReviewOpen(false);
       onOpenChange(false);
@@ -326,6 +374,10 @@ export function HostsTopologyDialog({
       <Dialog
         open={open}
         onOpenChange={(next) => {
+          if (!next && domainOpen) {
+            setDomainOpen(false);
+            return;
+          }
           if (!next && reviewOpen) return;
           if (!next) requestClose();
         }}
@@ -395,14 +447,26 @@ export function HostsTopologyDialog({
                   </div>
                   <FileFacts meta={fileMeta} />
                 </div>
-                <Button
-                  nativeButton={false}
-                  size="xs"
-                  variant="ghost"
-                  render={<Link href={yamlHref} />}
-                >
-                  Open YAML
-                </Button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={!canWrite || loading}
+                    onClick={() => setDomainOpen(true)}
+                  >
+                    <Globe />
+                    Change domain
+                  </Button>
+                  <Button
+                    nativeButton={false}
+                    size="xs"
+                    variant="ghost"
+                    render={<Link href={yamlHref} />}
+                  >
+                    Open YAML
+                  </Button>
+                </div>
               </div>
 
               <div className="flex shrink-0 border-b border-border bg-muted/40 px-4 py-2.5">
@@ -478,13 +542,15 @@ export function HostsTopologyDialog({
                 <span className="text-xs text-muted-foreground tabular-nums">
                   {pendingCount
                     ? `${pendingCount} unsaved change${pendingCount === 1 ? "" : "s"}`
-                    : "No unsaved changes"}
+                    : pendingDns
+                      ? "DNS suffix not written yet"
+                      : "No unsaved changes"}
                 </span>
                 <div className="flex justify-end gap-2">
                   <Button
                     type="button"
                     variant="ghost"
-                    disabled={pendingCount === 0 || busy || loading}
+                    disabled={(pendingCount === 0 && !pendingDns) || busy || loading}
                     onClick={resetAll}
                   >
                     Reset
@@ -494,7 +560,7 @@ export function HostsTopologyDialog({
                   </Button>
                   <Button
                     onClick={() => setReviewOpen(true)}
-                    disabled={busy || loading || pendingCount === 0 || !canWrite}
+                    disabled={busy || loading || (pendingCount === 0 && !pendingDns) || !canWrite}
                   >
                     {busy ? "Saving…" : "Save changes"}
                   </Button>
@@ -505,10 +571,36 @@ export function HostsTopologyDialog({
         </DialogContent>
       </Dialog>
 
+      <HostDomainDialog
+        open={open && domainOpen}
+        onOpenChange={setDomainOpen}
+        projectId={projectId}
+        clusterId={clusterId}
+        groups={groups}
+        groupId={selected?.id ?? null}
+        groupName={selected?.name ?? ""}
+        onGroup={setGroups}
+        onLeaf={(next, dns) => {
+          setGroups(next);
+          setPendingDns((current) =>
+            current && current.to.toLowerCase() === dns.from.toLowerCase()
+              ? { from: current.from, to: dns.to }
+              : dns,
+          );
+        }}
+        onAll={(topology) => {
+          setGroups(topology.groups);
+          setBaseline(JSON.stringify(topology.groups));
+          setCloneOptions(topology.cloneOptions);
+          setFileMeta(topology.fileMeta);
+          setPendingDns(null);
+          setReviewOpen(false);
+        }}
+      />
       <ChangesReviewDialog
-        open={open && reviewOpen && changeGroups.length > 0}
+        open={open && reviewOpen && reviewGroups.length > 0}
         onOpenChange={setReviewOpen}
-        groups={changeGroups}
+        groups={reviewGroups}
         busy={busy}
         onConfirm={() => void save()}
       />

@@ -197,6 +197,18 @@ export const PVE_COMPUTE_SECRETS_SETUP_SCHEMA: PlaybookSetupSchema = {
   ],
 };
 
+const CHART_STATE_OPTIONS = ["present", "skip", "absent"];
+
+function chartStateField(key: string, label: string): PlaybookSetupField {
+  return {
+    key,
+    label,
+    group: "Charts",
+    options: CHART_STATE_OPTIONS,
+    hint: "present installs the chart, skip leaves the cluster alone, absent removes the release.",
+  };
+}
+
 function secretField(
   key: string,
   label: string,
@@ -455,6 +467,16 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       { key: "cluster_dns_ip", label: "Cluster DNS IP", group: "Network", valueType: "ipv4" },
       { key: "k8s_cluster_name", label: "Cluster name", group: "Identity" },
       { key: "metallb_ip_pool", label: "MetalLB IP pool", group: "Ingress" },
+      chartStateField("trivy_chart_state", "Trivy"),
+      chartStateField("falco_chart_state", "Falco"),
+      chartStateField("kyverno_chart_state", "Kyverno"),
+      chartStateField("policy_reporter_chart_state", "Policy Reporter"),
+      chartStateField("chaos_mesh_chart_state", "Chaos Mesh"),
+      chartStateField("argocd_chart_state", "Argo CD"),
+      chartStateField("argo_rollouts_chart_state", "Argo Rollouts"),
+      chartStateField("opencost_chart_state", "OpenCost"),
+      chartStateField("mailu_chart_state", "Mailu"),
+      chartStateField("sentry_chart_state", "Sentry"),
     ],
   },
   "atlas-k8s-addons.secrets.yml": {
@@ -509,6 +531,18 @@ export const FILE_SETUP_SCHEMAS: Record<string, PlaybookSetupSchema> = {
       ]),
       secretField("kibana_encryption_key", "Kibana encryption key", "Elastic", [
         "CHANGEME_kibana_encryption_key_min_32_chars",
+      ]),
+      secretField("opensearch_admin_password", "OpenSearch admin password", "OpenSearch", [
+        "CHANGEME_opensearch_admin1",
+      ]),
+      secretField("opensearch_logger_password", "OpenSearch logger password", "OpenSearch", [
+        "CHANGEME_opensearch_logger1",
+      ]),
+      secretField("opensearch_jaeger_password", "OpenSearch Jaeger password", "OpenSearch", [
+        "CHANGEME_opensearch_jaeger1",
+      ]),
+      secretField("opensearch_dashboards_cookie_password", "OpenSearch Dashboards cookie password", "OpenSearch", [
+        "CHANGEME_opensearch_dashboards_cookie_32b",
       ]),
       secretField("argocd_admin_password_bcrypt", "Argo CD admin password bcrypt", "Argo"),
       secretField("ceph_dashboard_password", "Ceph dashboard password", "Ceph"),
@@ -819,15 +853,50 @@ export function groupedSetupFields(
 
 const SETUP_SECRET_ALPHABET =
   "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+const SETUP_SECRET_UPPER = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+const SETUP_SECRET_LOWER = "abcdefghijkmnopqrstuvwxyz";
+const SETUP_SECRET_DIGITS = "23456789";
+// OpenSearch rejects a password with no symbol. These stay safe inside a
+// double-quoted YAML scalar and are not Ansible template markers.
+const SETUP_SECRET_SPECIALS = "!@#%^*-_=+";
+const OPENSEARCH_PASSWORD_KEYS = new Set([
+  "opensearch_admin_password",
+  "opensearch_logger_password",
+  "opensearch_jaeger_password",
+]);
+
+function setupSecretChar(alphabet: string): string {
+  const bytes = new Uint8Array(1);
+  crypto.getRandomValues(bytes);
+  return alphabet[bytes[0] % alphabet.length];
+}
 
 export function generateSetupSecret(key: string): string {
   const length = key === "vip_auth_pass" ? 8 : 32;
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
-  return Array.from(
+  const chars = Array.from(
     bytes,
     (byte) => SETUP_SECRET_ALPHABET[byte % SETUP_SECRET_ALPHABET.length],
-  ).join("");
+  );
+  if (OPENSEARCH_PASSWORD_KEYS.has(key)) {
+    const required = [
+      setupSecretChar(SETUP_SECRET_UPPER),
+      setupSecretChar(SETUP_SECRET_LOWER),
+      setupSecretChar(SETUP_SECRET_DIGITS),
+      setupSecretChar(SETUP_SECRET_SPECIALS),
+    ];
+    const slots = new Set<number>();
+    while (slots.size < required.length) {
+      const index = new Uint8Array(1);
+      crypto.getRandomValues(index);
+      slots.add(index[0] % length);
+    }
+    [...slots].forEach((index, position) => {
+      chars[index] = required[position];
+    });
+  }
+  return chars.join("");
 }
 
 export function generateSetupSecrets(
@@ -953,6 +1022,9 @@ export function setupFieldInvalidMessage(
   if (value == null || typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed || isJinjaValue(trimmed)) return null;
+  if (field.options && field.options.length > 0 && !field.options.includes(trimmed)) {
+    return `Use ${field.options.join(", ")}`;
+  }
   if (type === "ipv4" && !isIpv4Address(trimmed)) {
     return "Invalid IPv4 address";
   }

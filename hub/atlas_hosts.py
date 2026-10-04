@@ -1,12 +1,21 @@
 """Atlas cluster hosts topology (groups, IPs, provision CPU/RAM/disk)."""
 from __future__ import annotations
 
+import re
 from io import StringIO
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from atlas_cluster_fs import resolve_atlas_inventory_leaf
-from atlas_vars_setup import PVE_TEMPLATE_NAMES, _file_facts, cascade_layers
+import yaml
+
+from atlas_cluster_fs import load_project, resolve_atlas_inventory_leaf
+from atlas_vars_setup import (
+    PVE_TEMPLATE_NAMES,
+    _file_facts,
+    cascade_layers,
+    set_top_level_key,
+)
+from project_kind import atlas_archived_cluster_ids, atlas_owned_cluster_ids
 
 
 class AtlasHostsError(Exception):
@@ -17,6 +26,11 @@ class AtlasHostsError(Exception):
 
 
 HOST_FILE_NAMES = ("hosts", "hosts.yml", "hosts.yaml")
+_DNS_NAME = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+_DNS_SUFFIX_KEY = "dns_domain_suffix"
 PROVISION_KEYS = ("vmid", "sockets", "cores", "memory", "numa", "clone", "disks")
 DISK_KEYS = ("size", "slot", "storage")
 COMPUTE_VARS_RELS = (
@@ -459,3 +473,187 @@ def save_hosts_topology(
     except OSError as exc:
         raise AtlasHostsError(400, "hosts file is not writable") from exc
     return list_hosts_topology(project_id, cid)
+
+
+def _require_dns_name(value: str) -> str:
+    text = str(value or "").strip().rstrip(".")
+    if not text or any(char.isspace() for char in text) or "{{" in text:
+        raise AtlasHostsError(400, "domain must be a DNS name")
+    if not _DNS_NAME.fullmatch(text):
+        raise AtlasHostsError(400, "domain must be a DNS name")
+    return text
+
+
+def hostname_parent_domain(hostname: str) -> Optional[str]:
+    text = str(hostname or "").strip()
+    dot = text.find(".")
+    if dot <= 0 or dot == len(text) - 1:
+        return None
+    parent = text[dot + 1 :]
+    if any(char.isspace() for char in parent) or "{{" in parent:
+        return None
+    return parent
+
+
+def rename_hostname(hostname: str, source: str, target: str) -> Optional[str]:
+    parent = hostname_parent_domain(hostname)
+    origin = str(source or "").strip()
+    dest = str(target or "").strip()
+    if parent is None or not origin or parent.lower() != origin.lower():
+        return None
+    if not dest or dest.lower() == origin.lower():
+        return None
+    text = str(hostname).strip()
+    return f"{text[: text.find('.')]}.{dest}"
+
+
+def _rename_groups(
+    groups: list[Mapping[str, Any]], source: str, target: str
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
+    changes: list[dict[str, str]] = []
+    skipped: list[str] = []
+    renamed_groups: list[dict[str, Any]] = []
+    for group in groups:
+        hosts: list[Any] = []
+        for host in group.get("hosts") or []:
+            if not isinstance(host, Mapping):
+                continue
+            current = str(host.get("hostname") or "").strip()
+            if not current:
+                hosts.append(dict(host))
+                continue
+            renamed = rename_hostname(current, source, target)
+            if renamed is None:
+                skipped.append(current)
+                hosts.append(dict(host))
+                continue
+            changes.append({"from": current, "to": renamed})
+            copied = dict(host)
+            copied["hostname"] = renamed
+            hosts.append(copied)
+        copied_group = dict(group)
+        copied_group["hosts"] = hosts
+        renamed_groups.append(copied_group)
+    return renamed_groups, changes, skipped
+
+
+def _existing_hosts_file(leaf: Path) -> Optional[Path]:
+    for name in HOST_FILE_NAMES:
+        path = leaf / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _rewrite_dns_suffix(leaf: Path, source: str, target: str, *, dry_run: bool) -> list[str]:
+    root = leaf / "group_vars"
+    if not root.is_dir():
+        return []
+    updated: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in {".yml", ".yaml"}:
+            continue
+        if ".secrets." in path.name.lower():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            data = yaml.safe_load(text) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(data, Mapping) or _DNS_SUFFIX_KEY not in data:
+            continue
+        raw = data.get(_DNS_SUFFIX_KEY)
+        if isinstance(raw, (Mapping, list)) or raw is None:
+            continue
+        current = str(raw).strip()
+        if "{{" in current or current.lower() != source.lower():
+            continue
+        updated.append(path.relative_to(leaf).as_posix())
+        if dry_run:
+            continue
+        next_text = set_top_level_key(text, _DNS_SUFFIX_KEY, target)
+        try:
+            yaml.safe_load(next_text)
+        except yaml.YAMLError as exc:
+            raise AtlasHostsError(400, f"DNS suffix YAML is invalid: {exc}") from exc
+        path.write_text(
+            next_text if next_text.endswith("\n") else next_text + "\n",
+            encoding="utf-8",
+        )
+    return updated
+
+
+def _domain_cluster_ids(project: Mapping[str, Any], current: str, scope: str) -> list[str]:
+    if scope == "leaf":
+        return [current]
+    archived = set(atlas_archived_cluster_ids(project))
+    ids = [cid for cid in atlas_owned_cluster_ids(project) if cid not in archived]
+    if current not in ids:
+        ids.insert(0, current)
+    return ids
+
+
+def rename_hosts_domain(
+    project_id: str,
+    cluster_id: Optional[str],
+    *,
+    source: str,
+    target: str,
+    scope: str,
+    groups: Any = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    mode = str(scope or "").strip().lower()
+    if mode not in {"leaf", "all"}:
+        raise AtlasHostsError(400, "scope must be leaf or all")
+    origin = _require_dns_name(source)
+    dest = _require_dns_name(target)
+    if origin.lower() == dest.lower():
+        raise AtlasHostsError(400, "new domain matches the current domain")
+    project = load_project(project_id)
+    if not project:
+        raise AtlasHostsError(400, "atlas inventory leaf not found")
+    _leaf, current = _require_leaf(project_id, cluster_id)
+    rows: list[dict[str, Any]] = []
+    for cid in _domain_cluster_ids(project, current, mode):
+        leaf = resolve_atlas_inventory_leaf(project_id, cid, project=project)
+        if leaf is None or not leaf.is_dir():
+            continue
+        submitted = cid == current and isinstance(groups, list)
+        changes: list[dict[str, str]] = []
+        skipped: list[str] = []
+        hosts_file = _existing_hosts_file(leaf)
+        if submitted and hosts_file is None:
+            raise AtlasHostsError(404, "hosts file not found")
+        if hosts_file is not None:
+            if submitted:
+                typed = [item for item in groups if isinstance(item, Mapping)]
+                if len(typed) != len(groups):
+                    raise AtlasHostsError(400, "groups must be objects")
+                renamed, changes, skipped = _rename_groups(typed, origin, dest)
+            else:
+                listed = list_hosts_topology(project_id, cid)
+                renamed, changes, skipped = _rename_groups(
+                    listed.get("groups") or [], origin, dest
+                )
+            if mode == "all" and not dry_run and (changes or submitted):
+                save_hosts_topology(project_id, cid, renamed)
+        dns_files = _rewrite_dns_suffix(leaf, origin, dest, dry_run=dry_run)
+        rows.append(
+            {
+                "clusterId": cid,
+                "changes": changes,
+                "skipped": skipped,
+                "dnsFiles": dns_files,
+            }
+        )
+    payload: dict[str, Any] = {
+        "scope": mode,
+        "from": origin,
+        "to": dest,
+        "dryRun": bool(dry_run),
+        "clusters": rows,
+    }
+    if mode == "all" and not dry_run:
+        payload.update(list_hosts_topology(project_id, current))
+    return payload

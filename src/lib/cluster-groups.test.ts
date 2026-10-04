@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { clusterSwitcherGroups } from "./cluster-groups.ts";
+import { clusterSwitcherGroups, environmentNames } from "./cluster-groups.ts";
+
+describe("environmentNames", () => {
+  it("lists each environment once, in order", () => {
+    assert.deepEqual(
+      environmentNames([
+        "build33/k8s",
+        "build33/default",
+        "demo/infra",
+        "bare",
+        "Demo/k8s",
+      ]),
+      ["build33", "demo"],
+    );
+  });
+});
 
 describe("clusterSwitcherGroups", () => {
   it("keeps a recent cluster in its environment group", () => {

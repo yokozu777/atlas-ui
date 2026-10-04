@@ -81,6 +81,42 @@ describe("overviewReadiness", () => {
     assert.equal(view.repos[2]?.detail, "/ws/atlas-infra-edge");
   });
 
+  it("treats a missing Atlas SSH key as not ready", () => {
+    const view = overviewReadiness({
+      missing: [
+        {
+          kind: "ssh_key",
+          name: "clusterctl",
+          label: "Atlas SSH key is not selected",
+        },
+      ],
+      docker_image: "harbor.example/library/krang:latest",
+      docker_image_present: true,
+    });
+    assert.equal(view.ready, false);
+    assert.equal(view.sync, false);
+    assert.equal(view.restorePub, false);
+    assert.equal(view.selectKey, true);
+    assert.equal(view.pull, false);
+  });
+
+  it("restores the operator public key when the Atlas secret is already selected", () => {
+    const view = overviewReadiness({
+      missing: [
+        {
+          kind: "operator_pub",
+          name: "localuser.pub",
+          label: "Operator public key is not installed",
+        },
+      ],
+      docker_image_present: true,
+    });
+    assert.equal(view.ready, false);
+    assert.equal(view.sync, false);
+    assert.equal(view.restorePub, true);
+    assert.equal(view.selectKey, false);
+  });
+
   it("asks for both sync and pull when image and repos are missing", () => {
     const view = overviewReadiness({
       missing: [{ kind: "git_repo", name: "atlas-k3s", label: "Git repo atlas-k3s is not synced" }],

@@ -21,6 +21,7 @@ from atlas_operator_ssh import (
     AtlasOperatorSshError,
     hub_data_dir,
     materialize_operator_private_key,
+    operator_pubkey_status,
 )
 from atlas_rbac import atlas_run_error
 from clusterctl_config import inspect_run_params_from_project
@@ -769,6 +770,82 @@ def _resolve_project_cluster_id(
     return cluster_id
 
 
+def _atlas_ssh_key_readable(data_dir: Path) -> tuple[bool, str]:
+    """True when the selected Atlas git_ssh_key decrypts. Never writes a key."""
+    from clusterctl_ssh import load_clusterctl_ssh_secret_id
+    from global_secrets_manager import GlobalSecretError, GlobalSecretsManager
+
+    secret_id = load_clusterctl_ssh_secret_id(data_dir)
+    if not secret_id:
+        return False, "Atlas SSH key is not selected"
+    try:
+        secret = GlobalSecretsManager(data_dir).get_secret(
+            secret_id, include_material=True
+        )
+    except GlobalSecretError:
+        return False, "Atlas SSH key cannot be read"
+    if not isinstance(secret, dict) or str(secret.get("type") or "") != "git_ssh_key":
+        return False, "Atlas SSH key is not selected"
+    private_key = str(secret.get("privateKey") or "").strip()
+    if not private_key:
+        return False, "Atlas SSH key cannot be read"
+    try:
+        decrypt_openssh_private(
+            private_key, passphrase=str(secret.get("passphrase") or "")
+        )
+    except SshKeyMaterialError:
+        return False, "Atlas SSH key cannot be read"
+    return True, ""
+
+
+def _bootstrap_ssh_gaps(
+    project: dict[str, Any],
+    cluster_id: str,
+) -> list[dict[str, Any]]:
+    data_dir = hub_data_dir()
+    readable, reason = _atlas_ssh_key_readable(data_dir)
+    gaps: list[dict[str, Any]] = []
+    if not readable:
+        gaps.append(
+            {
+                "kind": "ssh_key",
+                "name": "clusterctl",
+                "label": reason,
+            }
+        )
+    try:
+        status = operator_pubkey_status(project, cluster_id, data_dir=data_dir)
+    except AtlasOperatorSshError as exc:
+        gaps.append(
+            {
+                "kind": "operator_pub",
+                "name": "localuser.pub",
+                "label": str(exc),
+            }
+        )
+        return gaps
+    pub_path = status.get("pubPath")
+    if not status.get("pubExists"):
+        gaps.append(
+            {
+                "kind": "operator_pub",
+                "name": "localuser.pub",
+                "path": pub_path,
+                "label": "Operator public key is not installed",
+            }
+        )
+    elif readable and not status.get("match"):
+        gaps.append(
+            {
+                "kind": "operator_pub",
+                "name": "localuser.pub",
+                "path": pub_path,
+                "label": "Operator public key does not match the Atlas SSH key",
+            }
+        )
+    return gaps
+
+
 def inspect_atlas_bootstrap(
     project: dict[str, Any],
     *,
@@ -815,6 +892,7 @@ def inspect_atlas_bootstrap(
                 "label": f"Git repo {name or '(unnamed)'} is not synced",
             }
         )
+    missing.extend(_bootstrap_ssh_gaps(project, resolved))
     docker_image = None
     try:
         cfg = _inspect_json(["config", "effective", "--json"], resolved, run_params)

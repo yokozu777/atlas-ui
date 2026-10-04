@@ -6,6 +6,8 @@ export type ReadinessIssue = {
   detail?: string;
 };
 
+const REPO_KINDS = new Set(["workspace", "lock", "git_repo"]);
+
 export type OverviewReadiness = {
   ready: boolean;
   summary: string;
@@ -13,11 +15,16 @@ export type OverviewReadiness = {
   image: ReadinessIssue | null;
   /** One Sync covers every workspace, lock, and git row. */
   sync: boolean;
+  /** Write localuser.pub from the already selected Atlas secret. */
+  restorePub: boolean;
+  /** Atlas SSH secret is missing; do not invent a key. */
+  selectKey: boolean;
   pull: boolean;
 };
 
 export function overviewReadiness(status: BootstrapStatus): OverviewReadiness {
-  const repos = (status.missing ?? []).map((item, index) => ({
+  const missing = status.missing ?? [];
+  const repos = missing.map((item, index) => ({
     id: `${item.kind}-${item.name ?? index}`,
     label: (item.label || item.name || item.kind || "Missing").trim(),
     detail: item.path?.trim() || undefined,
@@ -32,6 +39,7 @@ export function overviewReadiness(status: BootstrapStatus): OverviewReadiness {
         }
       : null;
   const ready = repos.length === 0 && image === null;
+  const keyGap = missing.some((item) => item.kind === "ssh_key");
   return {
     ready,
     summary: imageRef
@@ -39,7 +47,9 @@ export function overviewReadiness(status: BootstrapStatus): OverviewReadiness {
       : "Repos ready.",
     repos,
     image,
-    sync: repos.length > 0,
+    sync: missing.some((item) => REPO_KINDS.has(item.kind)),
+    restorePub: missing.some((item) => item.kind === "operator_pub") && !keyGap,
+    selectKey: keyGap,
     pull: image !== null,
   };
 }

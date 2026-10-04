@@ -18,6 +18,7 @@ export function SuggestInput({
   highlight,
   placeholder,
   ariaLabel,
+  className,
   onChange,
   onPick,
 }: {
@@ -28,6 +29,7 @@ export function SuggestInput({
   highlight?: boolean;
   placeholder?: string;
   ariaLabel?: string;
+  className?: string;
   onChange: (value: string) => void;
   onPick?: (value: string) => void;
 }) {
@@ -44,7 +46,16 @@ export function SuggestInput({
         onChange(next);
         onPick?.(next);
       }}
-      onInputValueChange={(next) => onChange(next)}
+      onInputValueChange={(next, details) => {
+        // Closing the list writes the selected item back into the input.
+        // A typed name that is not in the list has no selection, so that
+        // reset would wipe it. Keep the text the user entered.
+        if (details.reason === "input-clear" && next === "" && value !== "") {
+          details.cancel();
+          return;
+        }
+        onChange(next);
+      }}
     >
       <div className="relative min-w-0">
         <Combobox.Input
@@ -55,6 +66,7 @@ export function SuggestInput({
           className={cn(
             "h-8 w-full rounded-lg border border-foreground/20 bg-background pr-8 pl-2.5 font-mono text-[13px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive",
             highlight && "border-amber-400/80 ring-2 ring-amber-400/40",
+            className,
           )}
         />
         <Combobox.Trigger
@@ -68,7 +80,7 @@ export function SuggestInput({
         <Combobox.Positioner className="z-[80]" sideOffset={4}>
           <Combobox.Popup className="max-h-56 w-(--anchor-width) overflow-y-auto rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10">
             <Combobox.Empty className="px-2 py-1.5 text-xs text-muted-foreground">
-              Custom value
+              {value.trim() ? `Use "${value.trim()}"` : "No matches"}
             </Combobox.Empty>
             <Combobox.List>
               {(item: string) => (

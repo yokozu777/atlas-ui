@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -23,6 +23,7 @@ import {
   GitPullSecretSelect,
 } from "@/components/git-pull-secret-select";
 import { ConfirmAction } from "@/components/confirm-action";
+import { SuggestInput } from "@/components/suggest-input";
 import { JobProgress, type JobStep, type JobStepState } from "@/components/job-progress";
 import { useJobSession } from "@/components/job-session";
 import { PageHeader } from "@/components/page-header";
@@ -48,6 +49,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  fetchAtlasProjectClusters,
   fetchBootstrapStatus,
   fetchExecutionLogExcerpt,
   formatLogExcerpt,
@@ -64,6 +66,7 @@ import { executionLogHref, projectHref, projectIdFromPath } from "@/lib/project-
 import type { SecretOption } from "@/lib/project-sources";
 import { fetchProject, stargateJson } from "@/lib/stargate";
 import { useCan } from "@/lib/authz";
+import { environmentNames } from "@/lib/cluster-groups";
 import { INIT_TEMPLATES } from "@/lib/templates";
 import { templateOpensHostsAfterInit } from "@/lib/template-profiles";
 import { notify, notifyExecution } from "@/lib/notification-inbox";
@@ -216,7 +219,10 @@ function composeClusterId(env: string, name: string) {
   return `${envPart}/${namePart}`;
 }
 
-type ApplyPhase = "idle" | "sync" | "docker";
+type ApplyPhase = "idle" | "sync" | "pubkey" | "docker";
+type ApplyFail = "sync" | "pubkey" | "docker" | "ssh" | null;
+
+const REPO_KINDS = new Set(["workspace", "lock", "git_repo"]);
 
 function dockerNeedsPull(status: BootstrapStatus | null | undefined): boolean {
   return Boolean(status?.docker_image) && status?.docker_image_present !== true;
@@ -237,37 +243,54 @@ function patchSteps(
   );
 }
 
-function syncItemState(
-  phase: ApplyPhase,
-  fail: "sync" | "docker" | null,
-): JobStepState {
+function syncItemState(phase: ApplyPhase, fail: ApplyFail): JobStepState {
   if (fail === "sync") return "fail";
-  if (phase === "idle") return "pending";
   if (phase === "sync") return "running";
+  if (phase === "idle" && fail == null) return "pending";
   return "ok";
 }
 
-function dockerItemState(
-  phase: ApplyPhase,
-  fail: "sync" | "docker" | null,
-): JobStepState {
-  if (fail === "docker") return "fail";
-  if (fail === "sync") return "pending";
+function pubItemState(phase: ApplyPhase, fail: ApplyFail): JobStepState {
+  if (fail === "pubkey") return "fail";
+  if (fail === "sync" || fail === "ssh") return "pending";
   if (phase === "idle" || phase === "sync") return "pending";
+  if (phase === "pubkey") return "running";
+  return "ok";
+}
+
+function sshItemState(fail: ApplyFail): JobStepState {
+  if (fail === "ssh") return "fail";
+  return "pending";
+}
+
+function dockerItemState(phase: ApplyPhase, fail: ApplyFail): JobStepState {
+  if (fail === "docker") return "fail";
+  if (fail === "sync" || fail === "pubkey" || fail === "ssh") return "pending";
+  if (phase === "idle" || phase === "sync" || phase === "pubkey") return "pending";
   if (phase === "docker") return "running";
   return "ok";
+}
+
+function missingItemState(
+  kind: string,
+  phase: ApplyPhase,
+  fail: ApplyFail,
+): JobStepState {
+  if (kind === "ssh_key") return sshItemState(fail);
+  if (kind === "operator_pub") return pubItemState(phase, fail);
+  return syncItemState(phase, fail);
 }
 
 function applyProgressSteps(
   bootstrap: BootstrapStatus,
   phase: ApplyPhase,
-  fail: "sync" | "docker" | null,
+  fail: ApplyFail,
 ): JobStep[] {
   const steps: JobStep[] = (bootstrap.missing ?? []).map((item, index) => ({
     id: `${item.kind}-${item.name ?? index}`,
     label: item.label || item.name || item.kind,
     detail: item.path ?? undefined,
-    state: syncItemState(phase, fail),
+    state: missingItemState(item.kind, phase, fail),
   }));
   if (dockerNeedsPull(bootstrap)) {
     steps.push({
@@ -318,6 +341,7 @@ export default function InitPage() {
     dialog: sshDialog,
   } = useEnsureClusterctlSshKey();
   const [clusterEnv, setClusterEnv] = useState("");
+  const [envOptions, setEnvOptions] = useState<string[]>([]);
   const [clusterName, setClusterName] = useState("");
   const [template, setTemplate] = useState<string>("k8s_full");
   const [fromCluster, setFromCluster] = useState("");
@@ -334,7 +358,7 @@ export default function InitPage() {
   const [bootstrapClusterId, setBootstrapClusterId] = useState("");
   const [applying, setApplying] = useState(false);
   const [applyPhase, setApplyPhase] = useState<ApplyPhase>("idle");
-  const [applyFail, setApplyFail] = useState<"sync" | "docker" | null>(null);
+  const [applyFail, setApplyFail] = useState<ApplyFail>(null);
   const [initSteps, setInitSteps] = useState<JobStep[] | null>(null);
   const [failedLogHref, setFailedLogHref] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -351,6 +375,23 @@ export default function InitPage() {
   const [gitPullSecretId, setGitPullSecretId] = useState(GIT_PULL_NONE);
   const [gitPullBusy, setGitPullBusy] = useState(false);
   const clusterId = composeClusterId(clusterEnv, clusterName);
+
+  useEffect(() => {
+    if (!formOpen) return;
+    let cancelled = false;
+    void fetchAtlasProjectClusters(projectIdFromPath(pathname))
+      .then((data) => {
+        if (!cancelled) {
+          setEnvOptions(environmentNames(data.clusters.map((row) => row.id)));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setEnvOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [formOpen, pathname]);
   const fromOverride = fromCluster.trim().length > 0;
   const sshReady =
     sshStatus.ready && Boolean(sshStatus.sshSecretId);
@@ -607,31 +648,62 @@ export default function InitPage() {
     setErrorExcerpt(null);
     setApplyFail(null);
     try {
-      if (!(await requireGitPullKey(pid))) return;
+      const missing = bootstrap?.missing ?? [];
+      const needsRepos = missing.some((item) => REPO_KINDS.has(item.kind));
+      const needsPub = missing.some((item) => item.kind === "operator_pub");
+      const sshBlocked = missing.some((item) => item.kind === "ssh_key");
+      if (needsRepos && !(await requireGitPullKey(pid))) return;
       setApplying(true);
-      setApplyPhase("sync");
-      const sync = await queueReposSync({ clusterId, projectId: pid });
-      if (sync.executionId) {
-        const syncStatus = await waitHubExecution(
-          pid,
-          sync.executionId,
-          APPLY_WAIT_MS,
-        );
-        if (syncStatus !== "SUCCESS") {
-          setApplyFail("sync");
-          await failExecution(
+      if (needsRepos) {
+        setApplyPhase("sync");
+        const sync = await queueReposSync({ clusterId, projectId: pid });
+        if (sync.executionId) {
+          const syncStatus = await waitHubExecution(
             pid,
             sync.executionId,
-            syncStatus === "TIMEOUT" ? "Repos sync timed out" : "Repos sync failed",
+            APPLY_WAIT_MS,
           );
+          if (syncStatus !== "SUCCESS") {
+            setApplyFail("sync");
+            await failExecution(
+              pid,
+              sync.executionId,
+              syncStatus === "TIMEOUT" ? "Repos sync timed out" : "Repos sync failed",
+            );
+            return;
+          }
+        } else if (sync.exitCode) {
+          const message = sync.log?.trim() || "Repos sync failed";
+          setApplyFail("sync");
+          setApplyError(message);
+          setErrorExcerpt(message);
+          toast.error(message);
           return;
         }
-      } else if (sync.exitCode) {
-        const message = sync.log?.trim() || "Repos sync failed";
-        setApplyFail("sync");
+      }
+      if (needsPub && !sshBlocked) {
+        setApplyPhase("pubkey");
+        try {
+          await writeAtlasOperatorPubkey(pid, clusterId);
+        } catch (err) {
+          const message =
+            err instanceof Error
+              ? err.message
+              : "Could not write the Atlas public key to the cluster";
+          setApplyFail("pubkey");
+          setApplyError(message);
+          toast.error(message);
+          return;
+        }
+      }
+      if (sshBlocked) {
+        const message = "Select an Atlas SSH key in Secrets Manager";
+        setApplyPhase("idle");
+        setApplyFail("ssh");
         setApplyError(message);
-        setErrorExcerpt(message);
-        toast.error(message);
+        notify("error", message, { href: "/secrets" });
+        const next = await fetchBootstrapStatus(clusterId, pid);
+        setBootstrap(next);
         return;
       }
       if (dockerNeedsPull(bootstrap)) {
@@ -795,19 +867,36 @@ export default function InitPage() {
               <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
                 <div className="space-y-2">
                   <Label htmlFor="env">Environment</Label>
-                  <Input
-                    id="env"
-                    required
-                    className="font-mono"
-                    value={clusterEnv}
-                    onChange={(e) =>
-                      setClusterEnv(e.target.value.replaceAll("/", ""))
-                    }
-                    placeholder="demo"
-                    pattern="[a-z][a-z0-9._-]+"
-                    title="lowercase env, e.g. demo"
-                    autoComplete="off"
-                  />
+                  {envOptions.length > 0 ? (
+                    <SuggestInput
+                      id="env"
+                      value={clusterEnv}
+                      options={envOptions.map((name) => ({
+                        value: name,
+                        label: name,
+                      }))}
+                      placeholder="demo"
+                      ariaLabel="Environment"
+                      className="h-10 text-sm"
+                      onChange={(value) =>
+                        setClusterEnv(value.replaceAll("/", ""))
+                      }
+                    />
+                  ) : (
+                    <Input
+                      id="env"
+                      required
+                      className="font-mono"
+                      value={clusterEnv}
+                      onChange={(e) =>
+                        setClusterEnv(e.target.value.replaceAll("/", ""))
+                      }
+                      placeholder="demo"
+                      pattern="[a-z][a-z0-9._-]+"
+                      title="lowercase env, e.g. demo"
+                      autoComplete="off"
+                    />
+                  )}
                 </div>
                 <span className="pb-2 font-mono text-muted-foreground">/</span>
                 <div className="space-y-2">
@@ -932,9 +1021,11 @@ export default function InitPage() {
                 currentLabel={
                   applyPhase === "sync"
                     ? "Syncing playbooks…"
-                    : applyPhase === "docker"
-                      ? `Pulling ${bootstrap.docker_image ?? "image"}…`
-                      : undefined
+                    : applyPhase === "pubkey"
+                      ? "Writing operator public key…"
+                      : applyPhase === "docker"
+                        ? `Pulling ${bootstrap.docker_image ?? "image"}…`
+                        : undefined
                 }
               />
             </div>
@@ -952,6 +1043,14 @@ export default function InitPage() {
                     <div className="mt-1 break-all font-mono text-xs text-muted-foreground">
                       {item.path}
                     </div>
+                  ) : null}
+                  {item.kind === "ssh_key" ? (
+                    <Link
+                      href="/secrets"
+                      className="mt-1 inline-block text-xs underline underline-offset-4"
+                    >
+                      Select Atlas SSH key
+                    </Link>
                   ) : null}
                 </li>
               ))}
@@ -1009,11 +1108,13 @@ export default function InitPage() {
               disabled={applying}
               onClick={() => void applyBootstrap()}
             >
-              {applying
-                ? applyPhase === "docker"
-                  ? "Pulling image…"
-                  : "Syncing playbooks…"
-                : "Apply"}
+              {applying && applyPhase === "docker"
+                ? "Pulling image…"
+                : applying && applyPhase === "pubkey"
+                  ? "Writing public key…"
+                  : applying && applyPhase === "sync"
+                    ? "Syncing playbooks…"
+                    : "Apply"}
             </Button>
           </DialogFooter>
         </DialogContent>

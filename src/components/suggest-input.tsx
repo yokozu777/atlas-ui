@@ -39,6 +39,8 @@ export function SuggestInput({
   return (
     <Combobox.Root
       items={items}
+      filteredItems={items}
+      filter={null}
       value={selected}
       inputValue={value}
       onValueChange={(next) => {

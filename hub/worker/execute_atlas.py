@@ -375,6 +375,7 @@ def execute_atlas_run(
         pgid = None
     chunks: list[str] = []
     was_canceling = False
+    return_code: Optional[int] = None
     output_queue: queue.Queue[Optional[str]] = queue.Queue()
 
     def read_output() -> None:
@@ -438,18 +439,47 @@ def execute_atlas_run(
                 http_client.send_log(execution_id, line)
             except Exception as exc:
                 log.warning("[execute_atlas_run] send_log failed: %s", exc)
-        return_code = process.wait()
+        wait_timeout = float(grace_period) + 5.0
+        try:
+            return_code = process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "[execute_atlas_run] process.wait timed out after %ss (canceling=%s)",
+                wait_timeout,
+                was_canceling,
+            )
+            try:
+                http_client.send_log(
+                    execution_id,
+                    f"[worker] process.wait timed out after {wait_timeout}s; "
+                    "finishing execution anyway\n",
+                )
+            except Exception:
+                pass
+            try:
+                stop_atlas_child(process, pgid, execution_id, grace_period)
+            except Exception:
+                pass
+            try:
+                return_code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return_code = -9 if was_canceling else -1
         if process.stdout is not None:
             process.stdout.close()
     finally:
         heartbeat_stop.set()
         try:
-            if process.poll() is None:
+            if process is not None and process.poll() is None:
                 stop_atlas_child(process, pgid, execution_id, grace_period)
-                process.wait(timeout=grace_period)
+                try:
+                    process.wait(timeout=float(grace_period) + 5.0)
+                except subprocess.TimeoutExpired:
+                    pass
         except Exception:
             pass
 
+    if return_code is None:
+        return_code = -9 if was_canceling else -1
     duration = time.time() - start
     if was_canceling:
         status = "CANCELED"

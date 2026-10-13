@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 # Docker: persist JWT/encryption keys under DATA_DIR, then start the hub.
-set -euo pipefail
+set -eu
 export DATA_DIR="${DATA_DIR:-/app/data}"
 mkdir -p "$DATA_DIR"
 python3 lab_secrets.py

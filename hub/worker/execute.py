@@ -1041,8 +1041,31 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                 # Очередь пуста, продолжаем цикл
                 continue
         
-        # Ждём завершения процесса
-        process.wait()
+        # Ждём завершения процесса (bounded — не блокируем CANCELING навечно)
+        wait_timeout = float(grace_period) + 5.0
+        try:
+            process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"[execute_run] process.wait timed out after {wait_timeout}s "
+                f"(canceling={was_canceling}); finishing execution anyway"
+            )
+            http_client.send_log(
+                execution_id,
+                f"[worker] process.wait timed out after {wait_timeout}s; "
+                "continuing to finish execution\n",
+            )
+            try:
+                if pgid:
+                    os.killpg(pgid, signal.SIGKILL)
+                elif process.poll() is None:
+                    process.kill()
+            except Exception as kill_exc:
+                logger.error(f"[execute_run] Error force-killing after wait timeout: {kill_exc}")
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         heartbeat_stop.set()  # Останавливаем heartbeat
         
         # Вычисляем время выполнения
@@ -1060,9 +1083,12 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
         
         # Извлекаем результат для HOST_CHECK и HOST_FACTS
         result_data = None
+        return_code = process.returncode
+        if return_code is None:
+            return_code = -9 if was_canceling else -1
         if execution_type in ('HOST_CHECK', 'HOST_FACTS') and full_output is not None:
             output_text = ''.join(full_output)
-            result_data = extract_result_from_output(output_text, execution_type, process.returncode, run_params=run_params)
+            result_data = extract_result_from_output(output_text, execution_type, return_code, run_params=run_params)
             if result_data:
                 logger.info(f"[execute_run] Extracted result for {execution_type}: {result_data}")
                 # При unreachable логируем хвост вывода Ansible, чтобы увидеть реальную ошибку SSH
@@ -1075,7 +1101,7 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                     if not err_lines and lines:
                         logger.warning(f"[execute_run] HOST_CHECK unreachable - last 8 lines: {' '.join(ln.strip() for ln in lines[-8:] if ln.strip())}")
             else:
-                logger.warning(f"[execute_run] Failed to extract result for {execution_type} from output (len={len(output_text)}, return_code={process.returncode})")
+                logger.warning(f"[execute_run] Failed to extract result for {execution_type} from output (len={len(output_text)}, return_code={return_code})")
                 if output_text:
                     last_lines = output_text.split('\n')[-10:]
                     logger.debug(f"[execute_run] Last 10 lines of output: {''.join(last_lines)}")
@@ -1089,10 +1115,10 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                 status='CANCELED',
                 finished_at=finished_at,
                 duration=duration,
-                return_code=process.returncode,
+                return_code=return_code,
                 result=result_data
             )
-        elif process.returncode == 0:
+        elif return_code == 0:
             logger.info(f"[execute_run] Execution {execution_id} completed successfully")
             if result_data:
                 logger.info(f"[execute_run] Sending result to finish_execution: {result_data}")
@@ -1101,15 +1127,11 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                 status='SUCCESS',
                 finished_at=finished_at,
                 duration=duration,
-                return_code=process.returncode,
+                return_code=return_code,
                 result=result_data
             )
         else:
-            # Если процесс упал во время CANCELING, переходим в FAILED
-            if was_canceling:
-                logger.warning(f"[execute_run] Execution {execution_id} failed during cancel, transitioning to FAILED")
-            else:
-                logger.warning(f"[execute_run] Execution {execution_id} failed with return code {process.returncode}")
+            logger.warning(f"[execute_run] Execution {execution_id} failed with return code {return_code}")
             if result_data:
                 logger.info(f"[execute_run] Sending result to finish_execution (FAILED): {result_data}")
             http_client.finish_execution(
@@ -1117,7 +1139,7 @@ def execute_run(execution_id, execution_data, project_id, http_client, heartbeat
                 status='FAILED',
                 finished_at=finished_at,
                 duration=duration,
-                return_code=process.returncode,
+                return_code=return_code,
                 result=result_data
             )
         

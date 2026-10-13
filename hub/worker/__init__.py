@@ -9,6 +9,7 @@ from .http_client import WorkerHTTPClient
 
 # Старые функции оставлены для обратной совместимости и тестов
 from .claim import claim_next_run
+# recover_stuck_runs is a no-op shim; hub executions_recovery owns CANCELING timeout.
 from .recovery import recover_stuck_runs
 
 __all__ = ['worker_loop', 'execute_run', 'WorkerHTTPClient', 'claim_next_run', 'recover_stuck_runs']

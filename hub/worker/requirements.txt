@@ -6,3 +6,7 @@ mitogen>=0.3.4
 cryptography>=41.0.0
 ansible-core>=2.19,<3
 passlib
+# Trivy: pin transitive CVE fixes (urllib3/msgpack/setuptools)
+urllib3>=2.8.0
+msgpack>=1.2.1
+setuptools>=83.0.0

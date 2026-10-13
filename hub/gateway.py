@@ -364,8 +364,43 @@ except ImportError:
     validate_email = None  # type: ignore
 
 
+def _start_cancel_recovery_sweeper():
+    """Periodic hub-side CANCELING → CANCELED timeout (daemon thread)."""
+    import threading
+
+    from executions_recovery import recover_stuck_canceling, recovery_interval_seconds
+
+    stop = threading.Event()
+
+    def _loop() -> None:
+        interval = recovery_interval_seconds()
+        logger.info(
+            "cancel recovery sweeper started (interval=%ss)",
+            interval,
+        )
+        while not stop.wait(interval):
+            try:
+                recover_stuck_canceling()
+            except Exception:
+                logger.exception("cancel recovery sweeper failed")
+            interval = recovery_interval_seconds()
+
+    thread = threading.Thread(
+        target=_loop,
+        name="cancel-recovery-sweeper",
+        daemon=True,
+    )
+    thread.start()
+    return stop
+
+
 @asynccontextmanager
 async def _hub_lifespan(_app: FastAPI):
+    cancel_recovery_stop = None
+    try:
+        cancel_recovery_stop = _start_cancel_recovery_sweeper()
+    except Exception:
+        logger.exception("failed to start cancel recovery sweeper")
     if auto_install_enabled():
         try:
             result = ensure_clusterctl()
@@ -391,7 +426,11 @@ async def _hub_lifespan(_app: FastAPI):
                 logger.warning("proxmox-library bootstrap: %s", result["error"])
         except Exception:
             logger.exception("proxmox-library bootstrap failed")
-    yield
+    try:
+        yield
+    finally:
+        if cancel_recovery_stop is not None:
+            cancel_recovery_stop.set()
 
 
 app = FastAPI(title="atlas-ui hub", version=HUB_VERSION, lifespan=_hub_lifespan)

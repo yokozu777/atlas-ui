@@ -400,6 +400,128 @@ describe("k8s overlay setup schemas", () => {
   });
 });
 
+describe("atlas-postgresql setup schemas", () => {
+  it("returns fields for vars and secrets even when the file text is empty", () => {
+    const vars = setupSchemaForVarsFile("atlas-postgresql.yml", "");
+    const secrets = setupSchemaForVarsFile("atlas-postgresql.secrets.yml", "");
+    assert.deepEqual(
+      vars.fields.map((field) => field.key),
+      [
+        "cluster_domain",
+        "pgsql_version",
+        "patroni_cluster_name",
+        "vip_address",
+        "virtual_router_id",
+        "etcd_download_mirror_url",
+        "etcd_version",
+        "etcd_client_port",
+        "etcd_peer_port",
+        "etcd_cluster_bootstrap",
+        "patroni_reinit",
+        "patroni_reinit_wipe_etcd",
+        "pgbouncer_listen_port",
+        "haproxy_rw_port",
+        "haproxy_ro_port",
+        "haproxy_maxconn",
+      ],
+    );
+    assert.deepEqual(
+      secrets.fields.map((field) => field.key),
+      ["vip_auth_pass", "pgsql_postgres_password", "pgsql_replicator_password"],
+    );
+  });
+
+  it("marks postgres secrets as passwords and keepalived hint", () => {
+    const secrets = setupSchemaForVarsFile("atlas-postgresql.secrets.yml", "");
+    for (const key of [
+      "vip_auth_pass",
+      "pgsql_postgres_password",
+      "pgsql_replicator_password",
+    ]) {
+      const field = secrets.fields.find((item) => item.key === key);
+      assert.equal(field?.input, "password", key);
+    }
+    const vip = secrets.fields.find((item) => item.key === "vip_auth_pass");
+    assert.match(vip?.hint ?? "", /Maximum 8 characters/);
+  });
+});
+
+describe("atlas-kafka setup schemas", () => {
+  it("returns fields for vars even when the file text is empty", () => {
+    const vars = setupSchemaForVarsFile("atlas-kafka.yml", "");
+    assert.deepEqual(
+      vars.fields.map((field) => field.key),
+      [
+        "kafka_version",
+        "kafka_scala_version",
+        "kafka_broker_port",
+        "kafka_controller_port",
+        "kafka_security_mode",
+        "kafka_download_mirror_url",
+        "kafka_download_url",
+        "kafka_heap_opts",
+      ],
+    );
+  });
+});
+
+describe("atlas-redis setup schemas", () => {
+  it("returns fields for vars and secrets even when the file text is empty", () => {
+    const vars = setupSchemaForVarsFile("atlas-redis.yml", "");
+    const secrets = setupSchemaForVarsFile("atlas-redis.secrets.yml", "");
+    assert.deepEqual(
+      vars.fields.map((field) => field.key),
+      [
+        "redis_version",
+        "redis_cluster_create_mode",
+        "redis_cluster_replicas_per_master",
+        "redis_port",
+        "redis_cluster_bus_port",
+        "vip_address",
+        "virtual_router_id",
+        "redis_proxy_listen_port",
+        "redis_download_mirror_url",
+        "redis_download_use_github_proxy",
+        "redis_download_github_proxy",
+        "haproxy_rw_port",
+        "haproxy_ro_port",
+        "haproxy_log_facility",
+        "haproxy_maxconn",
+        "redis_proxy_type",
+        "predixy_version",
+        "predixy_install_method",
+        "predixy_download_url",
+      ],
+    );
+    assert.deepEqual(
+      secrets.fields.map((field) => field.key),
+      ["vip_auth_pass", "redis_requirepass"],
+    );
+  });
+
+  it("marks redis secrets as passwords and allowEmpty requirepass", () => {
+    const secrets = setupSchemaForVarsFile("atlas-redis.secrets.yml", "");
+    for (const key of ["vip_auth_pass", "redis_requirepass"]) {
+      const field = secrets.fields.find((item) => item.key === key);
+      assert.equal(field?.input, "password", key);
+    }
+    const vip = secrets.fields.find((item) => item.key === "vip_auth_pass");
+    assert.match(vip?.hint ?? "", /Maximum 8 characters/);
+    const requirepass = secrets.fields.find((item) => item.key === "redis_requirepass");
+    assert.equal(requirepass?.allowEmpty, true);
+    assert.match(requirepass?.hint ?? "", /ClusterServerPool\.Password|Predixy/);
+    assert.match(requirepass?.label ?? "", /Predixy/);
+  });
+
+  it("defaults predixy_install_method placeholder to source", () => {
+    const vars = setupSchemaForVarsFile("atlas-redis.yml", "");
+    const method = vars.fields.find((item) => item.key === "predixy_install_method");
+    assert.deepEqual(method?.placeholders, ["source"]);
+    assert.match(method?.hint ?? "", /source/i);
+    assert.match(method?.hint ?? "", /BMI2\/ADX/);
+  });
+});
+
 describe("golden PVE template backup URL", () => {
   it("reads an optional backup and ignores an empty one", () => {
     const map = normalizePveTemplatesMap({

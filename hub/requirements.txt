@@ -8,7 +8,11 @@ PyJWT>=2.8.0
 bcrypt>=4.0.1
 python-dotenv>=1.0.0
 fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
+uvicorn>=0.32.0
 httpx>=0.27.0
 python-multipart>=0.0.9
 ansible-core>=2.19,<3
+# Trivy: pin transitive CVE fixes (urllib3/msgpack/setuptools)
+urllib3>=2.8.0
+msgpack>=1.2.1
+setuptools>=83.0.0

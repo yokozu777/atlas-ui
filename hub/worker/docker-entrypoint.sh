@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/bin/sh
 # Optional: if SSH_KEY points at a file (debug / leftover bind), copy it onto
 # the overlay with 0700/0600, normalize CRLF/BOM, optionally convert to PEM.
 # Atlas-ui injects the Secrets Manager key as SSH_KEY at claim time instead.
-set -euo pipefail
+set -eu
 export DATA_DIR="${DATA_DIR:-/app/data}"
 if [ -z "${GLOBAL_SECRETS_ENCRYPTION_KEY:-}" ] && [ -f "$DATA_DIR/auth/encryption_key" ]; then
   export GLOBAL_SECRETS_ENCRYPTION_KEY="$(tr -d '\n\r' < "$DATA_DIR/auth/encryption_key")"

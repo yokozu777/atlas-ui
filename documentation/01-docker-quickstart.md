@@ -17,7 +17,7 @@ atlas-ui is three containers:
 | Hub API | `yokozu/atlas-ui-hub` | http://localhost:8000 |
 | Worker | `yokozu/atlas-ui-worker` | compose network; talks to hub at `http://hub:8000` |
 
-The console image is Distroless Node (no shell, apt, or git). `docker exec` into `atlas-ui` is not useful — use `docker compose logs ui`, or rebuild the runner `FROM gcr.io/distroless/nodejs22-debian13:debug`. Hub and worker stay on Debian slim because they need git, ansible, ssh, and bash.
+The console image is Next standalone on slim Alpine: only the `node` binary (no npm/yarn/corepack). Hub and worker are Alpine Python images (git, ansible-core, ssh; worker also has docker-cli and sshpass).
 
 ---
 

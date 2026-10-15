@@ -522,6 +522,83 @@ describe("atlas-redis setup schemas", () => {
   });
 });
 
+describe("atlas-jenkins-agent setup schemas", () => {
+  it("returns fields for vars and secrets even when the file text is empty", () => {
+    const vars = setupSchemaForVarsFile("atlas-jenkins-agent.yml", "");
+    const secrets = setupSchemaForVarsFile("atlas-jenkins-agent.secrets.yml", "");
+    assert.deepEqual(
+      vars.fields.map((field) => field.key),
+      [
+        "dns_domain_suffix",
+        "cluster_domain",
+        "jenkins_url",
+        "jenkins_admin_user",
+        "jenkins_agent_hosts",
+        "jenkins_agent_num_executors",
+        "jenkins_ca_cert_download_url",
+        "jenkins_docker_registry_mirrors",
+        "pkg_repo_nginx_ingress_domain",
+        "pkg_repo_base",
+      ],
+    );
+    assert.deepEqual(
+      secrets.fields.map((field) => field.key),
+      ["jenkins_admin_password"],
+    );
+  });
+
+  it("marks jenkins admin password as password input", () => {
+    const secrets = setupSchemaForVarsFile("atlas-jenkins-agent.secrets.yml", "");
+    const password = secrets.fields.find((item) => item.key === "jenkins_admin_password");
+    assert.equal(password?.input, "password");
+  });
+});
+
+describe("atlas-gitlab-runner setup schemas", () => {
+  it("returns fields for vars and secrets even when the file text is empty", () => {
+    const vars = setupSchemaForVarsFile("atlas-gitlab-runner.yml", "");
+    const secrets = setupSchemaForVarsFile("atlas-gitlab-runner.secrets.yml", "");
+    assert.deepEqual(
+      vars.fields.map((field) => field.key),
+      [
+        "dns_domain_suffix",
+        "cluster_domain",
+        "gitlab_url",
+        "gitlab_runner_hosts",
+        "gitlab_runner_executor",
+        "gitlab_runner_token_auto_create",
+        "gitlab_runner_api_runner_type",
+        "gitlab_runner_concurrent",
+        "gitlab_runner_ca_cert_download_url",
+        "gitlab_docker_registry_mirrors",
+        "gitlab_runner_docker_image",
+        "gitlab_runner_docker_privileged",
+        "gitlab_runner_docker_pull_policy",
+        "pkg_repo_nginx_ingress_domain",
+        "pkg_repo_base",
+      ],
+    );
+    assert.deepEqual(
+      secrets.fields.map((field) => field.key),
+      ["gitlab_runner_authentication_token", "gitlab_runner_api_private_token"],
+    );
+  });
+
+  it("marks gitlab runner secrets as passwords and allowEmpty", () => {
+    const secrets = setupSchemaForVarsFile("atlas-gitlab-runner.secrets.yml", "");
+    for (const key of [
+      "gitlab_runner_authentication_token",
+      "gitlab_runner_api_private_token",
+    ]) {
+      const field = secrets.fields.find((item) => item.key === key);
+      assert.equal(field?.input, "password", key);
+      assert.equal(field?.allowEmpty, true, key);
+    }
+    const api = secrets.fields.find((item) => item.key === "gitlab_runner_api_private_token");
+    assert.match(api?.hint ?? "", /auto_create|create_runner/i);
+  });
+});
+
 describe("golden PVE template backup URL", () => {
   it("reads an optional backup and ignores an empty one", () => {
     const map = normalizePveTemplatesMap({
